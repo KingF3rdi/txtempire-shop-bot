@@ -106,7 +106,8 @@ public final class ApiClient {
 		String json = body.toString();
 		pool.execute(() -> {
 			boolean ok = sendNow(path, json);
-			if (!ok && shouldRetry(path)) {
+			// Nur bei Netzwerkfehlern retry — nicht bei 400 (z.B. abgelaufener Code)
+			if (!ok && shouldRetry(path) && lastWasNetworkError) {
 				enqueue(path, json);
 			} else if (ok) {
 				drainRetries();
@@ -114,7 +115,10 @@ public final class ApiClient {
 		});
 	}
 
+	private volatile boolean lastWasNetworkError = false;
+
 	private boolean sendNow(String path, String json) {
+		lastWasNetworkError = false;
 		String base = config.apiUrl.endsWith("/")
 			? config.apiUrl.substring(0, config.apiUrl.length() - 1)
 			: config.apiUrl;
@@ -136,6 +140,7 @@ public final class ApiClient {
 			);
 			return resp.statusCode() < 400;
 		} catch (Exception e) {
+			lastWasNetworkError = true;
 			if (config.debug) {
 				McWatcher.LOGGER.warn(
 					"HTTP-API offline ({}): {} — Webhook wird weiter genutzt",

@@ -13,7 +13,7 @@ public final class ChatParser {
 	private static final Set<String> RESERVED = Set.of(
 		"nachricht", "msg", "whisper", "pn", "pm", "message", "system",
 		"money", "geld", "zahlung", "payment", "link", "verify", "code",
-		"txtempire", "dir", "you", "dich", "du", "sell", "auktionshaus"
+		"txtempire", "dir", "you", "dich", "du", "sell", "auktionshaus", "hugosmp"
 	);
 
 	private static final Pattern[] WHISPERS = new Pattern[] {
@@ -64,34 +64,34 @@ public final class ChatParser {
 	);
 
 	private static final Pattern[] PAYMENTS = new Pattern[] {
-		// "Gamerleo15 » TxTEmpire - $450,000" / "p9x1 » Du - $100"
+		// HugoSMP / ähnlich: "[HugoSMP] Du hast $400000 von 0Moos erhalten."
+		Pattern.compile(
+			"(?i)du\\s+hast\\s+\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)\\s*(?:\\$|€|euro)?\\s+"
+				+ "von\\s+([A-Za-z0-9_]{3,16})\\s+erhalten"
+		),
+		// "Steve hat dir 1.000.000$ gegeben" / "Steve hat dir $500k gegeben"
+		Pattern.compile(
+			"(?i)([A-Za-z0-9_]{3,16})\\s+hat\\s+dir\\s+\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)\\s*"
+				+ "(?:\\$|€|euro|geld|coins?)?\\s+gegeben"
+		),
+		// "Gamerleo15 » TxTEmpire - $450,000"
 		Pattern.compile(
 			"(?i)([A-Za-z0-9_]{3,16})\\s*[»›→>]\\s*"
 				+ "(?:you|dir|dich|du|txtempire|[A-Za-z0-9_]{3,16})\\s*[-–:]\\s*"
-				+ "\\$?\\s*([\\d][\\d.,]*)"
-		),
-		// Historie: "[05.09.26] (17:06) Gamerleo15 » TxTEmpire - $450,000"
-		Pattern.compile(
-			"(?i)\\)\\s*([A-Za-z0-9_]{3,16})\\s*[»›→>]\\s*"
-				+ "(?:you|dir|dich|du|txtempire|[A-Za-z0-9_]{3,16})\\s*[-–:]\\s*"
-				+ "\\$?\\s*([\\d][\\d.,]*)"
+				+ "\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)"
 		),
 		Pattern.compile(
-			"(?i)([A-Za-z0-9_]{3,16})\\s+hat\\s+dir\\s+([\\d][\\d.,]*)\\s*(?:\\$|€|euro|geld|coins?)?\\s+gegeben"
+			"(?i)([A-Za-z0-9_]{3,16})\\s+(?:paid|sent|gave)\\s+(?:you\\s+)?"
+				+ "\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)"
 		),
 		Pattern.compile(
-			"(?i)du\\s+hast\\s+([\\d][\\d.,]*)\\s*(?:\\$|€|euro)?\\s+von\\s+([A-Za-z0-9_]{3,16})\\s+erhalten"
-		),
-		Pattern.compile(
-			"(?i)([A-Za-z0-9_]{3,16})\\s+(?:paid|sent|gave)\\s+(?:you\\s+)?([\\d][\\d.,]*)"
-		),
-		Pattern.compile(
-			"(?i)([A-Za-z0-9_]{3,16})\\s*(?:->|→|»|>)\\s*(?:you|dir|dich)?\\s*:?\\s*([\\d][\\d.,]*)\\s*(?:\\$|€)?"
-		),
-		Pattern.compile(
-			"(?i)(?:zahlung|payment|überweisung|ueberweisung)\\s+(?:von\\s+)?([A-Za-z0-9_]{3,16})\\s*:?\\s*([\\d][\\d.,]*)"
+			"(?i)(?:zahlung|payment|überweisung|ueberweisung)\\s+(?:von\\s+)?"
+				+ "([A-Za-z0-9_]{3,16})\\s*:?\\s*\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)"
 		),
 	};
+
+	/** Patterns bei denen group1=amount, group2=ign */
+	private static final int AMOUNT_FIRST_COUNT = 1;
 
 	private ChatParser() {}
 
@@ -163,7 +163,7 @@ public final class ChatParser {
 			}
 		}
 
-		// Index 3 in PAYMENTS is "du hast … von … erhalten" → amount then ign
+		// Index 0 = "du hast … von … erhalten" → amount dann ign
 		for (int i = 0; i < PAYMENTS.length; i++) {
 			Matcher pm = PAYMENTS[i].matcher(clean);
 			if (!pm.find()) {
@@ -171,7 +171,7 @@ public final class ChatParser {
 			}
 			String ign;
 			String amountRaw;
-			if (i == 3) {
+			if (i < AMOUNT_FIRST_COUNT) {
 				amountRaw = pm.group(1);
 				ign = pm.group(2);
 			} else {
@@ -190,9 +190,15 @@ public final class ChatParser {
 		if (raw == null) {
 			return null;
 		}
-		String s = raw.trim().replace(" ", "");
+		String s = raw.trim().replace(" ", "").replace("$", "").replace("€", "");
 		if (s.isEmpty()) {
 			return null;
+		}
+		double mult = 1;
+		char last = Character.toLowerCase(s.charAt(s.length() - 1));
+		if (last == 'k' || last == 'm' || last == 'b') {
+			mult = last == 'k' ? 1_000d : last == 'm' ? 1_000_000d : 1_000_000_000d;
+			s = s.substring(0, s.length() - 1);
 		}
 		if (s.contains(",") && s.contains(".")) {
 			if (s.lastIndexOf(',') > s.lastIndexOf('.')) {
@@ -211,7 +217,7 @@ public final class ChatParser {
 			s = s.replace(".", "");
 		}
 		try {
-			return Double.parseDouble(s);
+			return Double.parseDouble(s) * mult;
 		} catch (NumberFormatException e) {
 			return null;
 		}

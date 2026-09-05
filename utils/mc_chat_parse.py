@@ -32,6 +32,7 @@ RESERVED_IGNS = frozenset(
         "du",
         "sell",
         "auktionshaus",
+        "hugosmp",
     }
 )
 
@@ -84,35 +85,32 @@ NAME_BEFORE_CODE = re.compile(
 )
 
 PAYMENT_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # "Gamerleo15 » TxTEmpire - $450,000" / "p9x1 » Du - $100"
+    # "[HugoSMP] Du hast $400000 von 0Moos erhalten."
+    re.compile(
+        r"[Dd]u\s+hast\s+\$?\s*(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)\s*(?:\$|€|euro)?\s+"
+        r"von\s+(?P<ign>[A-Za-z0-9_]{3,16})\s+erhalten",
+    ),
+    # "Steve hat dir $500k gegeben"
+    re.compile(
+        r"(?P<ign>[A-Za-z0-9_]{3,16})\s+hat\s+dir\s+\$?\s*"
+        r"(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)\s*(?:\$|€|euro|geld|coins?)?\s+gegeben",
+        re.I,
+    ),
+    # "Gamerleo15 » TxTEmpire - $450,000"
     re.compile(
         r"(?P<ign>[A-Za-z0-9_]{3,16})\s*[»›→>]\s*"
         r"(?:you|dir|dich|du|txtempire|[A-Za-z0-9_]{3,16})\s*[-–:]\s*"
-        r"\$?\s*(?P<amount>[\d][\d.,]*)",
+        r"\$?\s*(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)",
         re.I,
-    ),
-    re.compile(
-        r"(?P<ign>[A-Za-z0-9_]{3,16})\s+hat\s+dir\s+"
-        r"(?P<amount>[\d][\d.,]*)\s*(?:\$|€|euro|geld|coins?)?\s+gegeben",
-        re.I,
-    ),
-    re.compile(
-        r"[Dd]u\s+hast\s+(?P<amount>[\d][\d.,]*)\s*(?:\$|€|euro)?\s+"
-        r"von\s+(?P<ign>[A-Za-z0-9_]{3,16})\s+erhalten",
     ),
     re.compile(
         r"(?P<ign>[A-Za-z0-9_]{3,16})\s+(?:paid|sent|gave)\s+(?:you\s+)?"
-        r"(?P<amount>[\d][\d.,]*)",
-        re.I,
-    ),
-    re.compile(
-        r"(?P<ign>[A-Za-z0-9_]{3,16})\s*(?:->|→|»|>)\s*(?:you|dir|dich)?\s*:?\s*"
-        r"(?P<amount>[\d][\d.,]*)\s*(?:\$|€)?",
+        r"\$?\s*(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)",
         re.I,
     ),
     re.compile(
         r"(?:zahlung|payment|überweisung|ueberweisung)\s+(?:von\s+)?"
-        r"(?P<ign>[A-Za-z0-9_]{3,16})\s*:?\s*(?P<amount>[\d][\d.,]*)",
+        r"(?P<ign>[A-Za-z0-9_]{3,16})\s*:?\s*\$?\s*(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)",
         re.I,
     ),
 )
@@ -135,9 +133,14 @@ def is_valid_ign(name: str | None) -> bool:
 
 
 def parse_amount(raw: str) -> float | None:
-    s = (raw or "").strip().replace(" ", "")
+    s = (raw or "").strip().replace(" ", "").replace("$", "").replace("€", "")
     if not s:
         return None
+    mult = 1.0
+    last = s[-1].lower()
+    if last in ("k", "m", "b") and len(s) > 1:
+        mult = {"k": 1_000.0, "m": 1_000_000.0, "b": 1_000_000_000.0}[last]
+        s = s[:-1]
     if "," in s and "." in s:
         if s.rfind(",") > s.rfind("."):
             s = s.replace(".", "").replace(",", ".")
@@ -152,7 +155,7 @@ def parse_amount(raw: str) -> float | None:
     elif s.count(".") > 1:
         s = s.replace(".", "")
     try:
-        return float(s)
+        return float(s) * mult
     except ValueError:
         return None
 
