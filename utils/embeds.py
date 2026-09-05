@@ -120,13 +120,14 @@ def payment_info_embed(
     details = payee_details_text(settings) or "_Keine Details hinterlegt_"
     embed = base_embed(
         "Zahlungsinformationen",
+        f"# {PAYMENT_NOTICE}\n\n"
         f"**{PAYMENT_NOTICE}**\n\n"
         "Bitte den **gesamten Betrag** überweisen, danach **Payment beweisen** "
         "(IGN + Bild).",
     )
     embed.add_field(
         name="Gesamtbetrag",
-        value=format_price(float(order["total"])),
+        value=f"# {format_price(float(order['total']))}",
         inline=True,
     )
     embed.add_field(
@@ -168,7 +169,10 @@ def payment_info_embed(
         )
     embed.add_field(
         name=f"Zahlung an {name}",
-        value=_field_value(f"**{format_price(float(order['total']))}**\n{details}"),
+        value=_field_value(
+            f"# {PAYMENT_NOTICE}\n"
+            f"**{format_price(float(order['total']))}**\n{details}"
+        ),
         inline=False,
     )
     if money_log_hint:
@@ -188,10 +192,13 @@ def order_cart_panel_embed(
     buyer: discord.abc.User,
     guild: discord.Guild | None = None,
 ) -> discord.Embed:
-    """Warenkorb / Bestell-Panel für Admin und Käufer."""
+    """Warenkorb / Bestell-Panel — nur für Staff (ephemeral / Staff-Button)."""
     embed = base_embed(
         f"Kauf-Warenkorb - Bestellung {order_ref(order)}",
-        f"Käufer: {buyer.mention}\nStatus: `{order['status']}`\n{PAYMENT_NOTICE}",
+        f"# {PAYMENT_NOTICE}\n\n"
+        f"Käufer: {buyer.mention}\n"
+        f"Status: `{order['status']}`\n"
+        f"**{PAYMENT_NOTICE}**",
     )
     lines = _order_item_lines(items)
     embed.add_field(
@@ -250,7 +257,7 @@ def order_cart_panel_embed(
     if order.get("ign"):
         embed.add_field(name="IGN", value=order["ign"], inline=True)
     embed.set_footer(
-        text=f"{PAYMENT_NOTICE} - Käufer: Bestellung anzeigen / Kauf abbrechen - Staff: Payment bestätigen"
+        text=f"{PAYMENT_NOTICE} · Nur Staff · Payment bestätigen"
     )
     return embed
 

@@ -8,7 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.embeds import (
-    order_cart_panel_embed,
+    format_price,
     order_ref,
     payment_info_embed,
     success_embed,
@@ -218,11 +218,8 @@ async def create_order_ticket(
                 "„Links einbetten“ in der Ticket-Kategorie erlauben."
             ) from e
 
-    # 2) Warenkorb-Panel für Admin + Käufer
+    # 2) Öffentlich: Hinweis + Buttons — Warenkorb-Panel nur Staff (ephemeral)
     mention = staff_role.mention if staff_role else "Staff"
-    cart_panel = order_cart_panel_embed(
-        order, items, settings, interaction.user, guild
-    )
     show_fast_buy = bool(credits_enabled) and order_kind == "shop"
     ticket_view = TicketOrderView(bot, show_fast_buy=show_fast_buy)
 
@@ -266,18 +263,20 @@ async def create_order_ticket(
         await _send_with_retry(
             channel,
             content=(
-                f"{interaction.user.mention} {mention} — neue Bestellung {order_ref(order)}!\n"
+                f"# {PAYMENT_NOTICE}\n"
+                f"{interaction.user.mention} {mention} — neue Bestellung "
+                f"{order_ref(order)}!\n\n"
                 f"**{PAYMENT_NOTICE}**\n"
-                "Admin sieht den Warenkorb · "
-                "Käufer: **Bestellung anzeigen** / **Kauf abbrechen**."
+                f"Gesamt: **{format_price(float(order['total']))}**\n\n"
+                "Käufer: **Payment beweisen** / **Kauf abbrechen** · "
+                "Staff: **Warenkorb (Staff)** / **Payment bestätigen**"
                 f"{credits_hint}"
             ),
-            embed=cart_panel,
             view=ticket_view,
         )
     except (discord.Forbidden, discord.HTTPException) as e:
         raise ValueError(
-            f"Zahlungsinfo gesendet, Warenkorb-Panel fehlgeschlagen: {e}"
+            f"Zahlungsinfo gesendet, Ticket-Panel fehlgeschlagen: {e}"
         ) from e
 
     return channel

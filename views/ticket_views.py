@@ -101,21 +101,51 @@ async def action_show_order(
         except discord.HTTPException:
             pass
 
-    await interaction.response.send_message(
-        embeds=[
-            payment_info_embed(
+    staff = await is_staff(bot, interaction)
+    if staff:
+        await interaction.response.send_message(
+            embeds=[
+                payment_info_embed(
+                    order,
+                    settings,
+                    money_log_hint=int(settings.get("ticket_money_log_hint") or 1) != 0,
+                ),
+                order_cart_panel_embed(
+                    order, items, settings, buyer, interaction.guild
+                ),
+            ],
+            ephemeral=True,
+        )
+    else:
+        # Käufer: nur Zahlungsinfos (Warenkorb-Panel ist Staff-only)
+        await interaction.response.send_message(
+            embed=payment_info_embed(
                 order,
                 settings,
                 money_log_hint=int(settings.get("ticket_money_log_hint") or 1) != 0,
             ),
-            order_cart_panel_embed(order, items, settings, buyer, interaction.guild),
-        ],
-        ephemeral=ephemeral,
-    )
+            ephemeral=True,
+        )
+
+
+async def action_show_staff_cart(
+    bot: ShopBot, interaction: discord.Interaction
+) -> None:
+    """Warenkorb-Panel nur für Staff (ephemeral)."""
+    if not await is_staff(bot, interaction):
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Nur Staff",
+                "Das Warenkorb-Panel ist nur für Staff sichtbar.",
+            ),
+            ephemeral=True,
+        )
+        return
+    await action_show_order(bot, interaction, ephemeral=True)
 
 
 async def action_post_panel(bot: ShopBot, interaction: discord.Interaction) -> None:
-    """Postet Zahlungsinfos + Warenkorb-Panel öffentlich ins Ticket."""
+    """Postet Zahlungsinfos öffentlich; Warenkorb nur ephemeral für Staff."""
     channel = interaction.channel
     if not isinstance(channel, discord.TextChannel):
         await interaction.response.send_message(
@@ -152,6 +182,7 @@ async def action_post_panel(bot: ShopBot, interaction: discord.Interaction) -> N
         interaction.guild.get_role(int(staff_role_id)) if staff_role_id else None
     )
     mention = staff_role.mention if staff_role else "Staff"
+    from config import PAYMENT_NOTICE
 
     try:
         await channel.send(
@@ -163,11 +194,10 @@ async def action_post_panel(bot: ShopBot, interaction: discord.Interaction) -> N
         )
         await channel.send(
             content=(
+                f"# {PAYMENT_NOTICE}\n"
                 f"{buyer.mention} {mention} — Bestellung **{order_ref(order)}**\n"
-                "Commands: `/order show` · `/order confirm` · `/order cancel` · `/order close`"
-            ),
-            embed=order_cart_panel_embed(
-                order, items, settings, buyer, interaction.guild
+                f"**{PAYMENT_NOTICE}**\n"
+                "Staff: **Warenkorb (Staff)** · Käufer: **Payment beweisen**"
             ),
             view=TicketOrderView(
                 bot,
@@ -192,10 +222,23 @@ async def action_post_panel(bot: ShopBot, interaction: discord.Interaction) -> N
         )
         return
 
-    await interaction.followup.send(
-        embed=success_embed("Panel gepostet", "Zahlungsinfos + Warenkorb sind im Ticket."),
-        ephemeral=True,
-    )
+    if await is_staff(bot, interaction):
+        await interaction.followup.send(
+            embeds=[
+                order_cart_panel_embed(
+                    order, items, settings, buyer, interaction.guild
+                )
+            ],
+            ephemeral=True,
+        )
+    else:
+        await interaction.followup.send(
+            embed=success_embed(
+                "Panel gepostet",
+                "Zahlungsinfos sind im Ticket. Warenkorb nur für Staff.",
+            ),
+            ephemeral=True,
+        )
 
 
 async def _delete_channel_later(channel: discord.abc.GuildChannel, delay: float, reason: str) -> None:
@@ -640,11 +683,23 @@ class TicketOrderView(discord.ui.View):
         await action_show_order(self.bot, interaction)
 
     @discord.ui.button(
+        label="Warenkorb (Staff)",
+        style=discord.ButtonStyle.secondary,
+        custom_id="ticket:staff_cart",
+        emoji="🔒",
+        row=0,
+    )
+    async def staff_cart(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await action_show_staff_cart(self.bot, interaction)
+
+    @discord.ui.button(
         label="Payment beweisen",
         style=discord.ButtonStyle.primary,
         custom_id="ticket:proof",
         emoji="📎",
-        row=0,
+        row=1,
     )
     async def proof(
         self, interaction: discord.Interaction, button: discord.ui.Button
@@ -675,7 +730,7 @@ class TicketOrderView(discord.ui.View):
         style=discord.ButtonStyle.danger,
         custom_id="ticket:cancel",
         emoji="✖️",
-        row=0,
+        row=1,
     )
     async def cancel(
         self, interaction: discord.Interaction, button: discord.ui.Button
