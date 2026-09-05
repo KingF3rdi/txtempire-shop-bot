@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import discord
@@ -48,17 +49,61 @@ async def collect_pack_from_user(
     item_id: int,
 ) -> None:
     """
-    Nimmt Pack per Drag & Drop entgegen.
-
-    Ohne Message-Content-Intent sind Anhänge in Guild-Channels leer.
-    Deshalb: Datei per DM an den Bot (DMs behalten Attachments) oder
-    Slash `/item setpack` mit Anhang.
+    Pack per Drag & Drop im Channel (ohne DM) oder Fallback per DM / Slash.
     """
     user = interaction.user
     timeout_s = 120.0
+    guild_channel = interaction.channel
 
-    # 1) Versuch: DM (Attachments ohne Privileged Intent verfügbar)
-    dm: discord.DMChannel | None = None
+    # 1) Channel-Drop (Message Content Intent)
+    if isinstance(guild_channel, discord.TextChannel):
+        await interaction.followup.send(
+            embed=success_embed(
+                f"Pack für Item `{item_id}`",
+                f"{user.mention}: Droppe die Pack-Datei **hier in diesen Channel** "
+                f"(innerhalb {int(timeout_s)} Sekunden).\n"
+                "Alternative: DM an den Bot oder `/item setpack` mit Anhang.",
+            ),
+            ephemeral=True,
+        )
+
+        def ch_check(message: discord.Message) -> bool:
+            return (
+                message.author.id == user.id
+                and message.channel.id == guild_channel.id
+                and bool(message.attachments)
+            )
+
+        try:
+            message = await bot.wait_for(
+                "message", check=ch_check, timeout=timeout_s
+            )
+            attachment = message.attachments[0]
+            _rel, pack_link = await apply_pack_attachment(
+                bot, item_id, attachment, channel=guild_channel
+            )
+            try:
+                await message.add_reaction("✅")
+            except discord.HTTPException:
+                pass
+            await interaction.followup.send(
+                embed=success_embed(
+                    "Pack-Link gesetzt",
+                    f"**{attachment.filename}** → Item `{item_id}`\n{pack_link}",
+                ),
+                ephemeral=True,
+            )
+            return
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                embed=error_embed(
+                    "Zeit abgelaufen",
+                    "Keine Datei im Channel erhalten — versuche DM…",
+                ),
+                ephemeral=True,
+            )
+
+    # 2) DM-Fallback
     try:
         dm = await user.create_dm()
         await dm.send(
@@ -71,8 +116,7 @@ async def collect_pack_from_user(
         await interaction.followup.send(
             embed=success_embed(
                 "DM geöffnet",
-                f"{user.mention}: Schau in deine **Direktnachrichten** mit dem Bot "
-                "und sende dort die Pack-Datei per Drag & Drop.",
+                "Schau in deine DMs und sende die Pack-Datei.",
             ),
             ephemeral=True,
         )
@@ -105,24 +149,22 @@ async def collect_pack_from_user(
         return
     except discord.Forbidden:
         pass
-    except TimeoutError:
+    except asyncio.TimeoutError:
         await interaction.followup.send(
             embed=error_embed(
                 "Zeit abgelaufen",
-                "Keine Datei in der DM erhalten.\n"
+                "Keine Datei erhalten.\n"
                 f"Alternative: `/item setpack item_id:{item_id}` und Datei anhängen.",
             ),
             ephemeral=True,
         )
         return
 
-    # 2) Fallback: Slash-Command Hinweis (Guild-Attachments brauchen Message Content Intent)
     await interaction.followup.send(
         embed=error_embed(
-            "DMs geschlossen",
-            "Der Bot konnte dir keine DM schreiben.\n\n"
-            f"**So geht's trotzdem:**\n"
-            f"`/item setpack` → Item wählen → **Datei anhängen** (Drag & Drop am Slash-Command).\n"
+            "Upload nicht möglich",
+            "Channel-Drop und DM fehlgeschlagen.\n\n"
+            f"**So geht's:** `/item setpack` → Item wählen → Datei anhängen.\n"
             f"Item-ID: `{item_id}`",
         ),
         ephemeral=True,
@@ -130,7 +172,7 @@ async def collect_pack_from_user(
 
 
 class PackUploadView(discord.ui.View):
-    """Ein Klick startet den Pack-Upload (DM Drag & Drop)."""
+    """Ein Klick startet den Pack-Upload (Channel-Drop oder DM)."""
 
     def __init__(self, bot: ShopBot, item_id: int, user_id: int) -> None:
         super().__init__(timeout=180)
@@ -147,7 +189,7 @@ class PackUploadView(discord.ui.View):
         return True
 
     @discord.ui.button(
-        label="Pack per Drag & Drop senden",
+        label="Pack hier droppen",
         style=discord.ButtonStyle.success,
         emoji="📎",
     )

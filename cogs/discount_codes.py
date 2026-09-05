@@ -15,9 +15,36 @@ if TYPE_CHECKING:
     from bot import ShopBot
 
 
+def _parse_discount_value(dtype: str, value: str) -> float:
+    if dtype == "percent":
+        raw = value.strip().replace("%", "").replace(",", ".")
+        dval = float(raw)
+        if dval <= 0 or dval > 100:
+            raise ValueError("Prozent muss zwischen 0 und 100 liegen.")
+        return dval
+    return parse_price(value)
+
+
+def _format_code_line(r: dict) -> str:
+    status = "✅" if int(r.get("active") or 0) else "⛔"
+    uses = int(r.get("uses") or 0)
+    mx = r.get("max_uses")
+    lim = f"{uses}/{mx}" if mx is not None else f"{uses}/∞"
+    label = f" — **{r['label']}**" if r.get("label") else ""
+    kind = str(r.get("kind") or "rabatt")
+    kind_icon = "🎬" if kind == "creator" else "🏷️"
+    return (
+        f"{status} {kind_icon} `{r['code']}`{label}\n"
+        f" {format_code_discount(r['discount_type'], float(r['discount_value']))} "
+        f"· {lim} · ≤{int(r.get('max_per_user') or 1)}/User"
+    )
+
+
 class DiscountCodesCog(commands.Cog):
     def __init__(self, bot: ShopBot) -> None:
         self.bot = bot
+
+    # ── /code … (allgemein) ─────────────────────────────────────────
 
     code = app_commands.Group(
         name="code",
@@ -25,11 +52,12 @@ class DiscountCodesCog(commands.Cog):
         default_permissions=discord.Permissions(manage_guild=True),
     )
 
-    @code.command(name="add", description="Neuen Rabatt- oder Creator-Code anlegen")
+    @code.command(name="add", description="Rabatt- oder Creator-Code anlegen")
     @app_commands.describe(
-        code="Code (z.B. CREATOR10)",
+        code="Code (z.B. SUMMER10 oder CREATOR)",
         discount_type="Rabattart",
         value="Wert — z.B. 10 (für 10%) oder 50k (für Betrag)",
+        kind="Rabatt oder Creator-Code",
         max_uses="Max. Gesamtnutzungen (leer = unbegrenzt)",
         max_per_user="Max. Nutzungen pro User (Standard: 1)",
         label="Optional: Creator-/Anzeigename",
@@ -38,7 +66,11 @@ class DiscountCodesCog(commands.Cog):
         discount_type=[
             app_commands.Choice(name="Prozent (%)", value="percent"),
             app_commands.Choice(name="Betrag", value="amount"),
-        ]
+        ],
+        kind=[
+            app_commands.Choice(name="Rabatt-Code", value="rabatt"),
+            app_commands.Choice(name="Creator-Code", value="creator"),
+        ],
     )
     async def code_add(
         self,
@@ -46,6 +78,7 @@ class DiscountCodesCog(commands.Cog):
         code: str,
         discount_type: app_commands.Choice[str],
         value: str,
+        kind: app_commands.Choice[str] | None = None,
         max_uses: app_commands.Range[int, 1, 1_000_000] | None = None,
         max_per_user: app_commands.Range[int, 1, 100] = 1,
         label: str | None = None,
@@ -58,14 +91,9 @@ class DiscountCodesCog(commands.Cog):
             return
 
         dtype = discount_type.value
+        kind_v = kind.value if kind else "rabatt"
         try:
-            if dtype == "percent":
-                raw = value.strip().replace("%", "").replace(",", ".")
-                dval = float(raw)
-                if dval <= 0 or dval > 100:
-                    raise ValueError("Prozent muss zwischen 0 und 100 liegen.")
-            else:
-                dval = parse_price(value)
+            dval = _parse_discount_value(dtype, value)
         except ValueError as e:
             await interaction.response.send_message(
                 embed=error_embed("Ungültiger Wert", str(e)),
@@ -80,7 +108,8 @@ class DiscountCodesCog(commands.Cog):
             await interaction.response.send_message(
                 embed=error_embed(
                     "Code existiert",
-                    f"`{code.strip().upper()}` gibt es bereits.",
+                    f"`{code.strip().upper()}` gibt es bereits.\n"
+                    "Nutze `/code set` oder `/cc set` zum Ändern.",
                 ),
                 ephemeral=True,
             )
@@ -96,6 +125,7 @@ class DiscountCodesCog(commands.Cog):
                 max_per_user=int(max_per_user),
                 label=label or "",
                 created_by=interaction.user.id,
+                kind=kind_v,
             )
         except Exception as e:
             await interaction.response.send_message(
@@ -109,13 +139,84 @@ class DiscountCodesCog(commands.Cog):
             if max_uses is not None
             else "**unbegrenzt** gesamt"
         )
+        kind_txt = "Creator-Code" if kind_v == "creator" else "Rabatt-Code"
         await interaction.response.send_message(
             embed=success_embed(
-                "Code erstellt",
+                f"{kind_txt} erstellt",
                 f"`{code.strip().upper()}` — {format_code_discount(dtype, dval)}\n"
                 f"Limit: {limit_txt} · max. **{max_per_user}**/User"
                 + (f"\nLabel: **{label}**" if label else "")
-                + f"\nID: `{code_id}`",
+                + f"\nID: `{code_id}`\n\n"
+                "Im Ticket: **Rabatt / Creator Code** → Preis wird übernommen.",
+            ),
+            ephemeral=True,
+        )
+
+    @code.command(
+        name="set",
+        description="Rabatt eines bestehenden Codes festlegen / ändern",
+    )
+    @app_commands.describe(
+        code="Bestehender Code",
+        discount_type="Neue Rabattart",
+        value="Neuer Wert — z.B. 15 oder 100k",
+        label="Optional neues Label",
+        kind="Optional Typ ändern",
+    )
+    @app_commands.choices(
+        discount_type=[
+            app_commands.Choice(name="Prozent (%)", value="percent"),
+            app_commands.Choice(name="Betrag", value="amount"),
+        ],
+        kind=[
+            app_commands.Choice(name="Rabatt-Code", value="rabatt"),
+            app_commands.Choice(name="Creator-Code", value="creator"),
+        ],
+    )
+    async def code_set(
+        self,
+        interaction: discord.Interaction,
+        code: str,
+        discount_type: app_commands.Choice[str],
+        value: str,
+        label: str | None = None,
+        kind: app_commands.Choice[str] | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        if not await is_staff(self.bot, interaction):
+            await interaction.response.send_message(
+                embed=error_embed("Keine Berechtigung"), ephemeral=True
+            )
+            return
+        row = await self.bot.db.get_discount_code(interaction.guild.id, code)
+        if not row:
+            await interaction.response.send_message(
+                embed=error_embed("Nicht gefunden", f"Code `{code}` unbekannt."),
+                ephemeral=True,
+            )
+            return
+        try:
+            dval = _parse_discount_value(discount_type.value, value)
+        except ValueError as e:
+            await interaction.response.send_message(
+                embed=error_embed("Ungültiger Wert", str(e)), ephemeral=True
+            )
+            return
+        fields: dict = {
+            "discount_type": discount_type.value,
+            "discount_value": dval,
+        }
+        if label is not None:
+            fields["label"] = label.strip()[:100]
+        if kind is not None:
+            fields["kind"] = kind.value
+        await self.bot.db.update_discount_code(int(row["id"]), **fields)
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Code aktualisiert",
+                f"`{row['code']}` → "
+                f"{format_code_discount(discount_type.value, dval)}\n"
+                "Neue Tickets / erneutes Einlösen übernehmen den Rabatt.",
             ),
             ephemeral=True,
         )
@@ -130,18 +231,7 @@ class DiscountCodesCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        lines: list[str] = []
-        for r in rows[:40]:
-            status = "✅" if int(r.get("active") or 0) else "⛔"
-            uses = int(r.get("uses") or 0)
-            mx = r.get("max_uses")
-            lim = f"{uses}/{mx}" if mx is not None else f"{uses}/∞"
-            label = f" ({r['label']})" if r.get("label") else ""
-            lines.append(
-                f"{status} `{r['code']}`{label} — "
-                f"{format_code_discount(r['discount_type'], float(r['discount_value']))} "
-                f"· {lim} · ≤{int(r.get('max_per_user') or 1)}/User"
-            )
+        lines = [_format_code_line(r) for r in rows[:40]]
         await interaction.response.send_message(
             embed=success_embed("Rabatt- / Creator-Codes", "\n".join(lines)[:3900]),
             ephemeral=True,
@@ -248,6 +338,187 @@ class DiscountCodesCog(commands.Cog):
         await self.bot.db.db.commit()
         await interaction.response.send_message(
             embed=success_embed("Gelöscht", f"`{row['code']}` entfernt."),
+            ephemeral=True,
+        )
+
+    # ── /cc … (Creator-Codes) ───────────────────────────────────────
+
+    cc = app_commands.Group(
+        name="cc",
+        description="Creator-Codes",
+    )
+
+    @cc.command(
+        name="info",
+        description="Übersicht aller Creator-Codes",
+    )
+    async def cc_info(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Nur auf dem Server"), ephemeral=True
+            )
+            return
+        staff = await is_staff(self.bot, interaction)
+        rows = await self.bot.db.list_discount_codes(
+            interaction.guild.id, kind="creator"
+        )
+        # Fallback: Codes mit Label als Creator anzeigen, falls kind noch fehlt
+        if not rows:
+            all_rows = await self.bot.db.list_discount_codes(interaction.guild.id)
+            rows = [
+                r
+                for r in all_rows
+                if str(r.get("kind") or "") == "creator" or (r.get("label") or "").strip()
+            ]
+        if not staff:
+            rows = [r for r in rows if int(r.get("active") or 0)]
+        if not rows:
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Creator-Codes",
+                    "Keine Creator-Codes angelegt.\n"
+                    "Staff: `/cc add` oder `/code add kind:Creator-Code`.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        lines = [_format_code_line(r) for r in rows[:40]]
+        embed = success_embed(
+            "🎬 Creator-Code Übersicht",
+            "\n".join(lines)[:3900],
+        )
+        embed.set_footer(
+            text="Im Kauf-Ticket: Button „Rabatt / Creator Code“ → Rabatt wird übernommen"
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @cc.command(name="add", description="Creator-Code anlegen (Staff)")
+    @app_commands.describe(
+        code="Code (z.B. FERDI10)",
+        discount_type="Rabattart",
+        value="Wert — z.B. 10 (%) oder 50k",
+        creator="Creator-Name / Label",
+        max_uses="Max. Gesamtnutzungen (leer = unbegrenzt)",
+        max_per_user="Max. pro User",
+    )
+    @app_commands.choices(
+        discount_type=[
+            app_commands.Choice(name="Prozent (%)", value="percent"),
+            app_commands.Choice(name="Betrag", value="amount"),
+        ]
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def cc_add(
+        self,
+        interaction: discord.Interaction,
+        code: str,
+        discount_type: app_commands.Choice[str],
+        value: str,
+        creator: str | None = None,
+        max_uses: app_commands.Range[int, 1, 1_000_000] | None = None,
+        max_per_user: app_commands.Range[int, 1, 100] = 1,
+    ) -> None:
+        assert interaction.guild is not None
+        if not await is_staff(self.bot, interaction):
+            await interaction.response.send_message(
+                embed=error_embed("Keine Berechtigung"), ephemeral=True
+            )
+            return
+        try:
+            dval = _parse_discount_value(discount_type.value, value)
+        except ValueError as e:
+            await interaction.response.send_message(
+                embed=error_embed("Ungültiger Wert", str(e)), ephemeral=True
+            )
+            return
+        if await self.bot.db.get_discount_code(interaction.guild.id, code):
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Existiert",
+                    f"`{code.upper()}` gibt es schon — `/cc set` zum Ändern.",
+                ),
+                ephemeral=True,
+            )
+            return
+        code_id = await self.bot.db.create_discount_code(
+            interaction.guild.id,
+            code,
+            discount_type=discount_type.value,
+            discount_value=dval,
+            max_uses=int(max_uses) if max_uses is not None else None,
+            max_per_user=int(max_per_user),
+            label=creator or "",
+            created_by=interaction.user.id,
+            kind="creator",
+        )
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Creator-Code erstellt",
+                f"`{code.strip().upper()}` — "
+                f"{format_code_discount(discount_type.value, dval)}\n"
+                + (f"Creator: **{creator}**\n" if creator else "")
+                + f"ID `{code_id}` · Übersicht: `/cc info`",
+            ),
+            ephemeral=True,
+        )
+
+    @cc.command(name="set", description="Creator-Code-Rabatt festlegen (Staff)")
+    @app_commands.describe(
+        code="Creator-Code",
+        discount_type="Rabattart",
+        value="Neuer Rabattwert",
+        creator="Optional neues Label",
+    )
+    @app_commands.choices(
+        discount_type=[
+            app_commands.Choice(name="Prozent (%)", value="percent"),
+            app_commands.Choice(name="Betrag", value="amount"),
+        ]
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def cc_set(
+        self,
+        interaction: discord.Interaction,
+        code: str,
+        discount_type: app_commands.Choice[str],
+        value: str,
+        creator: str | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        if not await is_staff(self.bot, interaction):
+            await interaction.response.send_message(
+                embed=error_embed("Keine Berechtigung"), ephemeral=True
+            )
+            return
+        row = await self.bot.db.get_discount_code(interaction.guild.id, code)
+        if not row:
+            await interaction.response.send_message(
+                embed=error_embed("Nicht gefunden"), ephemeral=True
+            )
+            return
+        try:
+            dval = _parse_discount_value(discount_type.value, value)
+        except ValueError as e:
+            await interaction.response.send_message(
+                embed=error_embed("Ungültiger Wert", str(e)), ephemeral=True
+            )
+            return
+        fields: dict = {
+            "discount_type": discount_type.value,
+            "discount_value": dval,
+            "kind": "creator",
+        }
+        if creator is not None:
+            fields["label"] = creator.strip()[:100]
+        await self.bot.db.update_discount_code(int(row["id"]), **fields)
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Creator-Code aktualisiert",
+                f"`{row['code']}` → "
+                f"{format_code_discount(discount_type.value, dval)}\n"
+                "Beim Einlösen im Ticket wird der neue Rabatt übernommen.",
+            ),
             ephemeral=True,
         )
 

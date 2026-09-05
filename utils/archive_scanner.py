@@ -129,12 +129,92 @@ MAX_NAME_LEN = 512
 MAX_CONTENT_PEEK = 64 * 1024  # 64 KB Text-Peek pro Datei
 MAX_ARCHIVE_BYTES = 40 * 1024 * 1024
 
+SCAN_DISCLAIMER = (
+    "⚠️ **Keine 100 %-Garantie:** Dieser Scan ist eine Heuristik "
+    "(Namen, Endungen, bekannte Muster). Er kann Threats übersehen "
+    "oder Fehlalarme erzeugen — **kein Ersatz** für einen echten Antivirus."
+)
+
 
 @dataclass
 class Finding:
     severity: str  # critical | high | medium
     path: str
     reason: str
+
+
+def explain_finding(finding: Finding) -> str:
+    """Klartext: was erkannt wurde und warum das relevant ist."""
+    r = finding.reason.lower()
+    path = finding.path
+
+    if "doppelte dateiendung" in r:
+        detail = (
+            "Die Datei nutzt eine **doppelte Endung** (z.B. `bild.png.exe`). "
+            "So wirken gefährliche Dateien oft harmlos."
+        )
+    elif "gefährliche dateiendung" in r:
+        detail = (
+            f"Im Archiv liegt eine Datei mit riskanter Endung. "
+            f"In Minecraft-/Client-Packs sind `.exe`, `.dll`, `.bat`, `.ps1` usw. "
+            f"meist **kein normaler Inhalt** — oft Malware/Loader."
+        )
+    elif "windows-executable" in r or "mz" in r:
+        detail = (
+            "Die Datei beginnt mit einem **Windows-PE-Header (MZ)**, obwohl die "
+            "Endung etwas anderes vorgibt. Inhalt wurde als Executable getarnt."
+        )
+    elif "verdächtiger name" in r or "muster:" in r and "name" in r:
+        detail = (
+            "Der **Dateiname/Pfad** matcht bekannte RAT-/Stealer-/Loader-Muster "
+            f"({finding.reason}). Das ist ein starkes Indiz auf Malware-Namen."
+        )
+    elif "verdächtiger inhalt" in r:
+        detail = (
+            "Im **Dateiinhalt** wurden verdächtige Strings/Muster gefunden "
+            "(z.B. Download-URLs, PowerShell, Persistence). "
+            f"Treffer: {finding.reason}"
+        )
+    elif "pfad-traversal" in r or "absoluter pfad" in r:
+        detail = (
+            "Der Eintrag nutzt `..` oder einen absoluten Pfad — typisch für "
+            "Archives, die Dateien **außerhalb** des Zielordners schreiben wollen."
+        )
+    elif "persistence" in r or "verdächtiger pfad" in r:
+        detail = (
+            "Der Pfad deutet auf **Autostart/Persistence** hin "
+            "(z.B. Startup-Ordner). Ungewöhnlich in normalen Packs."
+        )
+    elif "zip-bomb" in r or "viele einträge" in r:
+        detail = (
+            "Ungewöhnlich viele Archiv-Einträge — kann auf **Zip-Bomb** "
+            "oder Obfuscation hindeuten."
+        )
+    elif "obfuscation" in r or "langer pfad" in r:
+        detail = (
+            "Extrem langer Dateipfad — oft eingesetzt, um Scans/Viewer "
+            "zu erschweren (Obfuscation)."
+        )
+    else:
+        detail = (
+            f"Erkannt: **{finding.reason}**. Bitte Datei und Herkunft prüfen, "
+            "bevor du sie öffnest oder ausführst."
+        )
+
+    sev = {
+        "critical": "KRITISCH",
+        "high": "HOCH",
+        "medium": "MITTEL",
+    }.get(finding.severity, finding.severity.upper())
+    icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(
+        finding.severity, "⚪"
+    )
+    short_path = path if len(path) <= 90 else path[:87] + "…"
+    return (
+        f"{icon} **{sev}** — `{short_path}`\n"
+        f" **Was:** {finding.reason}\n"
+        f" **Bedeutung:** {detail}"
+    )
 
 
 @dataclass
@@ -153,23 +233,49 @@ class ScanResult:
     def is_blocked(self) -> bool:
         return any(f.severity in ("critical", "high") for f in self.findings)
 
-    def summary(self, *, limit: int = 15) -> str:
+    def summary(self, *, limit: int = 12) -> str:
         if self.error:
-            return f"Scan-Fehler: {self.error}"
+            return (
+                f"Scan-Fehler: {self.error}\n\n{SCAN_DISCLAIMER}"
+            )
         if not self.findings:
-            return f"✅ Sauber — {self.entry_count} Einträge in `{self.filename}` ({self.archive_type})"
+            return (
+                f"✅ **Keine bekannten verdächtigen Muster** gefunden\n"
+                f"`{self.filename}` · {self.archive_type} · "
+                f"{self.entry_count} Einträge\n\n"
+                f"{SCAN_DISCLAIMER}"
+            )
+        crit = sum(1 for f in self.findings if f.severity == "critical")
+        high = sum(1 for f in self.findings if f.severity == "high")
+        med = sum(1 for f in self.findings if f.severity == "medium")
         lines = [
             f"⚠️ **{len(self.findings)} Treffer** in `{self.filename}` "
-            f"({self.archive_type}, {self.entry_count} Einträge):"
+            f"({self.archive_type}, {self.entry_count} Einträge)",
+            f"Aufschlüsselung: 🔴 {crit} kritisch · 🟠 {high} hoch · 🟡 {med} mittel",
+            "",
+            "**Was genau erkannt wurde:**",
         ]
         for f in self.findings[:limit]:
-            icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(
-                f.severity, "⚪"
-            )
-            lines.append(f"{icon} `{f.path[:80]}` — {f.reason}")
+            lines.append(explain_finding(f))
+            lines.append("")
         if len(self.findings) > limit:
-            lines.append(f"_…und {len(self.findings) - limit} weitere_")
-        return "\n".join(lines)
+            lines.append(
+                f"_…und {len(self.findings) - limit} weitere Treffer "
+                f"(Liste gekürzt)._"
+            )
+            lines.append("")
+        lines.append(
+            "👉 **Empfehlung:** Datei nicht ausführen/öffnen, Herkunft prüfen, "
+            "ggf. Staff informieren."
+        )
+        lines.append("")
+        lines.append(SCAN_DISCLAIMER)
+        text = "\n".join(lines).strip()
+        # Discord embed description max ~4096
+        if len(text) > 3900:
+            text = text[:3890] + "\n_…gekürzt_"
+        return text
+
 
 
 def _check_entry_name(name: str, findings: list[Finding]) -> None:

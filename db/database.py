@@ -9,6 +9,12 @@ from typing import Any, Optional
 OPEN_STATUSES = ("pending", "awaiting_proof", "awaiting_confirm")
 
 
+def _utc_now_str() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 class Database:
     def __init__(self, path: Path | str) -> None:
         self.path = str(path)
@@ -45,7 +51,11 @@ class Database:
                 payee_a_details TEXT NOT NULL DEFAULT '',
                 payee_b_label TEXT NOT NULL DEFAULT '',
                 payee_b_details TEXT NOT NULL DEFAULT '',
-                delete_on_cancel INTEGER NOT NULL DEFAULT 0
+                delete_on_cancel INTEGER NOT NULL DEFAULT 0,
+                scan_premium_role_id INTEGER,
+                scan_log_channel_id INTEGER,
+                changelog_channel_id INTEGER,
+                msg_channel_id INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS categories (
@@ -153,6 +163,7 @@ class Database:
                 max_per_user INTEGER NOT NULL DEFAULT 1,
                 active INTEGER NOT NULL DEFAULT 1,
                 label TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'rabatt',
                 created_by INTEGER,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE (guild_id, code)
@@ -261,6 +272,13 @@ class Database:
             ("orders", "discount_code_id", "INTEGER"),
             ("orders", "discount_amount", "REAL NOT NULL DEFAULT 0"),
             ("orders", "original_total", "REAL"),
+            ("guild_settings", "scan_premium_role_id", "INTEGER"),
+            ("guild_settings", "scan_log_channel_id", "INTEGER"),
+            ("guild_settings", "changelog_channel_id", "INTEGER"),
+            ("guild_settings", "msg_channel_id", "INTEGER"),
+            ("guild_settings", "vouch_stats_message_id", "INTEGER"),
+            ("orders", "vouch_rating", "INTEGER"),
+            ("discount_codes", "kind", "TEXT NOT NULL DEFAULT 'rabatt'"),
         ):
             try:
                 await self.db.execute(
@@ -342,6 +360,126 @@ class Database:
                     guild_id INTEGER PRIMARY KEY,
                     channel_id INTEGER,
                     message_id INTEGER
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scan_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    filename TEXT NOT NULL DEFAULT '',
+                    outcome TEXT NOT NULL,
+                    category TEXT NOT NULL DEFAULT 'other',
+                    finding_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS service_tickets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    ticket_type TEXT NOT NULL,
+                    channel_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    subject TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS service_panels (
+                    guild_id INTEGER NOT NULL,
+                    panel_type TEXT NOT NULL,
+                    channel_id INTEGER,
+                    message_id INTEGER,
+                    PRIMARY KEY (guild_id, panel_type)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS boost_claims (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    boost_count INTEGER NOT NULL DEFAULT 1,
+                    packs_allowed INTEGER NOT NULL DEFAULT 5,
+                    packs_claimed INTEGER NOT NULL DEFAULT 0,
+                    claimed_item_ids TEXT NOT NULL DEFAULT '[]',
+                    last_thanks_at TEXT,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (guild_id, user_id)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS giveaways (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER,
+                    message_id INTEGER,
+                    item_id INTEGER NOT NULL,
+                    prize_name TEXT NOT NULL DEFAULT '',
+                    winners_count INTEGER NOT NULL DEFAULT 1,
+                    ends_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    host_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS giveaway_entries (
+                    giveaway_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (giveaway_id, user_id),
+                    FOREIGN KEY (giveaway_id) REFERENCES giveaways(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS giveaway_winners (
+                    giveaway_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    delivered INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (giveaway_id, user_id)
                 )
                 """
             )
@@ -1014,18 +1152,20 @@ class Database:
         max_per_user: int = 1,
         label: str = "",
         created_by: int | None = None,
+        kind: str = "rabatt",
     ) -> int:
         normalized = code.strip().upper()
         if not normalized:
             raise ValueError("Code darf nicht leer sein.")
         if discount_type not in ("percent", "amount"):
             raise ValueError("discount_type muss percent oder amount sein.")
+        kind_n = "creator" if kind == "creator" else "rabatt"
         cur = await self.db.execute(
             """
             INSERT INTO discount_codes
               (guild_id, code, discount_type, discount_value, max_uses,
-               max_per_user, label, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               max_per_user, label, created_by, kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
@@ -1036,6 +1176,7 @@ class Database:
                 max(1, int(max_per_user)),
                 (label or "").strip()[:100],
                 created_by,
+                kind_n,
             ),
         )
         await self.db.commit()
@@ -1062,16 +1203,20 @@ class Database:
         return dict(row) if row else None
 
     async def list_discount_codes(
-        self, guild_id: int, *, active_only: bool = False
+        self, guild_id: int, *, active_only: bool = False, kind: str | None = None
     ) -> list[dict[str, Any]]:
         q = """
             SELECT * FROM discount_codes
             WHERE guild_id = ?
         """
+        params: list[Any] = [guild_id]
         if active_only:
             q += " AND active = 1"
+        if kind:
+            q += " AND COALESCE(kind, 'rabatt') = ?"
+            params.append(kind)
         q += " ORDER BY active DESC, code ASC"
-        rows = await self.fetchall(q, (guild_id,))
+        rows = await self.fetchall(q, tuple(params))
         return [dict(r) for r in rows]
 
     async def update_discount_code(self, code_id: int, **fields: Any) -> None:
@@ -1266,6 +1411,100 @@ class Database:
         await self.db.commit()
         return await self.get_scan_usage_today(guild_id, user_id)
 
+    async def record_scan_result(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        filename: str,
+        outcome: str,
+        category: str,
+        finding_count: int = 0,
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO scan_results
+              (guild_id, user_id, filename, outcome, category, finding_count)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                user_id,
+                (filename or "")[:200],
+                outcome,
+                category[:64],
+                int(finding_count),
+            ),
+        )
+        await self.db.commit()
+
+    async def get_scan_stats(self, guild_id: int) -> dict[str, Any]:
+        total_scans = await self.fetchone(
+            "SELECT COUNT(*) AS cnt FROM scan_results WHERE guild_id = ?",
+            (guild_id,),
+        )
+        by_outcome = await self.fetchall(
+            """
+            SELECT outcome, COUNT(*) AS cnt
+            FROM scan_results WHERE guild_id = ?
+            GROUP BY outcome
+            """,
+            (guild_id,),
+        )
+        by_category = await self.fetchall(
+            """
+            SELECT category, COUNT(*) AS cnt
+            FROM scan_results
+            WHERE guild_id = ? AND outcome != 'clean'
+            GROUP BY category
+            ORDER BY cnt DESC
+            """,
+            (guild_id,),
+        )
+        usage_sum = await self.fetchone(
+            "SELECT COALESCE(SUM(count), 0) AS total FROM scan_usage WHERE guild_id = ?",
+            (guild_id,),
+        )
+        premium_buys = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt FROM orders
+            WHERE guild_id = ? AND order_kind = 'scan_premium'
+              AND status = 'completed'
+            """,
+            (guild_id,),
+        )
+        premium_buyers = await self.fetchone(
+            """
+            SELECT COUNT(DISTINCT user_id) AS cnt FROM orders
+            WHERE guild_id = ? AND order_kind = 'scan_premium'
+              AND status = 'completed'
+            """,
+            (guild_id,),
+        )
+        active_premium = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt FROM scan_premium
+            WHERE guild_id = ?
+              AND datetime(expires_at) > datetime('now')
+            """,
+            (guild_id,),
+        )
+        outcome_map = {str(r["outcome"]): int(r["cnt"]) for r in by_outcome}
+        return {
+            "total_logged": int(total_scans["cnt"]) if total_scans else 0,
+            "usage_total": int(usage_sum["total"]) if usage_sum else 0,
+            "clean": outcome_map.get("clean", 0),
+            "suspicious": outcome_map.get("suspicious", 0),
+            "blocked": outcome_map.get("blocked", 0),
+            "error": outcome_map.get("error", 0),
+            "categories": [
+                (str(r["category"]), int(r["cnt"])) for r in by_category
+            ],
+            "premium_purchases": int(premium_buys["cnt"]) if premium_buys else 0,
+            "premium_buyers": int(premium_buyers["cnt"]) if premium_buyers else 0,
+            "premium_active": int(active_premium["cnt"]) if active_premium else 0,
+        }
+
     async def get_scan_panel(self, guild_id: int) -> dict[str, Any] | None:
         row = await self.fetchone(
             "SELECT * FROM scan_panel WHERE guild_id = ?", (guild_id,)
@@ -1303,6 +1542,367 @@ class Database:
         )
         return [int(r["guild_id"]) for r in rows]
 
+    # ── Service tickets (Support / Bewerbung) ───────────────────────
+
+    async def create_service_ticket(
+        self,
+        guild_id: int,
+        user_id: int,
+        ticket_type: str,
+        *,
+        subject: str = "",
+        channel_id: int | None = None,
+    ) -> int:
+        cur = await self.db.execute(
+            """
+            INSERT INTO service_tickets
+              (guild_id, user_id, ticket_type, channel_id, subject)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (guild_id, user_id, ticket_type, channel_id, subject[:500]),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)  # type: ignore[arg-type]
+
+    async def update_service_ticket(self, ticket_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [ticket_id]
+        await self.db.execute(
+            f"UPDATE service_tickets SET {cols} WHERE id = ?", values
+        )
+        await self.db.commit()
+
+    async def get_service_ticket(self, ticket_id: int) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            "SELECT * FROM service_tickets WHERE id = ?", (ticket_id,)
+        )
+        return dict(row) if row else None
+
+    async def get_service_ticket_by_channel(
+        self, channel_id: int
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            "SELECT * FROM service_tickets WHERE channel_id = ?",
+            (channel_id,),
+        )
+        return dict(row) if row else None
+
+    async def count_open_service_tickets(
+        self, guild_id: int, user_id: int, ticket_type: str
+    ) -> int:
+        row = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt FROM service_tickets
+            WHERE guild_id = ? AND user_id = ? AND ticket_type = ?
+              AND status = 'open'
+            """,
+            (guild_id, user_id, ticket_type),
+        )
+        return int(row["cnt"]) if row else 0
+
+    async def get_service_panel(
+        self, guild_id: int, panel_type: str
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            """
+            SELECT * FROM service_panels
+            WHERE guild_id = ? AND panel_type = ?
+            """,
+            (guild_id, panel_type),
+        )
+        return dict(row) if row else None
+
+    async def set_service_panel(
+        self,
+        guild_id: int,
+        panel_type: str,
+        *,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO service_panels (guild_id, panel_type, channel_id, message_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, panel_type) DO UPDATE SET
+                channel_id = excluded.channel_id,
+                message_id = excluded.message_id
+            """,
+            (guild_id, panel_type, channel_id, message_id),
+        )
+        await self.db.commit()
+
+    async def list_service_panels(self) -> list[dict[str, Any]]:
+        rows = await self.fetchall(
+            """
+            SELECT * FROM service_panels
+            WHERE message_id IS NOT NULL AND channel_id IS NOT NULL
+            """
+        )
+        return [dict(r) for r in rows]
+
+    # ── Boost rewards ───────────────────────────────────────────────
+
+    async def get_boost_claim(
+        self, guild_id: int, user_id: int
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            """
+            SELECT * FROM boost_claims
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        return dict(row) if row else None
+
+    async def upsert_boost_claim(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        boost_count: int,
+        packs_allowed: int,
+        thanks: bool = False,
+    ) -> dict[str, Any]:
+        existing = await self.get_boost_claim(guild_id, user_id)
+        if existing is None:
+            await self.db.execute(
+                """
+                INSERT INTO boost_claims
+                  (guild_id, user_id, boost_count, packs_allowed, packs_claimed,
+                   claimed_item_ids, last_thanks_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, '[]', ?, datetime('now'))
+                """,
+                (
+                    guild_id,
+                    user_id,
+                    int(boost_count),
+                    int(packs_allowed),
+                    _utc_now_str() if thanks else None,
+                ),
+            )
+        else:
+            new_count = max(int(existing["boost_count"]), int(boost_count))
+            new_allowed = max(int(existing["packs_allowed"]), int(packs_allowed))
+            if thanks:
+                await self.db.execute(
+                    """
+                    UPDATE boost_claims SET
+                      boost_count = ?,
+                      packs_allowed = ?,
+                      last_thanks_at = datetime('now'),
+                      updated_at = datetime('now')
+                    WHERE guild_id = ? AND user_id = ?
+                    """,
+                    (new_count, new_allowed, guild_id, user_id),
+                )
+            else:
+                await self.db.execute(
+                    """
+                    UPDATE boost_claims SET
+                      boost_count = ?,
+                      packs_allowed = ?,
+                      updated_at = datetime('now')
+                    WHERE guild_id = ? AND user_id = ?
+                    """,
+                    (new_count, new_allowed, guild_id, user_id),
+                )
+        await self.db.commit()
+        row = await self.get_boost_claim(guild_id, user_id)
+        assert row is not None
+        return row
+
+    async def add_boost_claimed_items(
+        self, guild_id: int, user_id: int, item_ids: list[int]
+    ) -> dict[str, Any] | None:
+        import json
+
+        row = await self.get_boost_claim(guild_id, user_id)
+        if not row:
+            return None
+        try:
+            claimed = json.loads(row.get("claimed_item_ids") or "[]")
+        except json.JSONDecodeError:
+            claimed = []
+        if not isinstance(claimed, list):
+            claimed = []
+        for iid in item_ids:
+            if int(iid) not in claimed:
+                claimed.append(int(iid))
+        new_count = len(claimed)
+        await self.db.execute(
+            """
+            UPDATE boost_claims SET
+              claimed_item_ids = ?,
+              packs_claimed = ?,
+              updated_at = datetime('now')
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (json.dumps(claimed), new_count, guild_id, user_id),
+        )
+        await self.db.commit()
+        return await self.get_boost_claim(guild_id, user_id)
+
+    # ── Giveaways ───────────────────────────────────────────────────
+
+    async def create_giveaway(
+        self,
+        guild_id: int,
+        *,
+        item_id: int,
+        prize_name: str,
+        winners_count: int,
+        ends_at: str,
+        host_id: int,
+        channel_id: int | None = None,
+        message_id: int | None = None,
+    ) -> int:
+        cur = await self.db.execute(
+            """
+            INSERT INTO giveaways
+              (guild_id, channel_id, message_id, item_id, prize_name,
+               winners_count, ends_at, host_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                channel_id,
+                message_id,
+                item_id,
+                prize_name[:200],
+                max(1, int(winners_count)),
+                ends_at,
+                host_id,
+            ),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)  # type: ignore[arg-type]
+
+    async def update_giveaway(self, giveaway_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [giveaway_id]
+        await self.db.execute(
+            f"UPDATE giveaways SET {cols} WHERE id = ?", values
+        )
+        await self.db.commit()
+
+    async def get_giveaway(self, giveaway_id: int) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            "SELECT * FROM giveaways WHERE id = ?", (giveaway_id,)
+        )
+        return dict(row) if row else None
+
+    async def get_giveaway_by_message(
+        self, message_id: int
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            "SELECT * FROM giveaways WHERE message_id = ?", (message_id,)
+        )
+        return dict(row) if row else None
+
+    async def list_active_giveaways(
+        self, guild_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        if guild_id is None:
+            rows = await self.fetchall(
+                "SELECT * FROM giveaways WHERE status = 'active'"
+            )
+        else:
+            rows = await self.fetchall(
+                """
+                SELECT * FROM giveaways
+                WHERE guild_id = ? AND status = 'active'
+                """,
+                (guild_id,),
+            )
+        return [dict(r) for r in rows]
+
+    async def list_due_giveaways(self) -> list[dict[str, Any]]:
+        rows = await self.fetchall(
+            """
+            SELECT * FROM giveaways
+            WHERE status = 'active'
+              AND datetime(ends_at) <= datetime('now')
+            """
+        )
+        return [dict(r) for r in rows]
+
+    async def add_giveaway_entry(
+        self, giveaway_id: int, user_id: int
+    ) -> bool:
+        try:
+            await self.db.execute(
+                """
+                INSERT INTO giveaway_entries (giveaway_id, user_id)
+                VALUES (?, ?)
+                """,
+                (giveaway_id, user_id),
+            )
+            await self.db.commit()
+            return True
+        except Exception:
+            return False
+
+    async def count_giveaway_entries(self, giveaway_id: int) -> int:
+        row = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt FROM giveaway_entries
+            WHERE giveaway_id = ?
+            """,
+            (giveaway_id,),
+        )
+        return int(row["cnt"]) if row else 0
+
+    async def list_giveaway_entries(self, giveaway_id: int) -> list[int]:
+        rows = await self.fetchall(
+            """
+            SELECT user_id FROM giveaway_entries WHERE giveaway_id = ?
+            """,
+            (giveaway_id,),
+        )
+        return [int(r["user_id"]) for r in rows]
+
+    async def has_giveaway_entry(
+        self, giveaway_id: int, user_id: int
+    ) -> bool:
+        row = await self.fetchone(
+            """
+            SELECT 1 FROM giveaway_entries
+            WHERE giveaway_id = ? AND user_id = ?
+            """,
+            (giveaway_id, user_id),
+        )
+        return row is not None
+
+    async def save_giveaway_winners(
+        self, giveaway_id: int, user_ids: list[int]
+    ) -> None:
+        for uid in user_ids:
+            await self.db.execute(
+                """
+                INSERT OR IGNORE INTO giveaway_winners (giveaway_id, user_id)
+                VALUES (?, ?)
+                """,
+                (giveaway_id, uid),
+            )
+        await self.db.commit()
+
+    async def mark_giveaway_winner_delivered(
+        self, giveaway_id: int, user_id: int
+    ) -> None:
+        await self.db.execute(
+            """
+            UPDATE giveaway_winners SET delivered = 1
+            WHERE giveaway_id = ? AND user_id = ?
+            """,
+            (giveaway_id, user_id),
+        )
+        await self.db.commit()
+
     async def get_order(self, order_id: int) -> dict[str, Any] | None:
         row = await self.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
         return dict(row) if row else None
@@ -1337,6 +1937,26 @@ class Database:
             (guild_id, user_id, *OPEN_STATUSES),
         )
         return int(row["cnt"]) if row else 0
+
+    async def list_cancelled_orders(self, guild_id: int) -> list[dict[str, Any]]:
+        rows = await self.fetchall(
+            """
+            SELECT * FROM orders
+            WHERE guild_id = ? AND status = 'cancelled'
+            ORDER BY id ASC
+            """,
+            (guild_id,),
+        )
+        return [dict(r) for r in rows]
+
+    async def delete_cancelled_orders(self, guild_id: int) -> int:
+        """Löscht alle stornierten Bestellungen (inkl. Items/Proofs via CASCADE)."""
+        cur = await self.db.execute(
+            "DELETE FROM orders WHERE guild_id = ? AND status = 'cancelled'",
+            (guild_id,),
+        )
+        await self.db.commit()
+        return int(cur.rowcount or 0)
 
     async def add_payment_proof(
         self, order_id: int, attachment_url: str, uploaded_by: int
@@ -1390,6 +2010,64 @@ class Database:
 
     async def mark_vouch_used(self, order_id: int) -> None:
         await self.update_order(order_id, vouch_used=1)
+
+    async def mark_vouch_used_with_rating(
+        self, order_id: int, rating: int
+    ) -> None:
+        await self.update_order(
+            order_id,
+            vouch_used=1,
+            vouch_rating=max(1, min(5, int(rating))),
+        )
+
+    async def get_vouch_and_order_stats(self, guild_id: int) -> dict[str, Any]:
+        completed = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt,
+                   COALESCE(SUM(total), 0) AS revenue
+            FROM orders
+            WHERE guild_id = ? AND status = 'completed'
+              AND COALESCE(order_kind, 'shop') = 'shop'
+            """,
+            (guild_id,),
+        )
+        buyers = await self.fetchone(
+            """
+            SELECT COUNT(DISTINCT user_id) AS cnt FROM orders
+            WHERE guild_id = ? AND status = 'completed'
+              AND COALESCE(order_kind, 'shop') = 'shop'
+            """,
+            (guild_id,),
+        )
+        vouches_db = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt,
+                   AVG(vouch_rating) AS avg_rating
+            FROM orders
+            WHERE guild_id = ? AND vouch_used = 1
+              AND vouch_rating IS NOT NULL
+            """,
+            (guild_id,),
+        )
+        vouch_used = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt FROM orders
+            WHERE guild_id = ? AND vouch_used = 1
+            """,
+            (guild_id,),
+        )
+        return {
+            "orders_completed": int(completed["cnt"]) if completed else 0,
+            "revenue": float(completed["revenue"]) if completed else 0.0,
+            "unique_buyers": int(buyers["cnt"]) if buyers else 0,
+            "vouches_used": int(vouch_used["cnt"]) if vouch_used else 0,
+            "avg_rating": (
+                float(vouches_db["avg_rating"])
+                if vouches_db and vouches_db["avg_rating"] is not None
+                else None
+            ),
+            "rated_count": int(vouches_db["cnt"]) if vouches_db else 0,
+        }
 
     # ── Daily deals ─────────────────────────────────────────────────
 

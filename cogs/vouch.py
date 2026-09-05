@@ -56,7 +56,7 @@ async def _post_local_vouch_embed(
     rating: int,
     message: str,
     order: dict,
-) -> None:
+) -> discord.Message:
     stars = _stars(rating)
     embed = discord.Embed(
         title="Neuer Vouch",
@@ -74,7 +74,7 @@ async def _post_local_vouch_embed(
         name=str(interaction.user),
         icon_url=interaction.user.display_avatar.url,
     )
-    await channel.send(embed=embed)
+    return await channel.send(embed=embed)
 
 
 async def _submit_website_vouch(
@@ -127,13 +127,22 @@ async def _submit_local_vouch(
         )
         return True
 
-    await bot.db.mark_vouch_used(int(order["id"]))
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+
+    await bot.db.mark_vouch_used_with_rating(int(order["id"]), int(rating))
     await _post_local_vouch_embed(
         channel,
         interaction=interaction,
         rating=rating,
         message=message,
         order=order,
+    )
+
+    from utils.vouch_stats import refresh_vouch_stats_under_latest
+
+    await refresh_vouch_stats_under_latest(
+        bot, channel, int(order["guild_id"])
     )
 
     if shop_api.enabled:
@@ -145,7 +154,7 @@ async def _submit_local_vouch(
             external_id=int(order["id"]),
         )
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         embed=success_embed(
             "Vouch gesendet",
             f"Danke! Dein Vouch zu Bestellung {order_ref(order)} wurde gepostet.",
@@ -214,6 +223,47 @@ class VouchCog(commands.Cog):
                 embed=error_embed("Kein Vouch verfügbar", hint),
                 ephemeral=True,
             )
+
+    @app_commands.command(
+        name="vouchstats",
+        description="Vouch-/Bestell-Übersicht unter dem letzten Vouch neu posten (Staff)",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def vouchstats(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Nur auf dem Server"), ephemeral=True
+            )
+            return
+        channel = await _get_vouch_channel(self.bot, interaction.guild.id)
+        if channel is None:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Vouch-Channel fehlt",
+                    "Zuerst `/setup` mit Vouch-Channel ausführen.",
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        from utils.vouch_stats import refresh_vouch_stats_under_latest
+
+        msg = await refresh_vouch_stats_under_latest(
+            self.bot, channel, interaction.guild.id
+        )
+        if msg is None:
+            await interaction.followup.send(
+                embed=error_embed("Konnte Stats nicht posten"),
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            embed=success_embed(
+                "Stats aktualisiert",
+                f"Übersicht unter dem letzten Vouch: {msg.jump_url}",
+            ),
+            ephemeral=True,
+        )
 
 
 async def setup(bot: ShopBot) -> None:

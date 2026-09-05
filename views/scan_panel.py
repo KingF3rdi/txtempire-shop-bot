@@ -17,6 +17,7 @@ from utils.archive_scanner import (
 from utils.credits import format_credits
 from utils.embeds import base_embed, error_embed, format_price, success_embed, warn_embed
 from utils.scan_limits import consume_scan_quota, get_scan_quota
+from utils.scan_premium_role import post_scan_log, sync_scan_premium_role
 from views.ticket_views import is_staff
 
 if TYPE_CHECKING:
@@ -30,9 +31,10 @@ def build_scan_panel_embed() -> discord.Embed:
         f"• Free: **{config.SCAN_FREE_DAILY} Scan/Tag**\n"
         f"• Premium: **{config.SCAN_PREMIUM_DAILY} Scans/Tag** "
         f"(14 oder 30 Tage)\n\n"
-        "**Datei per DM** — Bot öffnet DM, Datei droppen\n"
+        "**Datei hier droppen** — ohne DM, direkt im Channel\n"
         "**URL scannen** — direkten Download-Link eingeben\n"
-        "Ergebnisse kommen **per DM**.",
+        "Ergebnis privat (ephemeral / DM). Erfolgreiche Scans landen im Log-Channel.\n\n"
+        "⚠️ **Keine 100 %-Garantie** — Heuristik, kein vollständiger Virenscan.",
     )
     embed.add_field(
         name="Premium",
@@ -44,7 +46,7 @@ def build_scan_panel_embed() -> discord.Embed:
         ),
         inline=False,
     )
-    embed.set_footer(text="Ergebnisse nur privat per DM")
+    embed.set_footer(text="Auch möglich: /scan file · Keine 100%-Garantie auf „safe“")
     return embed
 
 
@@ -77,25 +79,30 @@ async def _send_scan_result_dm(
     embed.set_footer(text=quota_footer)
     try:
         await dm.send(embed=embed)
-        return True
     except discord.HTTPException:
         return False
+    return True
 
 
-async def run_scan_and_dm(
+async def deliver_scan_result(
     bot: ShopBot,
     interaction: discord.Interaction,
     *,
     data: bytes,
     filename: str,
     guild_id: int | None = None,
+    reply_via_dm: discord.DMChannel | None = None,
 ) -> None:
-    """Quota verbrauchen, scannen, Ergebnis per DM (Fallback: ephemeral)."""
+    """Quota, Scan, User-Antwort + optional Scan-Log-Channel."""
     gid = guild_id or (interaction.guild.id if interaction.guild else None)
     if gid is None:
-        await interaction.followup.send(
-            embed=error_embed("Nur auf dem Server"), ephemeral=True
-        )
+        target = reply_via_dm or interaction.followup
+        if reply_via_dm:
+            await reply_via_dm.send(embed=error_embed("Nur auf dem Server"))
+        else:
+            await interaction.followup.send(
+                embed=error_embed("Nur auf dem Server"), ephemeral=True
+            )
         return
 
     staff = await is_staff(bot, interaction)
@@ -104,9 +111,12 @@ async def run_scan_and_dm(
             bot, gid, interaction.user.id, is_staff=staff
         )
     except ValueError as e:
-        await interaction.followup.send(
-            embed=error_embed("Scan-Limit", str(e)), ephemeral=True
-        )
+        if reply_via_dm:
+            await reply_via_dm.send(embed=error_embed("Scan-Limit", str(e)))
+        else:
+            await interaction.followup.send(
+                embed=error_embed("Scan-Limit", str(e)), ephemeral=True
+            )
         return
 
     result = scan_archive_bytes(data, filename)
@@ -115,33 +125,68 @@ async def run_scan_and_dm(
         if not staff
         else "Staff — kein Limit"
     )
-    sent = await _send_scan_result_dm(
-        interaction.user,
-        filename=filename,
-        result_summary=result.summary(),
-        is_clean=result.is_clean,
-        is_blocked=result.is_blocked,
-        quota_footer=footer,
-    )
-    if sent:
-        await interaction.followup.send(
-            embed=success_embed(
-                "Scan fertig",
-                f"**{filename}** — Ergebnis wurde dir **per DM** geschickt.\n"
-                f"_{footer}_",
-            ),
-            ephemeral=True,
-        )
-    else:
-        if result.is_clean:
-            embed = success_embed(f"Scan: {filename}", result.summary())
-        else:
-            embed = warn_embed(f"Scan: {filename}", result.summary())
-            if result.is_blocked:
-                embed.color = discord.Color.dark_red()
-        embed.set_footer(text=footer + " · DM geschlossen — hier angezeigt")
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
+    from utils.scan_stats import log_scan_result
+
+    await log_scan_result(bot, gid, interaction.user.id, result)
+
+    if result.is_clean:
+        embed = success_embed(f"Scan: {filename}", result.summary())
+    elif result.is_blocked:
+        embed = warn_embed(f"⛔ Kritisch: {filename}", result.summary())
+        embed.color = discord.Color.dark_red()
+    else:
+        embed = warn_embed(f"Scan: {filename}", result.summary())
+    embed.set_footer(text=footer)
+
+    if reply_via_dm:
+        await reply_via_dm.send(embed=embed)
+    else:
+        sent = await _send_scan_result_dm(
+            interaction.user,
+            filename=filename,
+            result_summary=result.summary(),
+            is_clean=result.is_clean,
+            is_blocked=result.is_blocked,
+            quota_footer=footer,
+        )
+        if sent:
+            await interaction.followup.send(
+                embed=success_embed(
+                    "Scan fertig",
+                    f"**{filename}** — Ergebnis per **DM**.\n_{footer}_",
+                ),
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+    guild = bot.get_guild(gid)
+    if guild is not None and result.is_clean:
+        await post_scan_log(
+            bot,
+            guild,
+            user=interaction.user,
+            filename=filename,
+            summary=result.summary(),
+            is_clean=True,
+            is_blocked=False,
+        )
+    elif guild is not None and (result.is_blocked or not result.is_clean):
+        # kritische / verdächtige Scans ebenfalls loggen
+        await post_scan_log(
+            bot,
+            guild,
+            user=interaction.user,
+            filename=filename,
+            summary=result.summary(),
+            is_clean=False,
+            is_blocked=result.is_blocked,
+        )
+
+
+# Backwards-compatible alias
+run_scan_and_dm = deliver_scan_result
 
 
 class ScanUrlModal(discord.ui.Modal, title="Datei-URL scannen"):
@@ -170,7 +215,6 @@ class ScanUrlModal(discord.ui.Modal, title="Datei-URL scannen"):
 
         path_name = parsed.path.rsplit("/", 1)[-1] or "download.bin"
         if not is_scannable_filename(path_name):
-            # allow URL without extension if Content-Disposition later — still warn
             if not any(path_name.lower().endswith(ext) for ext in ARCHIVE_EXTS):
                 await interaction.response.send_message(
                     embed=error_embed(
@@ -209,7 +253,7 @@ class ScanUrlModal(discord.ui.Modal, title="Datei-URL scannen"):
             )
             return
 
-        await run_scan_and_dm(
+        await deliver_scan_result(
             self.bot,
             interaction,
             data=data,
@@ -225,22 +269,8 @@ class ScanPanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
 
-    @discord.ui.button(
-        label="Datei per DM scannen",
-        style=discord.ButtonStyle.success,
-        custom_id="scanpanel:dm",
-        emoji="📩",
-        row=0,
-    )
-    async def scan_dm(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                embed=error_embed("Nur auf dem Server"), ephemeral=True
-            )
-            return
-
+    async def _quota_ok(self, interaction: discord.Interaction) -> bool:
+        assert interaction.guild is not None
         staff = await is_staff(self.bot, interaction)
         quota = await get_scan_quota(
             self.bot,
@@ -257,6 +287,117 @@ class ScanPanelView(discord.ui.View):
                 ),
                 ephemeral=True,
             )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="Datei hier droppen",
+        style=discord.ButtonStyle.success,
+        custom_id="scanpanel:channel",
+        emoji="📎",
+        row=0,
+    )
+    async def scan_channel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Nur auf dem Server"), ephemeral=True
+            )
+            return
+        if not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message(
+                embed=error_embed("Nur in Text-Channels"), ephemeral=True
+            )
+            return
+        if not await self._quota_ok(interaction):
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        channel = interaction.channel
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id
+
+        await interaction.followup.send(
+            embed=success_embed(
+                "Datei droppen",
+                f"{interaction.user.mention}: Sende jetzt eine "
+                "**`.zip` / `.rar` / `.jar`** Datei **in diesen Channel** "
+                "(innerhalb von **2 Minuten**).\n"
+                "Ergebnis kommt privat zu dir.",
+            ),
+            ephemeral=True,
+        )
+
+        def check(message: discord.Message) -> bool:
+            return (
+                message.author.id == user_id
+                and message.channel.id == channel.id
+                and bool(message.attachments)
+            )
+
+        try:
+            msg = await self.bot.wait_for("message", check=check, timeout=120.0)
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                embed=error_embed(
+                    "Zeit abgelaufen",
+                    "Keine Datei erhalten. Bitte erneut starten.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        att = msg.attachments[0]
+        if not is_scannable_filename(att.filename):
+            await interaction.followup.send(
+                embed=error_embed(
+                    "Falscher Dateityp",
+                    "Bitte **.zip / .rar / .jar** senden.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        try:
+            data = await att.read()
+        except discord.HTTPException as e:
+            await interaction.followup.send(
+                embed=error_embed("Download fehlgeschlagen", str(e)[:400]),
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await msg.add_reaction("✅")
+        except discord.HTTPException:
+            pass
+
+        await deliver_scan_result(
+            self.bot,
+            interaction,
+            data=data,
+            filename=att.filename or "archive",
+            guild_id=guild_id,
+        )
+
+    @discord.ui.button(
+        label="Per DM scannen",
+        style=discord.ButtonStyle.secondary,
+        custom_id="scanpanel:dm",
+        emoji="📩",
+        row=0,
+    )
+    async def scan_dm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Nur auf dem Server"), ephemeral=True
+            )
+            return
+
+        if not await self._quota_ok(interaction):
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -265,7 +406,7 @@ class ScanPanelView(discord.ui.View):
             await interaction.followup.send(
                 embed=error_embed(
                     "DMs geschlossen",
-                    "Öffne DMs vom Server oder nutze **URL scannen**.",
+                    "Nutze **Datei hier droppen** oder **URL scannen**.",
                 ),
                 ephemeral=True,
             )
@@ -277,13 +418,12 @@ class ScanPanelView(discord.ui.View):
                     "Datei zum Scannen",
                     "Sende jetzt eine **.zip / .rar / .jar** Datei "
                     "per Drag & Drop in diesen Chat "
-                    "(innerhalb von **2 Minuten**).\n"
-                    "Das Ergebnis kommt ebenfalls hierher.",
+                    "(innerhalb von **2 Minuten**).",
                 )
             )
         except discord.HTTPException:
             await interaction.followup.send(
-                embed=error_embed("DM fehlgeschlagen", "Konnte keine DM senden."),
+                embed=error_embed("DM fehlgeschlagen"),
                 ephemeral=True,
             )
             return
@@ -338,49 +478,14 @@ class ScanPanelView(discord.ui.View):
             )
             return
 
-        # Fake interaction-like followup via DM for quota/scan
-        class _FakeGuild:
-            id = guild_id
-
-        class _FakeInteraction:
-            guild = _FakeGuild()
-            user = interaction.user
-            response = interaction.response
-            followup = None
-
-            async def followup_send(self, **kwargs):
-                # unused — we DM directly
-                pass
-
-        staff = await is_staff(self.bot, interaction)
-        # Build a minimal path: consume + scan + DM
-        try:
-            quota = await consume_scan_quota(
-                self.bot, guild_id, user_id, is_staff=staff
-            )
-        except ValueError as e:
-            await dm.send(embed=error_embed("Scan-Limit", str(e)))
-            return
-
-        result = scan_archive_bytes(data, att.filename or "archive")
-        footer = (
-            f"Scans heute: {quota['used']}/{quota['limit']}"
-            if not staff
-            else "Staff — kein Limit"
+        await deliver_scan_result(
+            self.bot,
+            interaction,
+            data=data,
+            filename=att.filename or "archive",
+            guild_id=guild_id,
+            reply_via_dm=dm,
         )
-        if result.is_clean:
-            embed = success_embed(
-                f"Scan: {att.filename}", result.summary()
-            )
-        elif result.is_blocked:
-            embed = warn_embed(
-                f"⛔ Kritisch: {att.filename}", result.summary()
-            )
-            embed.color = discord.Color.dark_red()
-        else:
-            embed = warn_embed(f"Scan: {att.filename}", result.summary())
-        embed.set_footer(text=footer)
-        await dm.send(embed=embed)
 
     @discord.ui.button(
         label="URL scannen",
@@ -406,7 +511,7 @@ class ScanPanelView(discord.ui.View):
         style=discord.ButtonStyle.secondary,
         custom_id="scanpanel:status",
         emoji="📊",
-        row=0,
+        row=1,
     )
     async def status(
         self, interaction: discord.Interaction, button: discord.ui.Button
@@ -578,6 +683,12 @@ async def buy_scan_premium_with_credits(
     expires = await bot.db.extend_scan_premium(
         interaction.guild.id, interaction.user.id, days
     )
+    role_note = ""
+    role_status = await sync_scan_premium_role(
+        bot, interaction.guild, interaction.user.id, force_grant=True
+    )
+    if role_status:
+        role_note = f"\nRolle: {role_status}"
     new_bal = await bot.db.get_credits(interaction.guild.id, interaction.user.id)
     await interaction.followup.send(
         embed=success_embed(
@@ -585,7 +696,7 @@ async def buy_scan_premium_with_credits(
             f"**{days} Tage** Scan Premium (per Credits)\n"
             f"−**{format_credits(need)}** Credits · Rest: **{format_credits(new_bal)}**\n"
             f"Aktiv bis `{expires}` · "
-            f"**{config.SCAN_PREMIUM_DAILY} Scans/Tag**",
+            f"**{config.SCAN_PREMIUM_DAILY} Scans/Tag**{role_note}",
         ),
         ephemeral=True,
     )

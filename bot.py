@@ -11,8 +11,10 @@ class ShopBot(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.guilds = True
+        intents.members = True  # Boost-Erkennung (premium_since)
         intents.dm_messages = True
-        # Message Content Intent nicht nötig: Pack-Upload läuft über DM / Slash-Anhang.
+        # Für Channel-Drops (Scan / Pack) ohne DM — im Developer Portal aktivieren.
+        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.db = Database(config.DATABASE_PATH)
 
@@ -29,6 +31,9 @@ class ShopBot(commands.Bot):
             "cogs.discount_codes",
             "cogs.scanner",
             "cogs.vouch",
+            "cogs.announce",
+            "cogs.boost",
+            "cogs.giveaways",
         ):
             await self.load_extension(ext)
 
@@ -46,6 +51,24 @@ class ShopBot(commands.Bot):
         from views.scan_panel import ScanPanelView
 
         self.add_view(ScanPanelView(self))
+        from utils.vouch_request import VouchRatingView
+        from views.service_ticket_panel import (
+            ApplicationPanelView,
+            PartnerPanelView,
+            ServiceCloseView,
+            SupportPanelView,
+        )
+        from views.boost_packs import BoostThanksView
+
+        self.add_view(VouchRatingView(self))
+        self.add_view(SupportPanelView(self))
+        self.add_view(ApplicationPanelView(self))
+        self.add_view(PartnerPanelView(self))
+        self.add_view(ServiceCloseView(self))
+        self.add_view(BoostThanksView(self))
+        from views.giveaway_views import GiveawayEnterView
+
+        self.add_view(GiveawayEnterView(self))
         n_deals = await register_daily_deal_views(self)
         if n_deals:
             print(f"[DailyDeal] {n_deals} aktive Deal-View(s) registriert")
@@ -214,6 +237,10 @@ class ShopBot(commands.Bot):
 
                 for line in await refresh_scan_panel_on_ready(self):
                     print(f"[ScanPanel] {line}")
+                from views.service_ticket_panel import refresh_service_panels_on_ready
+
+                for line in await refresh_service_panels_on_ready(self):
+                    print(f"[ServicePanel] {line}")
         else:
             from utils.panels import (
                 refresh_all_saved_buy_panels,
@@ -229,6 +256,15 @@ class ShopBot(commands.Bot):
 
             for line in await refresh_scan_panel_on_ready(self):
                 print(f"[ScanPanel] {line}")
+            from views.service_ticket_panel import refresh_service_panels_on_ready
+
+            for line in await refresh_service_panels_on_ready(self):
+                print(f"[ServicePanel] {line}")
+        from utils.scan_premium_role import sweep_expired_scan_premium_roles
+
+        removed = await sweep_expired_scan_premium_roles(self)
+        if removed:
+            print(f"[ScanPremium] {removed} abgelaufene Premium-Rolle(n) entfernt")
         print("Bot ist bereit.")
 
 

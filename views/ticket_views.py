@@ -300,6 +300,13 @@ async def action_confirm_order(
     except discord.HTTPException:
         member = None
 
+    if order_kind == "scan_premium" and member is not None:
+        from utils.scan_premium_role import sync_scan_premium_role
+
+        await sync_scan_premium_role(
+            bot, interaction.guild, int(order["user_id"]), force_grant=True
+        )
+
     role_result: dict = {"granted": [], "skipped": [], "failed": []}
     delivery_info: dict = {}
     non_product = order_kind in ("credits", "scan_premium")
@@ -307,7 +314,9 @@ async def action_confirm_order(
         role_result = await grant_purchase_roles(member, settings, order_items)
         channel = interaction.channel
         if isinstance(channel, discord.TextChannel):
-            delivery_info = await deliver_packs(member, channel, order_items)
+            delivery_info = await deliver_packs(
+                member, channel, order_items, bot=bot
+            )
     elif member and non_product:
         role_result = await grant_purchase_roles(member, settings, [])
     elif not member:
@@ -371,21 +380,26 @@ async def action_confirm_order(
     await interaction.followup.send(embed=success)
 
     if not non_product:
-        from utils.vouch_request import send_vouch_request_dm
+        # Wenn Pack-DM schon Sterne geschickt hat, keine zweite Vouch-DM
+        had_pack_dm = bool(
+            delivery_info.get("dm_sent") or delivery_info.get("files_sent")
+        ) and not delivery_info.get("dm_failed")
+        if not had_pack_dm:
+            from utils.vouch_request import send_vouch_request_dm
 
-        product_names = ", ".join(
-            str(item.get("name_snapshot") or "Produkt") for item in order_items[:3]
-        )
-        if len(order_items) > 3:
-            product_names += " …"
-        asyncio.create_task(
-            send_vouch_request_dm(
-                bot,
-                buyer,
-                order_ref_text=order_ref(order),
-                product_hint=product_names or "dein Kauf",
+            product_names = ", ".join(
+                str(item.get("name_snapshot") or "Produkt") for item in order_items[:3]
             )
-        )
+            if len(order_items) > 3:
+                product_names += " …"
+            asyncio.create_task(
+                send_vouch_request_dm(
+                    bot,
+                    buyer,
+                    order_ref_text=order_ref(order),
+                    product_hint=product_names or "dein Kauf",
+                )
+            )
 
     channel = interaction.channel
     if isinstance(channel, discord.TextChannel):
@@ -750,11 +764,12 @@ class DiscountCodeModal(discord.ui.Modal, title="Rabatt / Creator Code"):
             )
             return
 
-        base_total = float(
-            order.get("original_total")
-            if order.get("discount_code_id")
-            else order["total"]
-        )
+        base_total = float(order["total"])
+        if order.get("discount_code_id") and order.get("original_total") is not None:
+            try:
+                base_total = float(order["original_total"])
+            except (TypeError, ValueError):
+                base_total = float(order["total"])
         try:
             new_total, savings = compute_code_discount(
                 base_total,

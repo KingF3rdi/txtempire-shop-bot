@@ -9,6 +9,7 @@ async def deliver_packs(
     member: discord.Member,
     ticket_channel: discord.TextChannel,
     order_items: list[dict],
+    bot=None,
 ) -> dict[str, list[str]]:
     """Sendet Pack-Inhalte per DM (Text/Datei) und/oder Link im Ticket."""
     dm_sent: list[str] = []
@@ -63,6 +64,22 @@ async def deliver_packs(
     if dm_parts or pack_paths:
         try:
             await send_to(member)
+            # Bewertung direkt nach Pack-DM (Sterne-Buttons)
+            if bot is not None:
+                from utils.vouch_request import VouchRatingView
+
+                try:
+                    embed = discord.Embed(
+                        title="⭐ Bewertung",
+                        description=(
+                            "Wie war dein Pack? Tippe auf die Sterne und schreib "
+                            "kurz dein Feedback — oder nutze `/vouch`."
+                        ),
+                        color=0x2B6CB0,
+                    )
+                    await member.send(embed=embed, view=VouchRatingView(bot))
+                except discord.HTTPException:
+                    pass
         except discord.HTTPException:
             dm_failed = True
             await ticket_channel.send(

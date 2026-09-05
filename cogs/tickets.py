@@ -268,6 +268,58 @@ class TicketsCog(commands.Cog):
     def __init__(self, bot: ShopBot) -> None:
         self.bot = bot
 
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """Beantwortet Basic-Fragen automatisch in Shop- und Service-Tickets."""
+        if message.author.bot or message.guild is None:
+            return
+        if not isinstance(message.channel, discord.TextChannel):
+            return
+        content = (message.content or "").strip()
+        if not content:
+            return
+
+        order = await self.bot.db.get_order_by_channel(message.channel.id)
+        service = None
+        if order is None:
+            service = await self.bot.db.get_service_ticket_by_channel(
+                message.channel.id
+            )
+            if service is None:
+                return
+            if str(service.get("status") or "") != "open":
+                return
+        else:
+            if str(order.get("status") or "") in ("completed", "cancelled"):
+                return
+
+        # Staff nicht auto-antworten
+        author = message.author
+        if isinstance(author, discord.Member):
+            if author.guild_permissions.administrator:
+                return
+            settings = await self.bot.db.ensure_guild(message.guild.id)
+            staff_id = settings.get("staff_role_id")
+            if staff_id and any(r.id == int(staff_id) for r in author.roles):
+                return
+
+        from utils.embeds import base_embed
+        from utils.ticket_faq import faq_cooldown_ok, match_faq
+
+        answer = match_faq(content)
+        if answer is None:
+            return
+        if not faq_cooldown_ok(message.channel.id):
+            return
+        try:
+            await message.channel.send(
+                embed=base_embed("Schnelle Hilfe", answer),
+                reference=message,
+                mention_author=False,
+            )
+        except discord.HTTPException:
+            pass
+
     order = app_commands.Group(
         name="order",
         description="Bestellung / Ticket per Command steuern",
@@ -337,6 +389,178 @@ class TicketsCog(commands.Cog):
         )
         await interaction.response.send_message(
             embed=success_embed("Ticket-Limit", f"Max. offene Tickets pro User: **{limit}**"),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="resettickets",
+        description="Alle abgebrochenen Bestellungen löschen (DB + Rest-Channels)",
+    )
+    @app_commands.describe(
+        delete_channels="Verbliebene Ticket-Channels der Abbrüche löschen (Standard: ja)",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def resettickets(
+        self,
+        interaction: discord.Interaction,
+        delete_channels: bool = True,
+    ) -> None:
+        from utils.embeds import error_embed
+        from views.ticket_views import is_staff
+
+        assert interaction.guild is not None
+        if not await is_staff(self.bot, interaction):
+            await interaction.response.send_message(
+                embed=error_embed("Keine Berechtigung"), ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        cancelled = await self.bot.db.list_cancelled_orders(interaction.guild.id)
+        if not cancelled:
+            await interaction.followup.send(
+                embed=success_embed(
+                    "Nichts zu löschen",
+                    "Es gibt keine abgebrochenen Bestellungen.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        channel_ids = [
+            int(o["ticket_channel_id"])
+            for o in cancelled
+            if o.get("ticket_channel_id")
+        ]
+        deleted_db = await self.bot.db.delete_cancelled_orders(interaction.guild.id)
+
+        channels_removed = 0
+        if delete_channels and channel_ids:
+            for ch_id in channel_ids:
+                channel = interaction.guild.get_channel(ch_id)
+                if channel is None:
+                    continue
+                try:
+                    await channel.delete(
+                        reason=f"/resettickets von {interaction.user}"
+                    )
+                    channels_removed += 1
+                except discord.HTTPException:
+                    pass
+
+        body = f"**{deleted_db}** Bestellung(en) aus der DB entfernt."
+        if delete_channels:
+            body += f"\n**{channels_removed}** Ticket-Channel(s) gelöscht."
+        await interaction.followup.send(
+            embed=success_embed("Abgebrochene Bestellungen gelöscht", body),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="supportpanel",
+        description="Support-Ticket-Panel posten oder aktualisieren",
+    )
+    @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def supportpanel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
+            from utils.embeds import error_embed
+
+            await interaction.response.send_message(
+                embed=error_embed("Kein Channel"), ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        from views.service_ticket_panel import post_or_refresh_service_panel
+
+        msg = await post_or_refresh_service_panel(
+            self.bot, interaction.guild, target, "support"
+        )
+        await interaction.followup.send(
+            embed=success_embed(
+                "Support-Panel",
+                f"Panel in {target.mention}: {msg.jump_url}",
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="bewerbungspanel",
+        description="Media/Creator-Bewerbungs-Panel posten oder aktualisieren",
+    )
+    @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def bewerbungspanel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
+            from utils.embeds import error_embed
+
+            await interaction.response.send_message(
+                embed=error_embed("Kein Channel"), ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        from views.service_ticket_panel import post_or_refresh_service_panel
+
+        msg = await post_or_refresh_service_panel(
+            self.bot, interaction.guild, target, "application"
+        )
+        await interaction.followup.send(
+            embed=success_embed(
+                "Media/Creator-Bewerbungs-Panel",
+                f"Panel in {target.mention}: {msg.jump_url}",
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="partnerpanel",
+        description="Discord-Partner-Ticket-Panel posten oder aktualisieren",
+    )
+    @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def partnerpanel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
+            from utils.embeds import error_embed
+
+            await interaction.response.send_message(
+                embed=error_embed("Kein Channel"), ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        from views.service_ticket_panel import post_or_refresh_service_panel
+
+        msg = await post_or_refresh_service_panel(
+            self.bot, interaction.guild, target, "partner"
+        )
+        await interaction.followup.send(
+            embed=success_embed(
+                "Partner-Panel",
+                f"Panel in {target.mention}: {msg.jump_url}",
+            ),
             ephemeral=True,
         )
 

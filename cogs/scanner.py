@@ -119,6 +119,8 @@ class ScannerCog(commands.Cog):
     def __init__(self, bot: ShopBot) -> None:
         self.bot = bot
 
+    scan = app_commands.Group(name="scan", description="File Scanner")
+
     @app_commands.command(
         name="scanpanel",
         description="Scan-Panel posten oder aktualisieren (DM/URL + Premium)",
@@ -151,17 +153,17 @@ class ScannerCog(commands.Cog):
             embed=success_embed(
                 "Scan-Panel",
                 f"Panel in {target.mention}: {msg.jump_url}\n"
-                "Datei per DM / URL · Premium per Zahlung oder Credits.",
+                "Datei droppen / URL · Premium per Zahlung oder Credits.",
             ),
             ephemeral=True,
         )
 
-    @app_commands.command(
-        name="scan",
+    @scan.command(
+        name="file",
         description="ZIP/RAR/JAR auf RATs, Stealer und verdächtige Dateien scannen",
     )
     @app_commands.describe(file="Archiv-Datei (.zip / .rar / .jar)")
-    async def scan(
+    async def scan_file(
         self,
         interaction: discord.Interaction,
         file: discord.Attachment,
@@ -185,9 +187,6 @@ class ScannerCog(commands.Cog):
 
         staff = await is_staff(self.bot, interaction)
         await interaction.response.defer(ephemeral=True)
-
-        # Limit prüfen bevor Download zählt? Erst Quota-Check ohne Consume:
-        from utils.scan_limits import get_scan_quota
 
         preview = await get_scan_quota(
             self.bot,
@@ -232,6 +231,21 @@ class ScannerCog(commands.Cog):
             return
 
         result = scan_archive_bytes(data, file.filename or "archive")
+        from utils.scan_premium_role import post_scan_log
+        from utils.scan_stats import log_scan_result
+
+        await log_scan_result(
+            self.bot, interaction.guild.id, interaction.user.id, result
+        )
+        await post_scan_log(
+            self.bot,
+            interaction.guild,
+            user=interaction.user,
+            filename=file.filename or "archive",
+            summary=result.summary(),
+            is_clean=result.is_clean,
+            is_blocked=result.is_blocked,
+        )
         footer = (
             f"Scans heute: {quota['used']}/{quota['limit']}"
             if not staff
@@ -255,11 +269,52 @@ class ScannerCog(commands.Cog):
         embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(
-        name="scanstatus",
+    @scan.command(
+        name="stats",
+        description="Scan-Statistik: Premium, Scans, gut/schlecht nach Kategorien",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def scan_stats(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Nur auf dem Server"), ephemeral=True
+            )
+            return
+        if not await is_staff(self.bot, interaction):
+            await interaction.response.send_message(
+                embed=error_embed("Keine Berechtigung"), ephemeral=True
+            )
+            return
+
+        stats = await self.bot.db.get_scan_stats(interaction.guild.id)
+        bad = stats["suspicious"] + stats["blocked"]
+        cat_lines = (
+            "\n".join(
+                f"• `{name}`: **{cnt}**" for name, cnt in stats["categories"][:12]
+            )
+            or "_Noch keine Treffer-Kategorien_"
+        )
+        embed = success_embed(
+            "Scan-Statistik",
+            f"**Premium-Käufe (bestätigt):** {stats['premium_purchases']}\n"
+            f"**Unique Käufer:** {stats['premium_buyers']}\n"
+            f"**Aktives Premium:** {stats['premium_active']}\n\n"
+            f"**Scans geloggt:** {stats['total_logged']}\n"
+            f"**Scan-Nutzung (Quota-Zähler):** {stats['usage_total']}\n\n"
+            f"✅ **Gut (sauber):** {stats['clean']}\n"
+            f"⚠️ **Verdächtig:** {stats['suspicious']}\n"
+            f"⛔ **Schlecht (blockiert):** {stats['blocked']}\n"
+            f"❌ **Fehler:** {stats['error']}\n"
+            f"**Schlecht gesamt:** {bad}\n\n"
+            f"**Treffer-Kategorien:**\n{cat_lines}",
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @scan.command(
+        name="status",
         description="Dein Scan-Kontingent und Premium-Status",
     )
-    async def scanstatus(self, interaction: discord.Interaction) -> None:
+    async def scan_status(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message(
                 embed=error_embed("Nur auf dem Server"), ephemeral=True
@@ -354,15 +409,21 @@ class ScannerCog(commands.Cog):
         path = resolve_pack_path(row.get("pack_file"))
         if path is None:
             await interaction.response.send_message(
-                embed=error_embed("Kein Pack", "Dieses Item hat keine lokale Pack-Datei."),
+                embed=error_embed(
+                    "Kein Pack", "Dieses Item hat keine lokale Pack-Datei."
+                ),
                 ephemeral=True,
             )
             return
 
         await interaction.response.defer(ephemeral=True)
         from utils.archive_scanner import scan_archive_path
+        from utils.scan_stats import log_scan_result
 
         result = scan_archive_path(path)
+        await log_scan_result(
+            self.bot, interaction.guild.id, interaction.user.id, result
+        )
         if result.is_clean:
             await interaction.followup.send(
                 embed=success_embed(
@@ -397,10 +458,16 @@ class ScannerCog(commands.Cog):
         expires = await self.bot.db.extend_scan_premium(
             interaction.guild.id, user.id, int(days)
         )
+        from utils.scan_premium_role import sync_scan_premium_role
+
+        role_status = await sync_scan_premium_role(
+            self.bot, interaction.guild, user.id, force_grant=True
+        )
+        role_note = f"\nRolle: {role_status}" if role_status else ""
         await interaction.response.send_message(
             embed=success_embed(
                 "Premium vergeben",
-                f"{user.mention}: **+{days} Tage**\nLäuft bis `{expires}`",
+                f"{user.mention}: **+{days} Tage**\nLäuft bis `{expires}`{role_note}",
             ),
             ephemeral=True,
         )

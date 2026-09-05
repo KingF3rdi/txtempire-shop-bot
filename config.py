@@ -42,3 +42,8 @@ SCAN_PREMIUM_14_CREDITS = (
 SCAN_PREMIUM_30_CREDITS = (
     float(_SCAN_30_CREDITS) if _SCAN_30_CREDITS else SCAN_PREMIUM_30_PRICE / 100_000
 )
+
+# Server-Boost Belohnungen (Pack-Auswahl)
+BOOST_PACKS_TIER1 = int(os.getenv("BOOST_PACKS_TIER1", "5") or "5")
+BOOST_PACKS_TIER2 = int(os.getenv("BOOST_PACKS_TIER2", "15") or "15")
+
