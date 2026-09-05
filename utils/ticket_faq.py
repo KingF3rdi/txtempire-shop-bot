@@ -486,12 +486,39 @@ def looks_like_question(content: str) -> bool:
     return len(text) >= 8
 
 
+def _key_in_text(key: str, text: str) -> bool:
+    """Keyword-Treffer mit Wortgrenzen bei kurzen Keys (weniger False Positives)."""
+    if len(key) >= 6:
+        return key in text
+    # kurze Keys nur als ganzes Wort / Phrase
+    return bool(re.search(rf"(?:^|\s){re.escape(key)}(?:\s|$|[?!.])", text))
+
+
+def _is_confident_match(*, text: str, key_len: int) -> bool:
+    """Lange/komplexe Fragen brauchen starken Keyword-Treffer — sonst Staff."""
+    words = [w for w in text.split() if len(w) > 1]
+    # Sehr kurze Nachrichten (Hallo / Danke) → kurze Keys ok
+    if len(text) <= 20 and len(words) <= 3:
+        return key_len >= 2
+    # Substantielle Frage: Key muss aussagekräftig sein
+    if key_len < 5:
+        return False
+    if len(words) >= 8 and key_len < 8:
+        return False
+    if "?" in text and len(text) >= 40 and key_len < 6:
+        return False
+    return True
+
+
 def match_faq(
     content: str,
     *,
     ticket_kind: str = "order",
 ) -> str | None:
-    """Kauf-Ticket → Shop-FAQ; Support/Service → Support-FAQ (kein Payment)."""
+    """Kauf-Ticket → Shop-FAQ; Support → Support-FAQ.
+
+    Bei unsicherem Treffer: None → Caller pingt Staff.
+    """
     text = _normalize(content)
     if len(text) < 2 or len(text) > 500:
         return None
@@ -510,26 +537,36 @@ def match_faq(
             k = _normalize(key)
             if len(k) < 2:
                 continue
-            if k in text and len(k) > best_len:
+            if not _key_in_text(k, text):
+                continue
+            if len(k) > best_len:
                 best = entry
                 best_len = len(k)
 
-    if best:
+    if best and _is_confident_match(text=text, key_len=best_len):
         return best.answer
 
-    # Fallbacks nur im jeweiligen Kontext
-    if is_support:
-        if any(w in text for w in ("bug", "fehler", "problem", "geht nicht", "kaputt")):
-            return match_faq("bug fehler problem", ticket_kind="service")
-        if any(w in text for w in ("warte", "lange", "antwort", "staff")):
-            return match_faq("wie lange wartezeit antwort", ticket_kind="service")
+    # Keine schwachen Fallbacks bei komplexen Fragen — lieber Staff
+    if len(text) >= 35 or "?" in text:
         return None
 
-    if any(w in text for w in ("zahl", "bezahl", "pay", "geld", "ueberweis", "überweis")):
+    if is_support:
+        if any(
+            _key_in_text(w, text)
+            for w in ("bug", "fehler", "problem", "kaputt")
+        ) or "geht nicht" in text:
+            return match_faq("bug fehler problem", ticket_kind="service")
+        return None
+
+    if any(
+        _key_in_text(w, text)
+        for w in ("zahlung", "bezahlen", "paypal", "iban", "ueberweis", "überweis")
+    ):
         return match_faq("wie kann ich bezahlen money log", ticket_kind="order")
-    if any(w in text for w in ("kauf", "pack", "bestell", "shop")):
-        return match_faq("wie kaufe ich ein pack", ticket_kind="order")
-    if any(w in text for w in ("bild", "screen", "foto", "proof", "beweis")):
+    if any(
+        _key_in_text(w, text)
+        for w in ("money log", "moneylog", "fullscreen", "zahlungsbeweis")
+    ):
         return MONEY_LOG_HINT
     return None
 

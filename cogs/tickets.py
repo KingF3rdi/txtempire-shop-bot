@@ -405,9 +405,10 @@ class TicketsCog(commands.Cog):
                     mention_author=False,
                 )
             else:
+                # Keine passende FAQ → Support/Staff pingen
                 staff_body = (
-                    "Dazu habe ich keine passende Auto-Antwort.\n"
-                    f"{staff_ping} — bitte kurz helfen.\n\n"
+                    "Dazu passt keine Auto-Antwort — bitte **Support**.\n"
+                    f"{staff_ping} — kurz helfen.\n\n"
                 )
                 if money_on:
                     staff_body += f"{MONEY_LOG_HINT}\n\n"
@@ -415,7 +416,7 @@ class TicketsCog(commands.Cog):
                 await message.channel.send(
                     content=staff_ping,
                     embed=warn_embed(
-                        f"Staff nötig ({new_turns}/{MAX_FAQ_TURNS})",
+                        f"Support nötig ({new_turns}/{MAX_FAQ_TURNS})",
                         staff_body,
                     ),
                     reference=message,
