@@ -22,6 +22,8 @@ MONEY_LOG_HINT = (
 class FaqEntry:
     keys: tuple[str, ...]
     answer: str
+    # shop = nur Kauf-/Payment-Tickets; any = überall; support = Support-Tickets
+    scope: str = "any"
 
 
 FAQ: tuple[FaqEntry, ...] = (
@@ -43,6 +45,7 @@ FAQ: tuple[FaqEntry, ...] = (
         ),
         MONEY_LOG_HINT
         + "\nDanach Button **Payment beweisen** (IGN + Bild anhängen).",
+        "shop",
     ),
     FaqEntry(
         (
@@ -69,6 +72,7 @@ FAQ: tuple[FaqEntry, ...] = (
         "3) **Verlinkter Account:** Ticket wird automatisch bestätigt\n"
         "   **Sonst:** Fullscreen Money-Log → **Payment beweisen** → Staff\n"
         "4) Pack per DM",
+        "shop",
     ),
     FaqEntry(
         (
@@ -104,6 +108,7 @@ FAQ: tuple[FaqEntry, ...] = (
         "Vollbetrag überweisen → **Fullscreen Money-Log** Screenshot → "
         "Button **Payment beweisen**.\n"
         f"{MONEY_LOG_HINT}",
+        "shop",
     ),
     FaqEntry(
         (
@@ -122,6 +127,7 @@ FAQ: tuple[FaqEntry, ...] = (
         ),
         "**Payment beweisen:** Button **Payment beweisen** → IGN + Bild anhängen.\n"
         f"{MONEY_LOG_HINT}",
+        "shop",
     ),
     FaqEntry(
         (
@@ -137,6 +143,7 @@ FAQ: tuple[FaqEntry, ...] = (
         "Nach dem Zahlungsbeweis bestätigt Staff den Kauf. "
         "Packs kommen danach oft innerhalb weniger Minuten "
         "(abhängig von Staff).",
+        "shop",
     ),
     FaqEntry(
         (
@@ -152,11 +159,13 @@ FAQ: tuple[FaqEntry, ...] = (
         ),
         "Nach Bestätigung: Pack per **DM** (+ ggf. Link im Ticket). "
         "Server-DMs erlauben. Wenn schon bestätigt und nichts da: Staff pingen.",
+        "shop",
     ),
     FaqEntry(
         ("credit", "credits", "guthaben", "coins", "quick buy", "schnellkauf"),
         "**Credits:** Am Buy-Panel unter **Credits** kaufen. "
         "Mit Guthaben oft **Quick Buy** ohne Überweisung möglich.",
+        "shop",
     ),
     FaqEntry(
         (
@@ -169,14 +178,17 @@ FAQ: tuple[FaqEntry, ...] = (
             "rabattcode",
         ),
         "Im Ticket: Button **Rabatt / Creator Code** → Code eingeben.",
+        "shop",
     ),
     FaqEntry(
         ("vouch", "bewertung", "review", "sterne", "bewerten"),
         "Nach Kauf: `/vouch` oder Sterne in der Pack-DM.",
+        "shop",
     ),
     FaqEntry(
         ("abbrechen", "stornier", "cancel", "schließen", "schliessen"),
         "Abbrechen: Button **Kauf abbrechen** oder `/order cancel`.",
+        "shop",
     ),
     FaqEntry(
         (
@@ -198,21 +210,31 @@ FAQ: tuple[FaqEntry, ...] = (
         "`/msg TxTEmpire !link CODE` (privat).\n"
         "Danach wird dein Ticket nach korrekter Zahlung **automatisch bestätigt**.\n"
         "**Unverifizieren:** gleicher Panel-Button oder `/unlink`.",
+        "any",
     ),
     FaqEntry(
         ("ign", "minecraft name", "spielername", "ingame", "in game name"),
         "**IGN:** Am besten einmalig über **Account verlinken** verbinden.\n"
         "Sonst trägst du den IGN beim **Payment beweisen** ein.",
+        "shop",
     ),
     FaqEntry(
         ("rolle", "autorole", "customer rolle", "zugang"),
         "Rollen (Customer / Item) kommen automatisch nach Staff-Bestätigung.",
+        "shop",
     ),
     FaqEntry(
         ("hallo", "hey", "moin", "guten tag", "servus", "hi", "hello"),
         "Hey! Überweise den Betrag aus dem Ticket, sende ein "
         "**Fullscreen Money-Log**, dann **Payment beweisen**.\n"
         "Fragen zu Zahlung/Pack einfach hier schreiben (max. 3 Auto-Antworten).",
+        "shop",
+    ),
+    FaqEntry(
+        ("hallo", "hey", "moin", "guten tag", "servus", "hi", "hello"),
+        "Hey! Beschreib kurz dein Anliegen — Staff meldet sich so schnell wie möglich.\n"
+        "(Support-Tickets haben keine Zahlungs-Auto-Antworten.)",
+        "support",
     ),
     FaqEntry(
         (
@@ -236,6 +258,24 @@ FAQ: tuple[FaqEntry, ...] = (
         "3) **Payment beweisen** (IGN + Bild)\n"
         "4) Staff bestätigt → Pack/DM\n\n"
         f"{MONEY_LOG_HINT}",
+        "shop",
+    ),
+    FaqEntry(
+        (
+            "hilfe",
+            "help",
+            "was tun",
+            "was muss ich",
+            "wie geht",
+            "anleitung",
+            "wie funktioniert",
+            "was soll ich machen",
+            "was jetzt",
+            "und jetzt",
+        ),
+        "Schreib bitte klar, wobei wir helfen sollen. "
+        "Staff liest mit und antwortet hier im Ticket.",
+        "support",
     ),
 )
 
@@ -282,23 +322,31 @@ def looks_like_question(content: str) -> bool:
     )
     if any(text.startswith(s) or f" {s}" in f" {text}" for s in starters):
         return True
-    # kurze Unsicherheit
     if text in ("?", "??", "???", "hilfe", "help", "was", "wie", "hallo", "hi"):
         return True
-    return len(text) >= 8  # normale Ticket-Nachrichten auch als Turn zählen
+    return len(text) >= 8
 
 
-def match_faq(content: str) -> str | None:
-    """Gibt FAQ-Antwort oder None zurück (bester Keyword-Treffer)."""
+def match_faq(
+    content: str,
+    *,
+    ticket_kind: str = "order",
+) -> str | None:
+    """FAQ-Antwort oder None. ticket_kind: order|service — kein Payment-Spam in Support."""
     text = _normalize(content)
     if len(text) < 2 or len(text) > 500:
         return None
     if text.startswith("http") and " " not in text:
         return None
 
+    is_support = ticket_kind == "service"
+    allowed = {"support", "any"} if is_support else {"shop", "any"}
+
     best: FaqEntry | None = None
     best_len = 0
     for entry in FAQ:
+        if entry.scope not in allowed:
+            continue
         for key in entry.keys:
             k = _normalize(key)
             if len(k) < 2:
@@ -310,11 +358,14 @@ def match_faq(content: str) -> str | None:
     if best:
         return best.answer
 
-    # Sehr einfache Fallbacks
+    # Payment-/Shop-Fallbacks nur in Kauf-Tickets
+    if is_support:
+        return None
+
     if any(w in text for w in ("zahl", "bezahl", "pay", "geld", "ueberweis", "überweis")):
-        return match_faq("wie kann ich bezahlen money log")
+        return match_faq("wie kann ich bezahlen money log", ticket_kind=ticket_kind)
     if any(w in text for w in ("kauf", "pack", "bestell", "shop")):
-        return match_faq("wie kaufe ich ein pack")
+        return match_faq("wie kaufe ich ein pack", ticket_kind=ticket_kind)
     if any(w in text for w in ("bild", "screen", "foto", "proof", "beweis")):
         return MONEY_LOG_HINT
     return None

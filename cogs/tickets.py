@@ -345,9 +345,9 @@ class TicketsCog(commands.Cog):
             money_log_hint_enabled,
         )
 
-        money_on = money_log_hint_enabled(settings)
+        money_on = money_log_hint_enabled(settings) and ticket_kind == "order"
 
-        # Nur Bild ohne Text → Money-Log Hinweis (zählt nicht als Frage-Turn)
+        # Nur Bild ohne Text → Money-Log Hinweis (nur Kauf-Tickets)
         if not content and has_attach:
             if money_on and faq_cooldown_ok(message.channel.id):
                 try:
@@ -385,7 +385,7 @@ class TicketsCog(commands.Cog):
                 int(service["id"]), faq_turns=new_turns
             )
 
-        answer = match_faq(content)
+        answer = match_faq(content, ticket_kind=ticket_kind)
         staff_role = (
             message.guild.get_role(int(staff_id)) if staff_id else None
         )
@@ -405,14 +405,18 @@ class TicketsCog(commands.Cog):
                     mention_author=False,
                 )
             else:
+                staff_body = (
+                    "Dazu habe ich keine passende Auto-Antwort.\n"
+                    f"{staff_ping} — bitte kurz helfen.\n\n"
+                )
+                if money_on:
+                    staff_body += f"{MONEY_LOG_HINT}\n\n"
+                staff_body += f"Frage von {author.mention}:\n>>> {content[:500]}"
                 await message.channel.send(
                     content=staff_ping,
                     embed=warn_embed(
                         f"Staff nötig ({new_turns}/{MAX_FAQ_TURNS})",
-                        "Dazu habe ich keine passende Auto-Antwort.\n"
-                        f"{staff_ping} — bitte kurz helfen.\n\n"
-                        + (f"{MONEY_LOG_HINT}\n\n" if money_on else "")
-                        + f"Frage von {author.mention}:\n>>> {content[:500]}",
+                        staff_body,
                     ),
                     reference=message,
                     mention_author=False,
