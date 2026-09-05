@@ -173,6 +173,12 @@ class Database:
                 PRIMARY KEY (guild_id, user_id, day)
             );
 
+            CREATE TABLE IF NOT EXISTS scan_panel (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER,
+                message_id INTEGER
+            );
+
             CREATE TABLE IF NOT EXISTS daily_deals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER NOT NULL,
@@ -323,6 +329,19 @@ class Database:
                     day TEXT NOT NULL,
                     count INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (guild_id, user_id, day)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scan_panel (
+                    guild_id INTEGER PRIMARY KEY,
+                    channel_id INTEGER,
+                    message_id INTEGER
                 )
                 """
             )
@@ -1246,6 +1265,43 @@ class Database:
         )
         await self.db.commit()
         return await self.get_scan_usage_today(guild_id, user_id)
+
+    async def get_scan_panel(self, guild_id: int) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            "SELECT * FROM scan_panel WHERE guild_id = ?", (guild_id,)
+        )
+        return dict(row) if row else None
+
+    async def set_scan_panel(
+        self, guild_id: int, *, channel_id: int, message_id: int
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO scan_panel (guild_id, channel_id, message_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                channel_id = excluded.channel_id,
+                message_id = excluded.message_id
+            """,
+            (guild_id, channel_id, message_id),
+        )
+        await self.db.commit()
+
+    async def clear_scan_panel_message(self, guild_id: int) -> None:
+        await self.db.execute(
+            "UPDATE scan_panel SET message_id = NULL WHERE guild_id = ?",
+            (guild_id,),
+        )
+        await self.db.commit()
+
+    async def list_guilds_with_scan_panel(self) -> list[int]:
+        rows = await self.fetchall(
+            """
+            SELECT guild_id FROM scan_panel
+            WHERE message_id IS NOT NULL AND channel_id IS NOT NULL
+            """
+        )
+        return [int(r["guild_id"]) for r in rows]
 
     async def get_order(self, order_id: int) -> dict[str, Any] | None:
         row = await self.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))

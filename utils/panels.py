@@ -285,8 +285,18 @@ async def register_buy_panel_views(bot: "ShopBot", *, force: bool = False) -> No
     await register_category_panel_views(bot, force=force)
 
 
-async def refresh_slot_panel(bot: "ShopBot", guild: discord.Guild, slot: int) -> str:
-    """Aktualisiert die gespeicherte Panel-Nachricht per Edit (kein Neu-Posten)."""
+async def refresh_slot_panel(
+    bot: "ShopBot",
+    guild: discord.Guild,
+    slot: int,
+    *,
+    allow_repost: bool = False,
+) -> str:
+    """Aktualisiert die gespeicherte Panel-Nachricht per Edit.
+
+    Neu-Posten nur wenn allow_repost=True (z.B. explizit per Command).
+    Beim Bot-Start nie neu senden.
+    """
     row = await bot.db.ensure_buy_panel_slot(guild.id, slot)
     channel_id = row.get("channel_id")
     message_id = row.get("message_id")
@@ -316,7 +326,20 @@ async def refresh_slot_panel(bot: "ShopBot", guild: discord.Guild, slot: int) ->
     try:
         msg = await channel.fetch_message(int(message_id))
     except discord.NotFound:
-        # Nur wenn die alte Nachricht fehlt: neu posten
+        if not allow_repost:
+            await bot.db.db.execute(
+                """
+                UPDATE buy_panel_slots
+                SET message_id = NULL
+                WHERE guild_id = ? AND slot = ?
+                """,
+                (guild.id, slot),
+            )
+            await bot.db.db.commit()
+            return (
+                f"Panel {slot}: gespeicherte Nachricht fehlt — "
+                f"kein Auto-Post. Bitte `/buypanel` oder `/panelsetup`."
+            )
         new_msg = await channel.send(embed=embed, view=view)
         await bot.db.update_buy_panel_message(
             guild.id, slot, channel_id=channel.id, message_id=new_msg.id
@@ -330,13 +353,21 @@ async def refresh_slot_panel(bot: "ShopBot", guild: discord.Guild, slot: int) ->
     return f"Panel {slot}: aktualisiert in {channel.mention}"
 
 
-async def refresh_all_saved_buy_panels(bot: "ShopBot", guild_id: int | None = None) -> list[str]:
-    """Aktualisiert gespeicherte Buy Panels nach Bot-Start oder Config."""
+async def refresh_all_saved_buy_panels(
+    bot: "ShopBot",
+    guild_id: int | None = None,
+    *,
+    allow_repost: bool = False,
+) -> list[str]:
+    """Aktualisiert gespeicherte Buy Panels (Standard: nur Edit, kein Neu-Post)."""
     if guild_id is not None:
         guild = bot.get_guild(guild_id)
         if guild is None:
             return [f"Guild {guild_id} nicht gefunden"]
-        return [await refresh_slot_panel(bot, guild, slot) for slot in (1, 2)]
+        return [
+            await refresh_slot_panel(bot, guild, slot, allow_repost=allow_repost)
+            for slot in (1, 2)
+        ]
 
     results: list[str] = []
     guild_ids = await bot.db.list_guilds_with_panel_messages()
@@ -345,7 +376,9 @@ async def refresh_all_saved_buy_panels(bot: "ShopBot", guild_id: int | None = No
         if guild is None:
             continue
         for slot in (1, 2):
-            results.append(await refresh_slot_panel(bot, guild, slot))
+            results.append(
+                await refresh_slot_panel(bot, guild, slot, allow_repost=allow_repost)
+            )
     return results
 
 

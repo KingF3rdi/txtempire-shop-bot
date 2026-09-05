@@ -120,6 +120,43 @@ class ScannerCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(
+        name="scanpanel",
+        description="Scan-Panel posten oder aktualisieren (DM/URL + Premium)",
+    )
+    @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def scanpanel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
+            await interaction.response.send_message(
+                embed=error_embed("Kein Channel", "Bitte einen Text-Channel wählen."),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        from views.scan_panel import post_or_refresh_scan_panel
+
+        msg = await post_or_refresh_scan_panel(
+            self.bot, interaction.guild, target
+        )
+        await interaction.followup.send(
+            embed=success_embed(
+                "Scan-Panel",
+                f"Panel in {target.mention}: {msg.jump_url}\n"
+                "Datei per DM / URL · Premium per Zahlung oder Credits.",
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
         name="scan",
         description="ZIP/RAR/JAR auf RATs, Stealer und verdächtige Dateien scannen",
     )

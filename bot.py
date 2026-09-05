@@ -43,6 +43,9 @@ class ShopBot(commands.Bot):
         await register_category_panel_views(self)
         # Mit Fast-Buy-Button registrieren (erscheint nur auf Credits-Tickets)
         self.add_view(TicketOrderView(self, show_fast_buy=True))
+        from views.scan_panel import ScanPanelView
+
+        self.add_view(ScanPanelView(self))
         n_deals = await register_daily_deal_views(self)
         if n_deals:
             print(f"[DailyDeal] {n_deals} aktive Deal-View(s) registriert")
@@ -207,6 +210,10 @@ class ShopBot(commands.Bot):
                 await register_category_panel_views(self, force=True)
                 for line in await refresh_all_saved_buy_panels(self, config.GUILD_ID):
                     print(f"[BuyPanel] {line}")
+                from views.scan_panel import refresh_scan_panel_on_ready
+
+                for line in await refresh_scan_panel_on_ready(self):
+                    print(f"[ScanPanel] {line}")
         else:
             from utils.panels import (
                 refresh_all_saved_buy_panels,
@@ -218,6 +225,10 @@ class ShopBot(commands.Bot):
             await register_category_panel_views(self, force=True)
             for line in await refresh_all_saved_buy_panels(self):
                 print(f"[BuyPanel] {line}")
+            from views.scan_panel import refresh_scan_panel_on_ready
+
+            for line in await refresh_scan_panel_on_ready(self):
+                print(f"[ScanPanel] {line}")
         print("Bot ist bereit.")
 
 

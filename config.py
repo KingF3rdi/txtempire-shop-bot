@@ -33,3 +33,12 @@ SCAN_PREMIUM_DAILY = int(os.getenv("SCAN_PREMIUM_DAILY", "15") or "15")
 # Preise für Scan-Premium (Shop-Währung, 1 Credit = 100k)
 SCAN_PREMIUM_14_PRICE = float(os.getenv("SCAN_PREMIUM_14_PRICE", "500000") or "500000")
 SCAN_PREMIUM_30_PRICE = float(os.getenv("SCAN_PREMIUM_30_PRICE", "900000") or "900000")
+# Credits-Preis (leer = aus Währungspreis / 100k ableiten)
+_SCAN_14_CREDITS = os.getenv("SCAN_PREMIUM_14_CREDITS", "").strip()
+_SCAN_30_CREDITS = os.getenv("SCAN_PREMIUM_30_CREDITS", "").strip()
+SCAN_PREMIUM_14_CREDITS = (
+    float(_SCAN_14_CREDITS) if _SCAN_14_CREDITS else SCAN_PREMIUM_14_PRICE / 100_000
+)
+SCAN_PREMIUM_30_CREDITS = (
+    float(_SCAN_30_CREDITS) if _SCAN_30_CREDITS else SCAN_PREMIUM_30_PRICE / 100_000
+)
