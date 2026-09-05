@@ -271,6 +271,66 @@ class ScannerCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @scan.command(
+        name="url",
+        description="ZIP/RAR/JAR per Download-URL scannen",
+    )
+    @app_commands.describe(url="Direkter http(s)-Link zur Archiv-Datei")
+    async def scan_url(
+        self,
+        interaction: discord.Interaction,
+        url: str,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Nur auf dem Server", "Scans nur im Server."),
+                ephemeral=True,
+            )
+            return
+
+        staff = await is_staff(self.bot, interaction)
+        await interaction.response.defer(ephemeral=True)
+
+        preview = await get_scan_quota(
+            self.bot,
+            interaction.guild.id,
+            interaction.user.id,
+            is_staff=staff,
+        )
+        if not staff and preview["remaining"] <= 0:
+            tier = "Premium (15/Tag)" if preview["premium"] else "Free (1/Tag)"
+            await interaction.followup.send(
+                embed=error_embed(
+                    "Scan-Limit",
+                    f"Tageslimit erreicht ({tier}). "
+                    f"Heute: **{preview['used']}/{preview['limit']}**.\n"
+                    "Hol dir **Scan Premium** mit `/scanpremium`.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        from utils.scan_download import download_archive_from_url
+
+        try:
+            data, filename = await download_archive_from_url(url)
+        except ValueError as e:
+            await interaction.followup.send(
+                embed=error_embed("URL-Scan fehlgeschlagen", str(e)[:800]),
+                ephemeral=True,
+            )
+            return
+
+        from views.scan_panel import deliver_scan_result
+
+        await deliver_scan_result(
+            self.bot,
+            interaction,
+            data=data,
+            filename=filename,
+            guild_id=interaction.guild.id,
+        )
+
+    @scan.command(
         name="stats",
         description="Scan-Statistik: Premium, Scans, gut/schlecht nach Kategorien",
     )

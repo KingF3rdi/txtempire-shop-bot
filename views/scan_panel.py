@@ -2,18 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
 import discord
-import httpx
 
 import config
-from utils.archive_scanner import (
-    ARCHIVE_EXTS,
-    MAX_ARCHIVE_BYTES,
-    is_scannable_filename,
-    scan_archive_bytes,
-)
+from utils.archive_scanner import is_scannable_filename, scan_archive_bytes
 from utils.credits import format_credits
 from utils.embeds import base_embed, error_embed, format_price, success_embed, warn_embed
 from utils.scan_limits import consume_scan_quota, get_scan_quota
@@ -34,7 +27,8 @@ async def build_scan_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embed:
         f"• 14 Tage Premium: **{config.SCAN_PREMIUM_DAILY} Scans/Tag**\n"
         f"• 30 Tage Premium: **unbegrenzte Scans**\n\n"
         "**Datei hier droppen** — ohne DM, direkt im Channel\n"
-        "**URL scannen** — direkten Download-Link eingeben\n"
+        "**URL scannen** — Download-Link (Discord-CDN, Dropbox `dl=1`, Drive)\n"
+        "Auch: `/scan url` · `/scan file`\n"
         "Ergebnis privat (ephemeral / DM). Erfolgreiche Scans landen im Log-Channel.\n\n"
         "⚠️ **Keine 100 %-Garantie** — Heuristik, kein vollständiger Virenscan.",
     )
@@ -196,9 +190,9 @@ run_scan_and_dm = deliver_scan_result
 class ScanUrlModal(discord.ui.Modal, title="Datei-URL scannen"):
     url = discord.ui.TextInput(
         label="Datei-URL",
-        placeholder="https://…/file.zip",
-        style=discord.TextStyle.short,
-        max_length=400,
+        placeholder="https://cdn.discordapp.com/…/file.zip",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
         required=True,
     )
 
@@ -209,49 +203,23 @@ class ScanUrlModal(discord.ui.Modal, title="Datei-URL scannen"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         raw = str(self.url.value).strip()
-        parsed = urlparse(raw)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            await interaction.response.send_message(
-                embed=error_embed("Ungültige URL", "Nur http(s)-Links erlaubt."),
+        await interaction.response.defer(ephemeral=True)
+
+        from utils.scan_download import download_archive_from_url
+
+        try:
+            data, path_name = await download_archive_from_url(raw)
+        except ValueError as e:
+            await interaction.followup.send(
+                embed=error_embed("URL-Scan fehlgeschlagen", str(e)[:800]),
                 ephemeral=True,
             )
             return
-
-        path_name = parsed.path.rsplit("/", 1)[-1] or "download.bin"
-        if not is_scannable_filename(path_name):
-            if not any(path_name.lower().endswith(ext) for ext in ARCHIVE_EXTS):
-                await interaction.response.send_message(
-                    embed=error_embed(
-                        "Dateityp",
-                        "URL sollte auf **.zip / .rar / .jar** enden.",
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-        await interaction.response.defer(ephemeral=True)
-        try:
-            async with httpx.AsyncClient(
-                timeout=60.0, follow_redirects=True
-            ) as client:
-                resp = await client.get(raw)
-                resp.raise_for_status()
-                data = resp.content
         except Exception as e:
             await interaction.followup.send(
                 embed=error_embed(
                     "Download fehlgeschlagen",
-                    f"Datei konnte nicht geladen werden: `{type(e).__name__}`",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        if len(data) > MAX_ARCHIVE_BYTES:
-            await interaction.followup.send(
-                embed=error_embed(
-                    "Zu groß",
-                    f"Max. {MAX_ARCHIVE_BYTES // (1024 * 1024)} MB.",
+                    f"`{type(e).__name__}: {e}`"[:800],
                 ),
                 ephemeral=True,
             )
