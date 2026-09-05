@@ -155,7 +155,7 @@ def build_buy_panel_embed(
     filtered = apply_panel_filter(categories, panel_filter or PanelFilter.all_categories())
 
     credits_line = (
-        "\n• **Buy Credits** — Credits kaufen (1 Credit = 100k)"
+        "\n• **Credits** — Credits kaufen (1 Credit = 100k)"
         if credits_enabled
         else ""
     )
@@ -216,7 +216,7 @@ def build_buy_panel_embed(
             name="Credits",
             value=(
                 "**Aktiv** — 1 Credit = **100k**\n"
-                "Nach dem Checkout: **Fast Buy** im Ticket mit Credits bezahlen."
+                "Nach dem Checkout: **Quick Buy** im Ticket mit Credits bezahlen."
             ),
             inline=False,
         )

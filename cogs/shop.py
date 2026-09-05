@@ -159,7 +159,7 @@ class ShopCog(commands.Cog):
         slot="Welches Panel konfiguriert werden soll",
         mode="Welche Kategorien im Panel sichtbar sind",
         title="Optional: eigener Titel auf dem Panel",
-        credits="Credits / Fast Buy auf diesem Panel aktivieren",
+        credits="Credits / Quick Buy auf diesem Panel aktivieren",
     )
     @app_commands.choices(
         slot=[
@@ -172,7 +172,7 @@ class ShopCog(commands.Cog):
             app_commands.Choice(name="Alle außer diese", value="exclude"),
         ],
         credits=[
-            app_commands.Choice(name="Credits an (Buy Credits + Fast Buy)", value=1),
+            app_commands.Choice(name="Credits an (Credits-Button + Quick Buy)", value=1),
             app_commands.Choice(name="Credits aus", value=0),
         ],
     )
@@ -344,6 +344,81 @@ class ShopCog(commands.Cog):
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
             await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="buypanelcredits",
+        description="Credits-Button + Quick Buy für Buy Panel 1 oder 2 an/aus",
+    )
+    @app_commands.describe(
+        slot="Welches Panel",
+        enabled="Credits aktivieren (Button erscheint auf dem Panel)",
+    )
+    @app_commands.choices(
+        slot=[
+            app_commands.Choice(name="Buy Panel 1", value=1),
+            app_commands.Choice(name="Buy Panel 2", value=2),
+        ],
+        enabled=[
+            app_commands.Choice(name="An — Credits-Button + Quick Buy", value=1),
+            app_commands.Choice(name="Aus", value=0),
+        ],
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def buypanelcredits(
+        self,
+        interaction: discord.Interaction,
+        slot: app_commands.Choice[int],
+        enabled: app_commands.Choice[int],
+    ) -> None:
+        assert interaction.guild is not None
+        panel_slot = slot.value
+        on = bool(enabled.value)
+        await interaction.response.defer(ephemeral=True)
+
+        await self.bot.db.set_buy_panel_credits(
+            interaction.guild.id, panel_slot, on
+        )
+        await ensure_buy_panel_slot_view(self.bot, panel_slot)
+
+        row = await self.bot.db.ensure_buy_panel_slot(
+            interaction.guild.id, panel_slot
+        )
+        refresh_note = ""
+        channel_id = row.get("channel_id")
+        if channel_id:
+            channel = interaction.guild.get_channel(int(channel_id))
+            if isinstance(channel, discord.TextChannel):
+                msg = await _post_slot_panel(
+                    self.bot,
+                    interaction.guild,
+                    channel,
+                    panel_slot,
+                    force_repost=True,
+                )
+                refresh_note = f"\nPanel aktualisiert: {msg.jump_url}"
+            else:
+                refresh_note = (
+                    "\nChannel nicht gefunden — `/buypanel` erneut posten."
+                )
+        else:
+            refresh_note = (
+                "\nKein Panel gepostet — danach `/buypanel` oder `/panelsetup`."
+            )
+
+        await interaction.followup.send(
+            embed=success_embed(
+                f"Buy Panel {panel_slot} — Credits",
+                (
+                    "**An** — Button **Credits** auf dem Panel, "
+                    "**Quick Buy** in Produkt-Tickets.\n"
+                    "1 Credit = **100k**."
+                    if on
+                    else "**Aus** — Credits-Button entfernt."
+                )
+                + refresh_note,
+            ),
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="buypanelstatus",

@@ -251,7 +251,7 @@ async def action_confirm_order(
                     "Zu wenig Credits",
                     f"Benötigt: **{format_credits(charged)}** · "
                     f"Guthaben: **{format_credits(bal)}**\n"
-                    "Kaufe Credits über **Buy Credits** auf dem Panel.",
+                    "Kaufe Credits über den **Credits**-Button auf dem Panel.",
                 ),
                 ephemeral=True,
             )
@@ -324,7 +324,7 @@ async def action_confirm_order(
     if paid_with_credits and charged is not None:
         bal = await bot.db.get_credits(int(order["guild_id"]), int(order["user_id"]))
         extra_parts.append(
-            f"⚡ Fast Buy: **{format_credits(charged)} Credits** abgezogen "
+            f"⚡ Quick Buy: **{format_credits(charged)} Credits** abgezogen "
             f"(Rest: **{format_credits(bal)}**)."
         )
     if delivery_info.get("dm_sent"):
@@ -388,7 +388,7 @@ async def action_fast_buy(bot: ShopBot, interaction: discord.Interaction) -> Non
         return
     if interaction.user.id != int(order["user_id"]):
         await interaction.response.send_message(
-            embed=error_embed("Nur Käufer", "Nur der Käufer kann Fast Buy nutzen."),
+            embed=error_embed("Nur Käufer", "Nur der Käufer kann Quick Buy nutzen."),
             ephemeral=True,
         )
         return
@@ -396,7 +396,7 @@ async def action_fast_buy(bot: ShopBot, interaction: discord.Interaction) -> Non
         await interaction.response.send_message(
             embed=error_embed(
                 "Nicht verfügbar",
-                "Fast Buy ist nur bei Credits-aktivierten Buy-Panels verfügbar.",
+                "Quick Buy ist nur bei Credits-aktivierten Buy-Panels verfügbar.",
             ),
             ephemeral=True,
         )
@@ -405,7 +405,7 @@ async def action_fast_buy(bot: ShopBot, interaction: discord.Interaction) -> Non
         await interaction.response.send_message(
             embed=error_embed(
                 "Nicht verfügbar",
-                "Fast Buy gilt nur für Produkt-Käufe, nicht für Credits-Tickets.",
+                "Quick Buy gilt nur für Produkt-Käufe, nicht für Credits-Tickets.",
             ),
             ephemeral=True,
         )
@@ -543,7 +543,7 @@ class TicketOrderView(discord.ui.View):
 
         if show_fast_buy:
             fast_btn = discord.ui.Button(
-                label="Fast Buy (Credits)",
+                label="Quick Buy",
                 style=discord.ButtonStyle.success,
                 custom_id="ticket:fast_buy",
                 emoji="⚡",

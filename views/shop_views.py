@@ -149,7 +149,7 @@ class BuyPanelView(discord.ui.View):
 
         if panel_slot is not None and credits_enabled:
             credits_btn = discord.ui.Button(
-                label="Buy Credits",
+                label="Credits",
                 style=discord.ButtonStyle.primary,
                 custom_id=f"buy:credits{suffix}",
                 emoji="🪙",
@@ -229,10 +229,22 @@ class BuyPanelView(discord.ui.View):
                 ),
             )
             return
-        from views.credits_views import BuyCreditsModal
+        from views.credits_views import BuyCreditsAmountView
+        from utils.credits import CREDIT_VALUE, format_credits
 
-        await interaction.response.send_modal(
-            BuyCreditsModal(self.bot, panel_slot=slot)
+        balance = await self.bot.db.get_credits(
+            interaction.guild.id, interaction.user.id
+        )
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Credits kaufen",
+                f"1 Credit = **{int(CREDIT_VALUE / 1000)}k**\n"
+                f"Dein Guthaben: **{format_credits(balance)} Credits**\n\n"
+                "Wähle aus, wie viele Credits du kaufen möchtest — "
+                "danach öffnet sich ein Ticket mit dem Betrag.",
+            ),
+            view=BuyCreditsAmountView(self.bot, panel_slot=slot),
+            ephemeral=True,
         )
 
     async def _buy(self, interaction: discord.Interaction) -> None:
@@ -314,8 +326,8 @@ class BuyPanelView(discord.ui.View):
                 credits_info = (
                     f"\n\n**Credits** (dein Guthaben: **{format_credits(balance)}**)\n"
                     f"• 1 Credit = **{int(CREDIT_VALUE / 1000)}k**\n"
-                    "• **Buy Credits** — Credits kaufen\n"
-                    "• Im Ticket: **Fast Buy** — sofort mit Credits bezahlen"
+                    "• **Credits** — Credits kaufen\n"
+                    "• Im Ticket: **Quick Buy** — sofort mit Credits bezahlen"
                 )
         await interaction.followup.send(
             embed=success_embed(
@@ -536,7 +548,7 @@ async def start_checkout(
         balance = await bot.db.get_credits(interaction.guild.id, interaction.user.id)
         extra = (
             f"\n\n🪙 **Credits aktiv** — Guthaben: **{format_credits(balance)}**\n"
-            "Im Ticket kannst du **Fast Buy** nutzen."
+            "Im Ticket kannst du **Quick Buy** nutzen."
         )
     await interaction.followup.send(
         embed=success_embed(

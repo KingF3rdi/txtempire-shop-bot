@@ -225,7 +225,7 @@ async def create_order_ticket(
         need = credits_needed_for_total(float(order["total"]))
         bal = await bot.db.get_credits(guild.id, interaction.user.id)
         credits_hint = (
-            f"\n🪙 **Fast Buy verfügbar** — kostet **{format_credits(need)} Credits** "
+            f"\n🪙 **Quick Buy verfügbar** — kostet **{format_credits(need)} Credits** "
             f"(Guthaben: {format_credits(bal)})."
         )
 
