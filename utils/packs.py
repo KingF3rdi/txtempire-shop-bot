@@ -20,8 +20,16 @@ def _safe_filename(name: str) -> str:
     return name[:180] or "pack.bin"
 
 
-async def save_pack_attachment(item_id: int, attachment: discord.Attachment) -> str:
-    """Speichert Anhang unter data/packs/ und gibt relativen Pfad zurück."""
+async def save_pack_attachment(
+    item_id: int,
+    attachment: discord.Attachment,
+    *,
+    scan: bool = True,
+) -> str:
+    """Speichert Anhang unter data/packs/ und gibt relativen Pfad zurück.
+
+    Bei ZIP/RAR/JAR wird auf RAT-/Malware-Indikatoren gescannt.
+    """
     if attachment.size and attachment.size > MAX_PACK_BYTES:
         raise ValueError(f"Datei zu groß (max. {MAX_PACK_BYTES // (1024 * 1024)} MB).")
 
@@ -30,6 +38,21 @@ async def save_pack_attachment(item_id: int, attachment: discord.Attachment) -> 
     dest = DATA_DIR / rel
     dest.parent.mkdir(parents=True, exist_ok=True)
     await attachment.save(dest)
+
+    if scan:
+        from utils.archive_scanner import is_scannable_filename, scan_archive_path
+
+        if is_scannable_filename(filename):
+            result = scan_archive_path(dest)
+            if result.is_blocked:
+                try:
+                    dest.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise ValueError(
+                    "Pack abgelehnt — verdächtige Inhalte (RAT/Malware):\n"
+                    + result.summary(limit=8)
+                )
     return rel.replace("\\", "/")
 
 
