@@ -393,6 +393,17 @@ async def action_confirm_order(
             inline=False,
         )
 
+    if not non_product:
+        from utils.vouch_channel_perms import sync_vouch_write_permission
+
+        asyncio.create_task(
+            sync_vouch_write_permission(
+                bot,
+                guild_id=int(order["guild_id"]),
+                user_id=int(order["user_id"]),
+            )
+        )
+
     await interaction.followup.send(embed=success)
 
     if not non_product:

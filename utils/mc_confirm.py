@@ -257,6 +257,17 @@ async def confirm_order_by_id(
             inline=False,
         )
 
+        if not non_product:
+            from utils.vouch_channel_perms import sync_vouch_write_permission
+
+            asyncio.create_task(
+                sync_vouch_write_permission(
+                    bot,
+                    guild_id=guild_id,
+                    user_id=int(order["user_id"]),
+                )
+            )
+
         if channel is not None:
             try:
                 mention = member.mention if member else f"<@{order['user_id']}>"

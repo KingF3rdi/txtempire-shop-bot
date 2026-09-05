@@ -93,6 +93,9 @@ class SetupCog(commands.Cog):
             vouch_channel_id=vouch_channel.id,
             max_open_tickets=int(max_tickets),
         )
+        from utils.vouch_channel_perms import lock_vouch_channel_defaults
+
+        await lock_vouch_channel_defaults(vouch_channel)
         await interaction.response.send_message(
             embed=success_embed(
                 "Setup gespeichert",

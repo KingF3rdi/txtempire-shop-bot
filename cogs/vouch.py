@@ -9,6 +9,13 @@ from discord.ext import commands
 import config
 from integrations.shop_api import shop_api
 from utils.embeds import error_embed, format_price, order_ref, success_embed
+from utils.vouch_channel_perms import (
+    get_vouch_text_channel,
+    is_staff_writer,
+    lock_vouch_channel_defaults,
+    sync_vouch_write_permission,
+    user_has_free_vouch,
+)
 
 if TYPE_CHECKING:
     from bot import ShopBot
@@ -30,23 +37,7 @@ def _resolve_guild_id(interaction: discord.Interaction) -> int | None:
 async def _get_vouch_channel(
     bot: ShopBot, guild_id: int
 ) -> discord.TextChannel | None:
-    guild = bot.get_guild(guild_id)
-    if guild is None:
-        try:
-            guild = await bot.fetch_guild(guild_id)
-        except discord.HTTPException:
-            return None
-    settings = await bot.db.ensure_guild(guild_id)
-    channel_id = settings.get("vouch_channel_id")
-    if not channel_id:
-        return None
-    channel = guild.get_channel(int(channel_id))
-    if channel is None:
-        try:
-            channel = await guild.fetch_channel(int(channel_id))
-        except discord.HTTPException:
-            return None
-    return channel if isinstance(channel, discord.TextChannel) else None
+    return await get_vouch_text_channel(bot, guild_id)
 
 
 async def _post_local_vouch_embed(
@@ -139,6 +130,10 @@ async def _submit_local_vouch(
         order=order,
     )
 
+    await sync_vouch_write_permission(
+        bot, guild_id=int(order["guild_id"]), user_id=interaction.user.id
+    )
+
     from utils.vouch_stats import refresh_vouch_stats_under_latest
 
     await refresh_vouch_stats_under_latest(
@@ -167,6 +162,53 @@ async def _submit_local_vouch(
 class VouchCog(commands.Cog):
     def __init__(self, bot: ShopBot) -> None:
         self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        # Channel-Defaults einmalig härten (idempotent)
+        for guild in self.bot.guilds:
+            channel = await _get_vouch_channel(self.bot, guild.id)
+            if channel is not None:
+                await lock_vouch_channel_defaults(channel)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """Im Vouch-Channel: ohne freien Vouch löschen (Staff ausgenommen)."""
+        if message.author.bot or message.guild is None:
+            return
+        if not isinstance(message.channel, discord.TextChannel):
+            return
+        if not isinstance(message.author, discord.Member):
+            return
+
+        settings = await self.bot.db.ensure_guild(message.guild.id)
+        vouch_ch_id = settings.get("vouch_channel_id")
+        if not vouch_ch_id or int(vouch_ch_id) != message.channel.id:
+            return
+
+        if is_staff_writer(message.author):
+            return
+
+        if await user_has_free_vouch(
+            self.bot, message.guild.id, message.author.id
+        ):
+            return
+
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            return
+        try:
+            await message.author.send(
+                embed=error_embed(
+                    "Vouch-Channel gesperrt",
+                    "Du kannst dort nur schreiben, wenn du einen **freien Vouch** "
+                    "hast (nach bestätigtem Kauf).\n"
+                    "Nutze dann `/vouch` — oder warte auf die Vouch-DM.",
+                )
+            )
+        except discord.HTTPException:
+            pass
 
     @app_commands.command(
         name="vouch",
@@ -248,6 +290,7 @@ class VouchCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         from utils.vouch_stats import refresh_vouch_stats_under_latest
 
+        await lock_vouch_channel_defaults(channel)
         msg = await refresh_vouch_stats_under_latest(
             self.bot, channel, interaction.guild.id
         )
