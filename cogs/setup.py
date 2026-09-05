@@ -509,6 +509,172 @@ class SetupCog(commands.Cog):
     ) -> list[app_commands.Choice[int]]:
         return await self.item_setpack_ac(interaction, current)
 
+    @item.command(
+        name="new",
+        description="Bestehendes Item als NEU markieren + Buy-Panel (optional Launch-Code)",
+    )
+    @app_commands.describe(
+        item="Item (tippen zum Suchen)",
+        channel="Channel fürs Buy-Panel (Standard: hier)",
+        code="Optional: neuen limitierten Rabattcode anlegen",
+        discount_type="Rabattart — nur wenn code gesetzt",
+        discount_value="z.B. 10 (%) oder 50k — nur wenn code gesetzt",
+        max_uses="Max. Gesamtnutzungen für den Code (Standard: 5)",
+        clear="Nur Markierung entfernen (kein Panel)",
+    )
+    @app_commands.choices(
+        discount_type=[
+            app_commands.Choice(name="Prozent (%)", value="percent"),
+            app_commands.Choice(name="Betrag", value="amount"),
+        ],
+    )
+    async def item_new(
+        self,
+        interaction: discord.Interaction,
+        item: int,
+        channel: Optional[discord.TextChannel] = None,
+        code: Optional[str] = None,
+        discount_type: Optional[app_commands.Choice[str]] = None,
+        discount_value: Optional[str] = None,
+        max_uses: app_commands.Range[int, 1, 1000] = 5,
+        clear: bool = False,
+    ) -> None:
+        assert interaction.guild is not None
+        row = await self.bot.db.get_item(item)
+        if not row or int(row["guild_id"]) != interaction.guild.id:
+            await interaction.response.send_message(
+                embed=error_embed("Item nicht gefunden"), ephemeral=True
+            )
+            return
+
+        if clear:
+            await self.bot.db.update_item(item, is_new=0, marked_new_at=None)
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Neu-Markierung entfernt",
+                    f"**{row['name']}** (ID `{item}`) ist nicht mehr als neu markiert.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        if not int(row.get("active") or 0):
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Item deaktiviert",
+                    "Bitte Item zuerst aktivieren, bevor du es als neu postest.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        code_raw = (code or "").strip()
+        want_code = bool(code_raw)
+        if want_code and (discount_type is None or not (discount_value or "").strip()):
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Rabatt unvollständig",
+                    "Mit `code` bitte auch **discount_type** und **discount_value** setzen.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        dval: float | None = None
+        dtype: str | None = None
+        if want_code:
+            from cogs.discount_codes import _parse_discount_value
+
+            dtype = discount_type.value  # type: ignore[union-attr]
+            try:
+                dval = _parse_discount_value(dtype, discount_value or "")
+            except ValueError as e:
+                await interaction.response.send_message(
+                    embed=error_embed("Ungültiger Rabattwert", str(e)),
+                    ephemeral=True,
+                )
+                return
+            existing = await self.bot.db.get_discount_code(
+                interaction.guild.id, code_raw
+            )
+            if existing:
+                await interaction.response.send_message(
+                    embed=error_embed(
+                        "Code existiert schon",
+                        f"`{code_raw.upper()}` ist bereits angelegt. "
+                        "Anderen Code wählen oder ohne `code` nur Panel posten.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Kein Channel",
+                    "Bitte `channel` setzen oder den Befehl in einem Text-Channel ausführen.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        from datetime import datetime, timezone
+
+        await self.bot.db.update_item(
+            item,
+            is_new=1,
+            marked_new_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        row = await self.bot.db.get_item(item) or row
+
+        code_note = ""
+        discount_code: str | None = None
+        discount_label: str | None = None
+        if want_code and dtype is not None and dval is not None:
+            code_note, discount_code, discount_label = await self._maybe_create_launch_code(
+                guild_id=interaction.guild.id,
+                user_id=interaction.user.id,
+                code_raw=code_raw,
+                dtype=dtype,
+                dval=dval,
+                label=f"Launch · {row['name']}"[:100],
+                max_uses=int(max_uses),
+            )
+
+        try:
+            msg = await self._post_item_buy_panel(
+                guild_id=interaction.guild.id,
+                target=target,
+                item_id=item,
+                discount_code=discount_code,
+                discount_label=discount_label,
+            )
+        except ValueError as e:
+            await interaction.followup.send(
+                embed=error_embed("Panel fehlgeschlagen", str(e)), ephemeral=True
+            )
+            return
+
+        await interaction.followup.send(
+            embed=success_embed(
+                "Als NEU markiert + Panel",
+                f"**{row['name']}** (ID `{item}`) → {msg.jump_url}"
+                f"{code_note}",
+            ),
+            ephemeral=True,
+        )
+
+    @item_new.autocomplete("item")
+    async def item_new_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[int]]:
+        return await self.item_setpack_ac(interaction, current)
+
     @item.command(name="list", description="Items einer Kategorie auflisten")
     @app_commands.describe(category="Kategorie (tippen zum Suchen, leer = alle)")
     @app_commands.default_permissions(manage_guild=True)
@@ -527,9 +693,12 @@ class SetupCog(commands.Cog):
             )
             return
         lines = [
-            f"`{i['id']}` **{i['name']}** — {format_price(float(i['price']))} "
-            f"(Cat `{i['category_id']}`)"
-            + (" · inaktiv" if not i["active"] else "")
+            (
+                f"{'🆕 ' if int(i.get('is_new') or 0) else ''}"
+                f"`{i['id']}` **{i['name']}** — {format_price(float(i['price']))} "
+                f"(Cat `{i['category_id']}`)"
+                + (" · inaktiv" if not i["active"] else "")
+            )
             for i in items[:40]
         ]
         await interaction.response.send_message(
@@ -617,17 +786,20 @@ class SetupCog(commands.Cog):
         dtype: str,
         dval: float,
         label: str,
+        max_uses: int = 5,
+        max_per_user: int = 1,
     ) -> tuple[str, str, str]:
         """Returns (code_note, discount_code, discount_label)."""
         from utils.discount_codes import format_code_discount
 
+        uses = max(1, int(max_uses))
         code_id = await self.bot.db.create_discount_code(
             guild_id,
             code_raw,
             discount_type=dtype,
             discount_value=dval,
-            max_uses=5,
-            max_per_user=1,
+            max_uses=uses,
+            max_per_user=max(1, int(max_per_user)),
             label=label[:100],
             created_by=user_id,
             kind="rabatt",
@@ -636,7 +808,7 @@ class SetupCog(commands.Cog):
         discount_label = format_code_discount(dtype, dval)
         note = (
             f"\n\n**Rabattcode** `{discount_code}` — {discount_label}\n"
-            f"Limit: **5** Uses · max. **1**/User · ID `{code_id}`"
+            f"Limit: **{uses}** Uses · max. **{max_per_user}**/User · ID `{code_id}`"
         )
         return note, discount_code, discount_label
 
@@ -765,6 +937,13 @@ class SetupCog(commands.Cog):
             pack_dm_text=pack_dm[:1500],
             pack_link=pack_link[:500],
             role_id=role.id if role else None,
+        )
+        from datetime import datetime, timezone
+
+        await self.bot.db.update_item(
+            iid,
+            is_new=1,
+            marked_new_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         )
 
         pack_note = ""
@@ -1096,6 +1275,13 @@ class SetupCog(commands.Cog):
                 pack_dm_text=pack_dm[:1500],
                 pack_link=pack_link[:500],
                 role_id=role.id if role else None,
+            )
+            from datetime import datetime, timezone
+
+            await self.bot.db.update_item(
+                iid,
+                is_new=1,
+                marked_new_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             )
             created_new = True
             display_name = (name or "")[:100]

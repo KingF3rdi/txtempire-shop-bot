@@ -19,11 +19,19 @@ def build_item_buy_embed(
     category_name: str | None = None,
     discount_code: str | None = None,
     discount_label: str | None = None,
+    mark_as_new: bool | None = None,
 ) -> discord.Embed:
     price = float(item["price"])
+    is_new = (
+        bool(mark_as_new)
+        if mark_as_new is not None
+        else bool(int(item.get("is_new") or 0))
+    )
     desc_parts = [
         f"**{item['name']}** — **{format_price(price)}**",
     ]
+    if is_new:
+        desc_parts.append("🆕 **Neu im Shop**")
     if category_name:
         desc_parts.append(f"Kategorie: **{category_name}**")
     item_desc = (item.get("description") or "").strip()
@@ -44,7 +52,8 @@ def build_item_buy_embed(
                 + " (im Ticket unter **Rabatt / Creator Code**)",
             ]
         )
-    embed = base_embed(f"Neu: {item['name'][:80]}", "\n".join(desc_parts))
+    title = f"🆕 Neu: {item['name'][:70]}" if is_new else f"{item['name'][:80]}"
+    embed = base_embed(title, "\n".join(desc_parts))
     embed.set_footer(text=f"Item #{item['id']} · {PAYMENT_NOTICE}")
     return embed
 

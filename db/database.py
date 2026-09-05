@@ -301,6 +301,8 @@ class Database:
             ("service_tickets", "faq_turns", "INTEGER NOT NULL DEFAULT 0"),
             ("guild_settings", "mc_payment_log_channel_id", "INTEGER"),
             ("guild_settings", "mc_auto_confirm", "INTEGER NOT NULL DEFAULT 1"),
+            ("items", "is_new", "INTEGER NOT NULL DEFAULT 0"),
+            ("items", "marked_new_at", "TEXT"),
         ):
             try:
                 await self.db.execute(
