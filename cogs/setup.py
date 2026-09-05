@@ -13,6 +13,36 @@ if TYPE_CHECKING:
     from bot import ShopBot
 
 
+def _can_manage_guild(interaction: discord.Interaction) -> bool:
+    user = interaction.user
+    if not isinstance(user, discord.Member):
+        return False
+    return bool(
+        user.guild_permissions.manage_guild or user.guild_permissions.administrator
+    )
+
+
+async def _deny_manage_guild(interaction: discord.Interaction) -> None:
+    embed = error_embed(
+        "Keine Berechtigung",
+        "Nur Admins / Mitglieder mit **Server verwalten** dürfen das.",
+    )
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class ManageGuildGroup(app_commands.Group):
+    """Slash-Gruppe: Discord-Default + harte Runtime-Prüfung."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if _can_manage_guild(interaction):
+            return True
+        await _deny_manage_guild(interaction)
+        return False
+
+
 class SetupCog(commands.Cog):
     def __init__(self, bot: ShopBot) -> None:
         self.bot = bot
@@ -43,6 +73,18 @@ class SetupCog(commands.Cog):
         max_tickets: app_commands.Range[int, 1, 10] = 1,
     ) -> None:
         assert interaction.guild is not None
+        if not (
+            isinstance(interaction.user, discord.Member)
+            and interaction.user.guild_permissions.administrator
+        ):
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Keine Berechtigung",
+                    "Nur **Administratoren** dürfen `/setup` nutzen.",
+                ),
+                ephemeral=True,
+            )
+            return
         await self.bot.db.update_guild_settings(
             interaction.guild.id,
             staff_role_id=staff_role.id,
@@ -76,6 +118,9 @@ class SetupCog(commands.Cog):
         details: str,
     ) -> None:
         assert interaction.guild is not None
+        if not _can_manage_guild(interaction):
+            await _deny_manage_guild(interaction)
+            return
         await self.bot.db.update_guild_settings(
             interaction.guild.id,
             payee_a_label=name[:100],
@@ -91,7 +136,11 @@ class SetupCog(commands.Cog):
             ephemeral=True,
         )
 
-    category = app_commands.Group(name="category", description="Kategorien verwalten")
+    category = ManageGuildGroup(
+        name="category",
+        description="Kategorien verwalten",
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
 
     @category.command(name="add", description="Kategorie hinzufügen")
     @app_commands.describe(
@@ -242,7 +291,11 @@ class SetupCog(commands.Cog):
     ) -> list[app_commands.Choice[int]]:
         return await self._cat_ac(interaction, current)
 
-    item = app_commands.Group(name="item", description="Items verwalten")
+    item = ManageGuildGroup(
+        name="item",
+        description="Items verwalten",
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
 
     @item.command(name="add", description="Item zu einer Kategorie hinzufügen")
     @app_commands.describe(
@@ -507,7 +560,7 @@ class SetupCog(commands.Cog):
             ephemeral=True,
         )
 
-    new = app_commands.Group(
+    new = ManageGuildGroup(
         name="new",
         description="Item/Pack anlegen + Buy-Panel",
         default_permissions=discord.Permissions(manage_guild=True),
