@@ -506,6 +506,44 @@ class Database:
         try:
             await self.db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS invite_competitions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    title TEXT NOT NULL DEFAULT 'Invite Competition',
+                    starts_at TEXT NOT NULL,
+                    ends_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    merged INTEGER NOT NULL DEFAULT 0,
+                    created_by INTEGER,
+                    channel_id INTEGER,
+                    message_id INTEGER,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS invite_competition_joins (
+                    competition_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    invitee_id INTEGER NOT NULL,
+                    inviter_id INTEGER NOT NULL,
+                    invite_code TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (competition_id, invitee_id)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS giveaways (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id INTEGER NOT NULL,
@@ -2263,6 +2301,194 @@ class Database:
             return False
         await self.add_credits(guild_id, user_id, float(credits_amount))
         return True
+
+    async def invite_leaderboard(
+        self, guild_id: int, *, limit: int = 15
+    ) -> list[dict[str, Any]]:
+        rows = await self.fetchall(
+            """
+            SELECT inviter_id, COUNT(*) AS cnt
+            FROM invite_joins
+            WHERE guild_id = ?
+            GROUP BY inviter_id
+            ORDER BY cnt DESC, inviter_id ASC
+            LIMIT ?
+            """,
+            (guild_id, int(limit)),
+        )
+        return [dict(r) for r in rows]
+
+    async def get_active_invite_competition(
+        self, guild_id: int
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            """
+            SELECT * FROM invite_competitions
+            WHERE guild_id = ? AND status = 'active'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (guild_id,),
+        )
+        return dict(row) if row else None
+
+    async def get_invite_competition(
+        self, competition_id: int
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            "SELECT * FROM invite_competitions WHERE id = ?",
+            (competition_id,),
+        )
+        return dict(row) if row else None
+
+    async def create_invite_competition(
+        self,
+        guild_id: int,
+        *,
+        title: str,
+        starts_at: str,
+        ends_at: str,
+        created_by: int | None = None,
+        channel_id: int | None = None,
+        message_id: int | None = None,
+    ) -> int:
+        cur = await self.db.execute(
+            """
+            INSERT INTO invite_competitions
+              (guild_id, title, starts_at, ends_at, status, created_by,
+               channel_id, message_id)
+            VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+            """,
+            (
+                guild_id,
+                (title or "Invite Competition")[:100],
+                starts_at,
+                ends_at,
+                created_by,
+                channel_id,
+                message_id,
+            ),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)  # type: ignore[arg-type]
+
+    async def update_invite_competition(
+        self, competition_id: int, **fields: Any
+    ) -> None:
+        if not fields:
+            return
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [competition_id]
+        await self.db.execute(
+            f"UPDATE invite_competitions SET {cols} WHERE id = ?",
+            values,
+        )
+        await self.db.commit()
+
+    async def record_competition_invite_join(
+        self,
+        competition_id: int,
+        guild_id: int,
+        invitee_id: int,
+        inviter_id: int,
+        invite_code: str = "",
+    ) -> bool:
+        cur = await self.db.execute(
+            """
+            INSERT OR IGNORE INTO invite_competition_joins
+              (competition_id, guild_id, invitee_id, inviter_id, invite_code)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                competition_id,
+                guild_id,
+                invitee_id,
+                inviter_id,
+                (invite_code or "")[:64],
+            ),
+        )
+        await self.db.commit()
+        return (cur.rowcount or 0) > 0
+
+    async def count_competition_invites(
+        self, competition_id: int, inviter_id: int
+    ) -> int:
+        row = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt FROM invite_competition_joins
+            WHERE competition_id = ? AND inviter_id = ?
+            """,
+            (competition_id, inviter_id),
+        )
+        return int(row["cnt"]) if row else 0
+
+    async def competition_invite_leaderboard(
+        self, competition_id: int, *, limit: int = 15
+    ) -> list[dict[str, Any]]:
+        rows = await self.fetchall(
+            """
+            SELECT inviter_id, COUNT(*) AS cnt
+            FROM invite_competition_joins
+            WHERE competition_id = ?
+            GROUP BY inviter_id
+            ORDER BY cnt DESC, inviter_id ASC
+            LIMIT ?
+            """,
+            (competition_id, int(limit)),
+        )
+        return [dict(r) for r in rows]
+
+    async def list_competition_joins(
+        self, competition_id: int
+    ) -> list[dict[str, Any]]:
+        rows = await self.fetchall(
+            """
+            SELECT * FROM invite_competition_joins
+            WHERE competition_id = ?
+            """,
+            (competition_id,),
+        )
+        return [dict(r) for r in rows]
+
+    async def list_expired_active_competitions(self) -> list[dict[str, Any]]:
+        rows = await self.fetchall(
+            """
+            SELECT * FROM invite_competitions
+            WHERE status = 'active'
+              AND datetime(ends_at) <= datetime('now')
+            """
+        )
+        return [dict(r) for r in rows]
+
+    async def merge_competition_invites(
+        self, competition_id: int
+    ) -> dict[str, int]:
+        """
+        Zählt Competition-Invites auf den normalen Stand.
+        Returns: {added, inviters_touched}
+        """
+        comp = await self.get_invite_competition(competition_id)
+        if not comp or int(comp.get("merged") or 0):
+            return {"added": 0, "inviters_touched": 0}
+        joins = await self.list_competition_joins(competition_id)
+        added = 0
+        inviters: set[int] = set()
+        for row in joins:
+            ok = await self.record_invite_join(
+                int(row["guild_id"]),
+                int(row["invitee_id"]),
+                int(row["inviter_id"]),
+                str(row.get("invite_code") or ""),
+            )
+            if ok:
+                added += 1
+                inviters.add(int(row["inviter_id"]))
+            else:
+                # auch bei IGNORE Inviter tracken falls schon permanent
+                inviters.add(int(row["inviter_id"]))
+        await self.update_invite_competition(
+            competition_id, merged=1, status="ended"
+        )
+        return {"added": added, "inviters_touched": len(inviters)}
 
     async def get_order(self, order_id: int) -> dict[str, Any] | None:
         row = await self.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
