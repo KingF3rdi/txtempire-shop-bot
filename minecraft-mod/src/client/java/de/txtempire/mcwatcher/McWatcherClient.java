@@ -49,6 +49,7 @@ public class McWatcherClient implements ClientModInitializer {
 			() -> {
 				try {
 					api.postHeartbeat();
+					api.flushRetryQueue();
 				} catch (Exception e) {
 					McWatcher.LOGGER.debug("Heartbeat failed: {}", e.toString());
 				}

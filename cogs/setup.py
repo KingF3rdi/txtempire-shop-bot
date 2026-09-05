@@ -507,6 +507,221 @@ class SetupCog(commands.Cog):
             ephemeral=True,
         )
 
+    new = app_commands.Group(
+        name="new",
+        description="Neues Item + Buy-Panel (optional Rabattcode)",
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    @new.command(
+        name="item",
+        description="Item anlegen, Buy-Panel posten, optional Rabattcode (5 Uses)",
+    )
+    @app_commands.describe(
+        category="Kategorie (tippen zum Suchen)",
+        name="Item-Name",
+        price="z.B. 500k, 1.5m, 2b, 9,99",
+        description="Beschreibung",
+        channel="Channel fürs Buy-Panel (Standard: hier)",
+        code="Optional: Rabattcode anlegen (fest auf 5 Uses limitiert)",
+        discount_type="Rabattart — nur wenn code gesetzt",
+        discount_value="z.B. 10 (%) oder 50k — nur wenn code gesetzt",
+        pack_file="Pack per Drag & Drop",
+        pack_dm="Pack-Text per DM nach Bestätigung",
+        pack_link="Pack-Link (optional)",
+        role="Autorole nach Kauf",
+    )
+    @app_commands.choices(
+        discount_type=[
+            app_commands.Choice(name="Prozent (%)", value="percent"),
+            app_commands.Choice(name="Betrag", value="amount"),
+        ],
+    )
+    async def new_item(
+        self,
+        interaction: discord.Interaction,
+        category: int,
+        name: str,
+        price: str,
+        description: str = "",
+        channel: Optional[discord.TextChannel] = None,
+        code: Optional[str] = None,
+        discount_type: Optional[app_commands.Choice[str]] = None,
+        discount_value: Optional[str] = None,
+        pack_file: Optional[discord.Attachment] = None,
+        pack_dm: str = "",
+        pack_link: str = "",
+        role: Optional[discord.Role] = None,
+    ) -> None:
+        assert interaction.guild is not None
+
+        try:
+            price_val = parse_price(price)
+        except ValueError:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Ungültiger Preis",
+                    "Beispiele: `500`, `9,99`, `500k`, `1.5m`, `2b`",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        cat = await self.bot.db.get_category(category)
+        if not cat or cat["guild_id"] != interaction.guild.id:
+            await interaction.response.send_message(
+                embed=error_embed("Kategorie nicht gefunden"), ephemeral=True
+            )
+            return
+
+        code_raw = (code or "").strip()
+        want_code = bool(code_raw)
+        if want_code and (discount_type is None or not (discount_value or "").strip()):
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Rabatt unvollständig",
+                    "Mit `code` bitte auch **discount_type** und **discount_value** setzen.\n"
+                    "Der Code wird fest auf **5 Uses** limitiert.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        dval: float | None = None
+        dtype: str | None = None
+        if want_code:
+            from cogs.discount_codes import _parse_discount_value
+
+            dtype = discount_type.value  # type: ignore[union-attr]
+            try:
+                dval = _parse_discount_value(dtype, discount_value or "")
+            except ValueError as e:
+                await interaction.response.send_message(
+                    embed=error_embed("Ungültiger Rabattwert", str(e)),
+                    ephemeral=True,
+                )
+                return
+            existing = await self.bot.db.get_discount_code(
+                interaction.guild.id, code_raw
+            )
+            if existing:
+                await interaction.response.send_message(
+                    embed=error_embed(
+                        "Code existiert",
+                        f"`{code_raw.upper()}` gibt es bereits — anderen Code wählen.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Kein Channel",
+                    "Bitte `channel` setzen oder den Befehl in einem Text-Channel ausführen.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        iid = await self.bot.db.add_item(
+            interaction.guild.id,
+            category,
+            name=name[:100],
+            price=price_val,
+            description=description[:1000],
+            pack_dm_text=pack_dm[:1500],
+            pack_link=pack_link[:500],
+            role_id=role.id if role else None,
+        )
+
+        pack_note = ""
+        if pack_file is not None:
+            from views.pack_upload import apply_pack_attachment
+
+            try:
+                _rel, url = await apply_pack_attachment(
+                    self.bot, iid, pack_file, channel=interaction.channel
+                )
+                pack_note = f"\nPack-Link: {url}"
+            except ValueError as e:
+                pack_note = f"\nPack-Upload fehlgeschlagen: {e}"
+
+        # Buy-Panel für die Kategorie des neuen Items
+        from utils.panels import build_buy_panel_embed, ensure_buy_panel_view
+        from views.shop_views import BuyPanelView
+
+        settings = await self.bot.db.ensure_guild(interaction.guild.id)
+        cats = await self.bot.db.list_categories(interaction.guild.id)
+        await ensure_buy_panel_view(self.bot, category)
+        panel_embed = build_buy_panel_embed(
+            categories=cats,
+            settings=settings,
+            category=cat,
+            title=f"Neu: {name[:80]}",
+        )
+        panel_embed.insert_field_at(
+            0,
+            name="Neues Item",
+            value=(
+                f"**{name[:100]}** — {format_price(price_val)}\n"
+                + (
+                    f"_{(description[:120])}…_"
+                    if len(description) > 120
+                    else (f"_{description}_" if description.strip() else "")
+                )
+            ).strip(),
+            inline=False,
+        )
+        panel_msg = await target.send(
+            embed=panel_embed,
+            view=BuyPanelView(self.bot, category_id=category),
+        )
+
+        code_note = ""
+        if want_code and dtype is not None and dval is not None:
+            from utils.discount_codes import format_code_discount
+
+            code_id = await self.bot.db.create_discount_code(
+                interaction.guild.id,
+                code_raw,
+                discount_type=dtype,
+                discount_value=dval,
+                max_uses=5,
+                max_per_user=1,
+                label=f"Launch {name[:40]}",
+                created_by=interaction.user.id,
+                kind="rabatt",
+            )
+            code_note = (
+                f"\n\n**Rabattcode** `{code_raw.upper()}` — "
+                f"{format_code_discount(dtype, dval)}\n"
+                f"Limit: **5** Uses · max. **1**/User · ID `{code_id}`"
+            )
+
+        role_note = f"\nAutorole: {role.mention}" if role else ""
+        await interaction.followup.send(
+            embed=success_embed(
+                "Neues Item live",
+                f"ID `{iid}` — **{name}** · {format_price(price_val)} in **{cat['name']}**"
+                f"{pack_note}{role_note}\n\n"
+                f"**Buy-Panel** → {panel_msg.jump_url} ({target.mention})"
+                f"{code_note}",
+            ),
+            ephemeral=True,
+        )
+
+    @new_item.autocomplete("category")
+    async def new_item_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[int]]:
+        return await self._cat_ac(interaction, current)
+
 
 async def setup(bot: ShopBot) -> None:
     await bot.add_cog(SetupCog(bot))
