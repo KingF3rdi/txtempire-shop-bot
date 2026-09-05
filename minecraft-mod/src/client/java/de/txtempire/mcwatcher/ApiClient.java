@@ -16,7 +16,6 @@ public final class ApiClient {
 	private static final int MAX_RETRY_QUEUE = 32;
 
 	private final WatcherConfig config;
-	/** Eigenes HttpClient — kein shared Executor mit dem Submit-Pool (sonst Deadlock). */
 	private final HttpClient http;
 	private final ExecutorService pool = Executors.newSingleThreadExecutor(r -> {
 		Thread t = new Thread(r, "txtempire-mc-api");
@@ -47,6 +46,8 @@ public final class ApiClient {
 		JsonObject body = config.basePayload();
 		body.addProperty("code", code);
 		body.addProperty("ign", ign);
+		// Webhook zuerst (funktioniert ohne offenen Server-Port)
+		postWebhookLine("MC_LINK " + code + " " + ign + " " + config.apiKey);
 		post("/mc/v1/link", body);
 	}
 
@@ -55,15 +56,51 @@ public final class ApiClient {
 		body.addProperty("ign", ign);
 		body.addProperty("amount", amount);
 		body.addProperty("raw", raw);
+		String safeRaw = raw == null ? "" : raw.replace('\n', ' ').trim();
+		if (safeRaw.length() > 120) {
+			safeRaw = safeRaw.substring(0, 120);
+		}
+		postWebhookLine(
+			"MC_PAY " + ign + " " + amount + " " + config.apiKey
+				+ (safeRaw.isEmpty() ? "" : " " + safeRaw)
+		);
 		post("/mc/v1/payment", body);
 	}
 
 	public void postHeartbeat() {
+		// Kein Webhook-Spam — nur HTTP (optional)
 		post("/mc/v1/heartbeat", config.basePayload());
+	}
+
+	private void postWebhookLine(String content) {
+		if (!config.enabled || !config.hasWebhook()) {
+			return;
+		}
+		String url = config.discordWebhookUrl.trim();
+		pool.execute(() -> {
+			try {
+				JsonObject payload = new JsonObject();
+				payload.addProperty("username", "TxTEmpire MC");
+				payload.addProperty("content", content);
+				HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+					.timeout(Duration.ofSeconds(10))
+					.header("Content-Type", "application/json")
+					.POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
+					.build();
+				HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+				McWatcher.LOGGER.info("Webhook → {} {}", resp.statusCode(),
+					resp.body() == null ? "" : resp.body().substring(0, Math.min(80, resp.body().length())));
+			} catch (Exception e) {
+				McWatcher.LOGGER.warn("Webhook fehlgeschlagen: {}", e.toString());
+			}
+		});
 	}
 
 	private void post(String path, JsonObject body) {
 		if (!config.enabled) {
+			return;
+		}
+		if (config.apiUrl == null || config.apiUrl.isBlank()) {
 			return;
 		}
 		String json = body.toString();
@@ -77,7 +114,6 @@ public final class ApiClient {
 		});
 	}
 
-	/** @return true bei HTTP &lt; 400 */
 	private boolean sendNow(String path, String json) {
 		String base = config.apiUrl.endsWith("/")
 			? config.apiUrl.substring(0, config.apiUrl.length() - 1)
@@ -100,12 +136,13 @@ public final class ApiClient {
 			);
 			return resp.statusCode() < 400;
 		} catch (Exception e) {
-			McWatcher.LOGGER.warn(
-				"API-Call fehlgeschlagen ({}): {} — Discord-Bot muss laufen (API Port {})",
-				path,
-				e.toString(),
-				portHint()
-			);
+			if (config.debug) {
+				McWatcher.LOGGER.warn(
+					"HTTP-API offline ({}): {} — Webhook wird weiter genutzt",
+					path,
+					e.toString()
+				);
+			}
 			return false;
 		}
 	}
@@ -119,7 +156,6 @@ public final class ApiClient {
 			retryQueue.pollFirst();
 		}
 		retryQueue.addLast(new Pending(path, json));
-		McWatcher.LOGGER.info("API-Retry vorgemerkt ({} in Queue)", retryQueue.size());
 	}
 
 	private void drainRetries() {
@@ -135,18 +171,7 @@ public final class ApiClient {
 		}
 	}
 
-	/** Vom Heartbeat: offene Link/Payment-Requests erneut senden. */
 	public void flushRetryQueue() {
 		pool.execute(this::drainRetries);
-	}
-
-	private String portHint() {
-		try {
-			URI u = URI.create(config.apiUrl);
-			int port = u.getPort();
-			return port > 0 ? String.valueOf(port) : "8765";
-		} catch (Exception e) {
-			return "8765";
-		}
 	}
 }

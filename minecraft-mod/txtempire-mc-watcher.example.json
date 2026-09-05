@@ -1,7 +1,8 @@
 {
-  "apiUrl": "http://DEINE-SERVER-IP:8765",
+  "apiUrl": "http://95.216.12.48:26026",
   "apiKey": "CHANGE_ME",
   "guildId": "DEINE_DISCORD_GUILD_ID",
+  "discordWebhookUrl": "https://discord.com/api/webhooks/ID/TOKEN",
   "enabled": true,
-  "debug": false
+  "debug": true
 }

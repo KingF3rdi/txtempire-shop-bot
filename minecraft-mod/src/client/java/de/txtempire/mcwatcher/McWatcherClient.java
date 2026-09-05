@@ -35,15 +35,16 @@ public class McWatcherClient implements ClientModInitializer {
 		config = WatcherConfig.load();
 		api = new ApiClient(config);
 		McWatcher.LOGGER.info(
-			"MC Watcher aktiv — API {} (config: {})",
+			"MC Watcher aktiv — API {} · Webhook {} (config: {})",
 			config.apiUrl,
+			config.hasWebhook() ? "ja" : "nein",
 			WatcherConfig.path()
 		);
 
 		ClientReceiveMessageEvents.CHAT.register(this::onChat);
 		ClientReceiveMessageEvents.GAME.register(this::onGame);
 
-		# Alle 15s Heartbeat + Retry (Link/Payment wenn Bot kurz offline war)
+		// Alle 15s Heartbeat + Retry (Link/Payment wenn Bot kurz offline war)
 		api.postHeartbeat();
 		HEARTBEAT.scheduleAtFixedRate(
 			() -> {

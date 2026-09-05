@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import TYPE_CHECKING, Optional
 
 import discord
@@ -12,6 +13,7 @@ from discord.ext import commands
 import config
 from integrations.mc_api import McApiServer
 from utils.embeds import error_embed, success_embed, warn_embed
+from utils.mc_confirm import handle_mc_link_redeem, handle_mc_payment
 from views.mc_link_views import (
     LinkIgnModal,
     collect_bot_link_status,
@@ -23,6 +25,17 @@ from views.mc_link_views import (
 if TYPE_CHECKING:
     from bot import ShopBot
 
+# Fabric-Mod → Discord-Webhook (kein offener Server-Port nötig)
+_MC_LINK = re.compile(
+    r"^MC_LINK\s+([A-Z0-9\-]{4,24})\s+([A-Za-z0-9_]{3,16})\s+(\S+)\s*$",
+    re.I,
+)
+_MC_PAY = re.compile(
+    r"^MC_PAY\s+([A-Za-z0-9_]{3,16})\s+([0-9]+(?:\.[0-9]+)?)\s+(\S+)(?:\s+(.*))?$",
+    re.I,
+)
+_MC_HB = re.compile(r"^MC_HB\s+(\S+)\s*$", re.I)
+
 
 class McLinkCog(commands.Cog):
     def __init__(self, bot: ShopBot) -> None:
@@ -30,18 +43,21 @@ class McLinkCog(commands.Cog):
         self.api = McApiServer(bot)
 
     async def cog_load(self) -> None:
-        # API erst nach Discord-Login starten (on_ready) — sonst wirkt
-        # „Listening“ als wäre der Bot online, obwohl Login noch scheitert.
-        pass
+        print(
+            "[MC-API] Boot — "
+            f"SERVER_PORT={os.getenv('SERVER_PORT')!r} "
+            f"MC_API_PORT={config.MC_API_PORT} "
+            f"KEY_SET={bool(config.MC_API_KEY)}"
+        )
+        await self.api.start()
 
     async def cog_unload(self) -> None:
         await self.api.stop()
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        if self.api.listening:
-            return
-        await self.api.start()
+        if not self.api.listening:
+            await self.api.start()
         if self.api.listening:
             public = (
                 os.getenv("SERVER_IP")
@@ -49,17 +65,75 @@ class McLinkCog(commands.Cog):
                 or "95.216.12.48"
             )
             print(
-                "[MC-API] Bereit für Fabric-Watcher.\n"
-                f"  Lauscht auf Port {int(config.MC_API_PORT)} "
+                "[MC-API] Bereit.\n"
+                f"  HTTP Port {int(config.MC_API_PORT)} "
                 f"(SERVER_PORT={os.getenv('SERVER_PORT')!r})\n"
-                f"  Test: http://{public}:{int(config.MC_API_PORT)}/mc/v1/health\n"
-                f"  Mod apiUrl: http://{public}:{int(config.MC_API_PORT)}"
+                f"  Optional Test: http://{public}:{int(config.MC_API_PORT)}/mc/v1/health\n"
+                "  Empfohlen bei Bot-Hosting: Discord-Webhook in der Mod-Config "
+                "(discordWebhookUrl) — braucht keinen offenen Port."
             )
         else:
             print(
-                "[MC-API] NICHT aktiv — setze MC_API_KEY in .env, "
-                "sonst keine Link-/Payment-Bestätigung."
+                "[MC-API] HTTP inaktiv (MC_API_KEY fehlt?). "
+                "Webhook-Bridge funktioniert trotzdem, wenn die Mod einen Webhook nutzt."
             )
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """Nimmt Events von der Fabric-Mod per Discord-Webhook entgegen."""
+        if not message.webhook_id:
+            return
+        text = (message.content or "").strip()
+        if not text.startswith("MC_"):
+            return
+        key = (config.MC_API_KEY or "").strip()
+        if not key:
+            return
+
+        m = _MC_LINK.match(text)
+        if m:
+            code, ign, got_key = m.group(1), m.group(2), m.group(3)
+            if got_key != key:
+                print("[MC-Webhook] LINK abgelehnt — apiKey falsch")
+                return
+            self.api._touch_watcher("webhook_link")
+            result = await handle_mc_link_redeem(self.bot, code=code, ign=ign)
+            print(f"[MC-Webhook] LINK {code} / {ign} → {result}")
+            return
+
+        m = _MC_PAY.match(text)
+        if m:
+            ign, amount_s, got_key, raw = (
+                m.group(1),
+                m.group(2),
+                m.group(3),
+                (m.group(4) or ""),
+            )
+            if got_key != key:
+                print("[MC-Webhook] PAY abgelehnt — apiKey falsch")
+                return
+            guild_id = int(config.GUILD_ID or 0)
+            if message.guild:
+                guild_id = message.guild.id
+            if not guild_id:
+                return
+            self.api._touch_watcher("webhook_payment")
+            result = await handle_mc_payment(
+                self.bot,
+                guild_id=guild_id,
+                ign=ign,
+                amount=float(amount_s),
+                raw_text=raw[:500],
+            )
+            print(f"[MC-Webhook] PAY {ign} {amount_s} → {result}")
+            return
+
+        m = _MC_HB.match(text)
+        if m:
+            if m.group(1) != key:
+                return
+            self.api._touch_watcher("webhook_heartbeat")
+            return
 
     # Attribute darf nicht mit bot_/cog_ beginnen (discord.py)
     status_group = app_commands.Group(
