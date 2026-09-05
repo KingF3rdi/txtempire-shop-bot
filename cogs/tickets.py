@@ -253,7 +253,7 @@ async def create_order_ticket(
     mc_link = await bot.db.get_mc_link(guild.id, interaction.user.id)
     if mc_link and int(settings.get("mc_auto_confirm") if settings.get("mc_auto_confirm") is not None else 1):
         credits_hint += (
-            f"\n🔗 **MC verknüpft als `{mc_link['ign']}`** — "
+            "\n🔗 **MC-Account verknüpft** — "
             "bei korrekter Ingame-Zahlung wird dieses Ticket **automatisch bestätigt**."
         )
     elif not mc_link:
