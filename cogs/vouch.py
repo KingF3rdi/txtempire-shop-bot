@@ -11,10 +11,8 @@ from integrations.shop_api import shop_api
 from utils.embeds import error_embed, format_price, order_ref, success_embed
 from utils.vouch_channel_perms import (
     get_vouch_text_channel,
-    is_staff_writer,
     lock_vouch_channel_defaults,
     sync_vouch_write_permission,
-    user_has_free_vouch,
 )
 
 if TYPE_CHECKING:
@@ -173,12 +171,10 @@ class VouchCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """Im Vouch-Channel: ohne freien Vouch löschen (Staff ausgenommen)."""
+        """Vouch-Channel: jede neue User-Nachricht sofort löschen (Bestand bleibt)."""
         if message.author.bot or message.guild is None:
             return
         if not isinstance(message.channel, discord.TextChannel):
-            return
-        if not isinstance(message.author, discord.Member):
             return
 
         settings = await self.bot.db.ensure_guild(message.guild.id)
@@ -186,27 +182,8 @@ class VouchCog(commands.Cog):
         if not vouch_ch_id or int(vouch_ch_id) != message.channel.id:
             return
 
-        if is_staff_writer(message.author):
-            return
-
-        if await user_has_free_vouch(
-            self.bot, message.guild.id, message.author.id
-        ):
-            return
-
         try:
             await message.delete()
-        except discord.HTTPException:
-            return
-        try:
-            await message.author.send(
-                embed=error_embed(
-                    "Vouch-Channel gesperrt",
-                    "Du kannst dort nur schreiben, wenn du einen **freien Vouch** "
-                    "hast (nach bestätigtem Kauf).\n"
-                    "Nutze dann `/vouch` — oder warte auf die Vouch-DM.",
-                )
-            )
         except discord.HTTPException:
             pass
 

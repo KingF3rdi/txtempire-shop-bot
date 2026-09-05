@@ -34,7 +34,7 @@ async def get_vouch_text_channel(
 
 
 async def lock_vouch_channel_defaults(channel: discord.TextChannel) -> bool:
-    """@everyone darf nicht schreiben; Bot schon. Staff bleibt über Rollen-Overrides."""
+    """@everyone darf nicht schreiben; nur der Bot postet Vouches."""
     me = channel.guild.me
     if me is None or not channel.permissions_for(me).manage_roles:
         return False
@@ -45,33 +45,18 @@ async def lock_vouch_channel_defaults(channel: discord.TextChannel) -> bool:
             create_public_threads=False,
             create_private_threads=False,
             send_messages_in_threads=False,
-            reason="Vouch-Channel: nur mit freiem Vouch schreiben",
+            reason="Vouch-Channel: keine normalen Nachrichten",
         )
         await channel.set_permissions(
             me,
             send_messages=True,
             embed_links=True,
             attach_files=True,
-            reason="Vouch-Channel: Bot darf posten",
+            reason="Vouch-Channel: Bot darf Vouches posten",
         )
         return True
     except discord.HTTPException:
         return False
-
-
-def is_staff_writer(member: discord.Member) -> bool:
-    perms = member.guild_permissions
-    return bool(
-        perms.administrator
-        or perms.manage_guild
-        or perms.manage_messages
-        or perms.manage_channels
-    )
-
-
-async def user_has_free_vouch(bot: ShopBot, guild_id: int, user_id: int) -> bool:
-    order = await bot.db.get_unused_vouch_order(guild_id, user_id)
-    return order is not None
 
 
 async def sync_vouch_write_permission(
@@ -80,7 +65,7 @@ async def sync_vouch_write_permission(
     guild_id: int,
     user_id: int,
 ) -> None:
-    """Send-Recht setzen/entfernen je nach freiem Vouch."""
+    """Individuelle User-Schreibrechte entfernen (Channel bleibt gesperrt)."""
     channel = await get_vouch_text_channel(bot, guild_id)
     if channel is None:
         return
@@ -96,28 +81,15 @@ async def sync_vouch_write_permission(
         except discord.HTTPException:
             return
 
-    if is_staff_writer(member):
-        return
-
-    has_vouch = await user_has_free_vouch(bot, guild_id, user_id)
     try:
-        if has_vouch:
-            await channel.set_permissions(
-                member,
-                send_messages=True,
-                embed_links=True,
-                attach_files=True,
-                reason="Freier Vouch — Schreibrecht im Vouch-Channel",
-            )
-        else:
-            overwrite = channel.overwrites_for(member)
-            if overwrite.is_empty():
-                return
-            await channel.set_permissions(
-                member,
-                overwrite=None,
-                reason="Kein freier Vouch — Schreibrecht entfernt",
-            )
+        overwrite = channel.overwrites_for(member)
+        if overwrite.is_empty():
+            return
+        await channel.set_permissions(
+            member,
+            overwrite=None,
+            reason="Vouch-Channel: keine User-Schreibrechte",
+        )
     except discord.HTTPException:
         pass
 
