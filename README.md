@@ -44,6 +44,7 @@ python bot.py
 | `/category add/list/delete` | Kategorien |
 | `/item add/list/delete` | Items (Preis, Pack-DM, Pack-Link, Autorole) |
 | `/new item` | Item anlegen + **Item-Buy-Panel** (Direkt-Kauf) + optional Code (5 Uses) |
+| `/new pack` | Pack setzen: **bestehendes Item** *oder* **neues Item** + optional Panel/Code |
 | `/new panel` | Buy-Panel für ein **bestehendes** Item posten |
 | `/ticketlimit` | Max. offene Kauf-Tickets |
 | `/shoppanel` | Shop-Panel posten |
