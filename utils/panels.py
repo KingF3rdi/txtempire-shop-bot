@@ -286,7 +286,7 @@ async def register_buy_panel_views(bot: "ShopBot", *, force: bool = False) -> No
 
 
 async def refresh_slot_panel(bot: "ShopBot", guild: discord.Guild, slot: int) -> str:
-    """Aktualisiert eine gespeicherte Panel-Nachricht mit aktuellem Embed und Buttons."""
+    """Aktualisiert die gespeicherte Panel-Nachricht per Edit (kein Neu-Posten)."""
     row = await bot.db.ensure_buy_panel_slot(guild.id, slot)
     channel_id = row.get("channel_id")
     message_id = row.get("message_id")
@@ -316,26 +316,17 @@ async def refresh_slot_panel(bot: "ShopBot", guild: discord.Guild, slot: int) ->
     try:
         msg = await channel.fetch_message(int(message_id))
     except discord.NotFound:
+        # Nur wenn die alte Nachricht fehlt: neu posten
         new_msg = await channel.send(embed=embed, view=view)
         await bot.db.update_buy_panel_message(
             guild.id, slot, channel_id=channel.id, message_id=new_msg.id
         )
-        return f"Panel {slot}: neu gepostet in {channel.mention}"
+        return f"Panel {slot}: Nachricht fehlte — neu gepostet in {channel.mention}"
 
-    if not is_valid_buy_panel_message(msg, slot):
-        try:
-            await msg.delete()
-        except discord.HTTPException:
-            pass
-        new_msg = await channel.send(embed=embed, view=view)
-        await bot.db.update_buy_panel_message(
-            guild.id, slot, channel_id=channel.id, message_id=new_msg.id
-        )
-        return (
-            f"Panel {slot}: kaputte Nachricht ersetzt (neu gepostet) in {channel.mention}"
-        )
-
-    await msg.edit(embed=embed, view=view)
+    try:
+        await msg.edit(embed=embed, view=view)
+    except discord.HTTPException as e:
+        return f"Panel {slot}: Edit fehlgeschlagen ({e})"
     return f"Panel {slot}: aktualisiert in {channel.mention}"
 
 

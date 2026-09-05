@@ -76,16 +76,18 @@ async def _post_slot_panel(
     if channel_id and message_id and int(channel_id) == target.id:
         try:
             old = await target.fetch_message(int(message_id))
-            if (
-                not force_repost
-                and is_valid_buy_panel_message(old, slot)
-            ):
-                await old.edit(embed=embed, view=view)
-                return old
-            try:
-                await old.delete()
-            except discord.HTTPException:
-                pass
+            # Immer editieren statt löschen/neu senden (außer force_repost)
+            if not force_repost:
+                try:
+                    await old.edit(embed=embed, view=view)
+                    return old
+                except discord.HTTPException:
+                    pass
+            if force_repost:
+                try:
+                    await old.delete()
+                except discord.HTTPException:
+                    pass
         except discord.NotFound:
             pass
     msg = await target.send(embed=embed, view=view)
@@ -384,22 +386,11 @@ class ShopCog(commands.Cog):
             interaction.guild.id, panel_slot
         )
         refresh_note = ""
-        channel_id = row.get("channel_id")
-        if channel_id:
-            channel = interaction.guild.get_channel(int(channel_id))
-            if isinstance(channel, discord.TextChannel):
-                msg = await _post_slot_panel(
-                    self.bot,
-                    interaction.guild,
-                    channel,
-                    panel_slot,
-                    force_repost=True,
-                )
-                refresh_note = f"\nPanel aktualisiert: {msg.jump_url}"
-            else:
-                refresh_note = (
-                    "\nChannel nicht gefunden — `/buypanel` erneut posten."
-                )
+        if row.get("channel_id") and row.get("message_id"):
+            refresh_result = await refresh_slot_panel(
+                self.bot, interaction.guild, panel_slot
+            )
+            refresh_note = f"\n{refresh_result}"
         else:
             refresh_note = (
                 "\nKein Panel gepostet — danach `/buypanel` oder `/panelsetup`."
@@ -530,7 +521,7 @@ class ShopCog(commands.Cog):
                 interaction.guild,
                 target,
                 slot,
-                force_repost=True,
+                force_repost=False,
             )
             posted.append(f"**Panel {slot}** → {msg.jump_url}")
         cats = await self.bot.db.list_categories(interaction.guild.id)
