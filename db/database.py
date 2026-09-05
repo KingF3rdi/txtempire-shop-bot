@@ -133,6 +133,23 @@ class Database:
                 message_id INTEGER,
                 PRIMARY KEY (guild_id, slot)
             );
+
+            CREATE TABLE IF NOT EXISTS daily_deals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                item_id INTEGER NOT NULL,
+                discount_type TEXT NOT NULL CHECK (discount_type IN ('percent', 'amount')),
+                discount_value REAL NOT NULL,
+                original_price REAL NOT NULL,
+                deal_price REAL NOT NULL,
+                channel_id INTEGER,
+                message_id INTEGER,
+                active INTEGER NOT NULL DEFAULT 1,
+                expires_at TEXT,
+                created_by INTEGER,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
+            );
             """
         )
         await self.db.commit()
@@ -151,6 +168,30 @@ class Database:
                     category_ids TEXT NOT NULL DEFAULT '[]',
                     title TEXT,
                     PRIMARY KEY (guild_id, slot)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_deals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    discount_type TEXT NOT NULL CHECK (discount_type IN ('percent', 'amount')),
+                    discount_value REAL NOT NULL,
+                    original_price REAL NOT NULL,
+                    deal_price REAL NOT NULL,
+                    channel_id INTEGER,
+                    message_id INTEGER,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    expires_at TEXT,
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
                 )
                 """
             )
@@ -812,6 +853,116 @@ class Database:
 
     async def mark_vouch_used(self, order_id: int) -> None:
         await self.update_order(order_id, vouch_used=1)
+
+    # ── Daily deals ─────────────────────────────────────────────────
+
+    async def create_daily_deal(
+        self,
+        guild_id: int,
+        item_id: int,
+        *,
+        discount_type: str,
+        discount_value: float,
+        original_price: float,
+        deal_price: float,
+        created_by: int | None = None,
+        expires_at: str | None = None,
+        channel_id: int | None = None,
+        message_id: int | None = None,
+    ) -> int:
+        cur = await self.db.execute(
+            """
+            INSERT INTO daily_deals
+              (guild_id, item_id, discount_type, discount_value,
+               original_price, deal_price, channel_id, message_id,
+               created_by, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                item_id,
+                discount_type,
+                discount_value,
+                original_price,
+                deal_price,
+                channel_id,
+                message_id,
+                created_by,
+                expires_at,
+            ),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)
+
+    async def update_daily_deal(self, deal_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [deal_id]
+        await self.db.execute(
+            f"UPDATE daily_deals SET {cols} WHERE id = ?", values
+        )
+        await self.db.commit()
+
+    async def get_daily_deal(self, deal_id: int) -> dict[str, Any] | None:
+        row = await self.fetchone("SELECT * FROM daily_deals WHERE id = ?", (deal_id,))
+        return dict(row) if row else None
+
+    async def list_active_daily_deals(
+        self, guild_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        if guild_id is None:
+            rows = await self.fetchall(
+                """
+                SELECT d.*, i.name AS item_name
+                FROM daily_deals d
+                JOIN items i ON i.id = d.item_id
+                WHERE d.active = 1
+                ORDER BY d.id DESC
+                """
+            )
+        else:
+            rows = await self.fetchall(
+                """
+                SELECT d.*, i.name AS item_name
+                FROM daily_deals d
+                JOIN items i ON i.id = d.item_id
+                WHERE d.guild_id = ? AND d.active = 1
+                ORDER BY d.id DESC
+                """,
+                (guild_id,),
+            )
+        return [dict(r) for r in rows]
+
+    async def deactivate_daily_deal(self, deal_id: int) -> None:
+        await self.update_daily_deal(deal_id, active=0)
+
+    async def build_cart_row_for_item(
+        self, item_id: int, *, price_override: float | None = None, qty: int = 1
+    ) -> dict[str, Any] | None:
+        """Baut eine cart_get-kompatible Zeile (optional mit Deal-Preis)."""
+        item = await self.get_item(item_id)
+        if not item or not int(item.get("active") or 0):
+            return None
+        cat = await self.get_category(int(item["category_id"]))
+        price = (
+            float(price_override)
+            if price_override is not None
+            else float(item["price"])
+        )
+        return {
+            "item_id": int(item["id"]),
+            "qty": int(qty),
+            "name": item["name"],
+            "price": price,
+            "category_id": int(item["category_id"]),
+            "pack_dm_text": item.get("pack_dm_text") or "",
+            "pack_link": item.get("pack_link") or "",
+            "pack_file": item.get("pack_file") or "",
+            "item_role_id": item.get("role_id"),
+            "category_role_id": cat.get("role_id") if cat else None,
+            "category_name": (cat.get("name") if cat else "") or "",
+        }
 
     # ── Helpers ─────────────────────────────────────────────────────
 

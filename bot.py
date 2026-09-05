@@ -23,6 +23,7 @@ class ShopBot(commands.Bot):
             "cogs.setup",
             "cogs.admin_panel",
             "cogs.shop",
+            "cogs.daily_deals",
             "cogs.tickets",
             "cogs.vouch",
         ):
@@ -30,6 +31,7 @@ class ShopBot(commands.Bot):
 
         # Persistent views
         from utils.panels import register_slot_panel_views, register_category_panel_views
+        from views.daily_deal_views import register_daily_deal_views
         from views.shop_views import ShopPanelView
         from views.ticket_views import TicketOrderView
 
@@ -37,6 +39,9 @@ class ShopBot(commands.Bot):
         register_slot_panel_views(self)
         await register_category_panel_views(self)
         self.add_view(TicketOrderView(self))
+        n_deals = await register_daily_deal_views(self)
+        if n_deals:
+            print(f"[DailyDeal] {n_deals} aktive Deal-View(s) registriert")
 
         try:
             if config.GUILD_ID:
@@ -94,11 +99,32 @@ class ShopBot(commands.Bot):
         await super().close()
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
-        """Fallback für Buy-Panel-Buttons wenn keine persistente View registriert ist."""
+        """Fallback für Buy-Panel- / Daily-Deal-Buttons ohne registrierte View."""
         if interaction.type != discord.InteractionType.component:
             return
         data = interaction.data or {}
         custom_id = data.get("custom_id") or ""
+
+        if custom_id.startswith("deal:buy:"):
+            component_type = data.get("component_type")
+            key = (component_type, custom_id)
+            store = self._connection._view_store
+            message_id = interaction.message.id if interaction.message else None
+            if message_id is not None and store._views.get(message_id, {}).get(key):
+                return
+            if store._views.get(None, {}).get(key):
+                return
+            from views.daily_deal_views import handle_daily_deal_interaction
+
+            try:
+                await handle_daily_deal_interaction(self, interaction)
+            except Exception as exc:
+                import traceback
+
+                print(f"[DailyDeal] Fallback fehlgeschlagen ({custom_id}): {exc!r}")
+                traceback.print_exc()
+            return
+
         if not custom_id.startswith("buy:"):
             return
 

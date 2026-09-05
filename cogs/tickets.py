@@ -39,9 +39,17 @@ async def _send_with_retry(
 
 
 async def create_order_ticket(
-    bot: ShopBot, interaction: discord.Interaction
+    bot: ShopBot,
+    interaction: discord.Interaction,
+    *,
+    cart_rows: list[dict] | None = None,
+    clear_cart: bool = True,
 ) -> discord.TextChannel:
-    """Erstellt Order + privates Ticket aus dem Warenkorb. Raises ValueError bei Fehlern."""
+    """Erstellt Order + privates Ticket.
+
+    cart_rows: optional vorbereitete Positionen (z.B. Daily Deal mit Rabattpreis).
+    Wenn None, wird der normale Warenkorb verwendet.
+    """
     guild = interaction.guild
     if guild is None:
         raise ValueError("Nur auf einem Server nutzbar.")
@@ -59,7 +67,9 @@ async def create_order_ticket(
             "Schließe oder warte auf bestehende Tickets."
         )
 
-    cart = await bot.db.cart_get(interaction.user.id, guild.id)
+    cart = cart_rows if cart_rows is not None else await bot.db.cart_get(
+        interaction.user.id, guild.id
+    )
     if not cart:
         raise ValueError("Dein Warenkorb ist leer.")
 
@@ -139,7 +149,8 @@ async def create_order_ticket(
         raise ValueError(f"Channel konnte nicht erstellt werden: {e}") from e
 
     await bot.db.update_order(order_id, ticket_channel_id=channel.id)
-    await bot.db.cart_clear(interaction.user.id, guild.id)
+    if clear_cart:
+        await bot.db.cart_clear(interaction.user.id, guild.id)
 
     # Rechte nochmal explizit setzen (Kategorie-Sync überschreibt oft)
     try:

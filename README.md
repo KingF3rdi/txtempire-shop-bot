@@ -52,6 +52,9 @@ python bot.py
 | `/buypanelrefresh` | Gespeicherte Panels aktualisieren |
 | `/panelsetup` | **Empfohlen:** Beide Panels posten + Status |
 | `/syncshop` | Kategorien und Produkte manuell von der Website synchronisieren |
+| `/dailydeal post` | Daily Deal posten (Rabatt %/Betrag + Direkt-Kauf-Button) |
+| `/dailydeal end` | Aktiven Daily Deal beenden |
+| `/dailydeal list` | Aktive Daily Deals anzeigen |
 | `/cart` | Warenkorb öffnen |
 | `/vouch` | Einmalig pro bestätigtem Kauf |
 
