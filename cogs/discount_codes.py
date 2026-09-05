@@ -1,0 +1,256 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from utils.discount_codes import format_code_discount
+from utils.embeds import error_embed, format_price, success_embed
+from utils.price import parse_price
+from views.ticket_views import is_staff
+
+if TYPE_CHECKING:
+    from bot import ShopBot
+
+
+class DiscountCodesCog(commands.Cog):
+    def __init__(self, bot: ShopBot) -> None:
+        self.bot = bot
+
+    code = app_commands.Group(
+        name="code",
+        description="Rabatt- / Creator-Codes verwalten",
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    @code.command(name="add", description="Neuen Rabatt- oder Creator-Code anlegen")
+    @app_commands.describe(
+        code="Code (z.B. CREATOR10)",
+        discount_type="Rabattart",
+        value="Wert — z.B. 10 (für 10%) oder 50k (für Betrag)",
+        max_uses="Max. Gesamtnutzungen (leer = unbegrenzt)",
+        max_per_user="Max. Nutzungen pro User (Standard: 1)",
+        label="Optional: Creator-/Anzeigename",
+    )
+    @app_commands.choices(
+        discount_type=[
+            app_commands.Choice(name="Prozent (%)", value="percent"),
+            app_commands.Choice(name="Betrag", value="amount"),
+        ]
+    )
+    async def code_add(
+        self,
+        interaction: discord.Interaction,
+        code: str,
+        discount_type: app_commands.Choice[str],
+        value: str,
+        max_uses: app_commands.Range[int, 1, 1_000_000] | None = None,
+        max_per_user: app_commands.Range[int, 1, 100] = 1,
+        label: str | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        if not await is_staff(self.bot, interaction):
+            await interaction.response.send_message(
+                embed=error_embed("Keine Berechtigung"), ephemeral=True
+            )
+            return
+
+        dtype = discount_type.value
+        try:
+            if dtype == "percent":
+                raw = value.strip().replace("%", "").replace(",", ".")
+                dval = float(raw)
+                if dval <= 0 or dval > 100:
+                    raise ValueError("Prozent muss zwischen 0 und 100 liegen.")
+            else:
+                dval = parse_price(value)
+        except ValueError as e:
+            await interaction.response.send_message(
+                embed=error_embed("Ungültiger Wert", str(e)),
+                ephemeral=True,
+            )
+            return
+
+        existing = await self.bot.db.get_discount_code(
+            interaction.guild.id, code
+        )
+        if existing:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Code existiert",
+                    f"`{code.strip().upper()}` gibt es bereits.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        try:
+            code_id = await self.bot.db.create_discount_code(
+                interaction.guild.id,
+                code,
+                discount_type=dtype,
+                discount_value=dval,
+                max_uses=int(max_uses) if max_uses is not None else None,
+                max_per_user=int(max_per_user),
+                label=label or "",
+                created_by=interaction.user.id,
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                embed=error_embed("Fehler", str(e)[:500]),
+                ephemeral=True,
+            )
+            return
+
+        limit_txt = (
+            f"**{max_uses}**× gesamt"
+            if max_uses is not None
+            else "**unbegrenzt** gesamt"
+        )
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Code erstellt",
+                f"`{code.strip().upper()}` — {format_code_discount(dtype, dval)}\n"
+                f"Limit: {limit_txt} · max. **{max_per_user}**/User"
+                + (f"\nLabel: **{label}**" if label else "")
+                + f"\nID: `{code_id}`",
+            ),
+            ephemeral=True,
+        )
+
+    @code.command(name="list", description="Alle Codes auflisten")
+    async def code_list(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        rows = await self.bot.db.list_discount_codes(interaction.guild.id)
+        if not rows:
+            await interaction.response.send_message(
+                embed=success_embed("Codes", "Keine Codes angelegt."),
+                ephemeral=True,
+            )
+            return
+        lines: list[str] = []
+        for r in rows[:40]:
+            status = "✅" if int(r.get("active") or 0) else "⛔"
+            uses = int(r.get("uses") or 0)
+            mx = r.get("max_uses")
+            lim = f"{uses}/{mx}" if mx is not None else f"{uses}/∞"
+            label = f" ({r['label']})" if r.get("label") else ""
+            lines.append(
+                f"{status} `{r['code']}`{label} — "
+                f"{format_code_discount(r['discount_type'], float(r['discount_value']))} "
+                f"· {lim} · ≤{int(r.get('max_per_user') or 1)}/User"
+            )
+        await interaction.response.send_message(
+            embed=success_embed("Rabatt- / Creator-Codes", "\n".join(lines)[:3900]),
+            ephemeral=True,
+        )
+
+    @code.command(name="limit", description="Nutzungslimit eines Codes setzen")
+    @app_commands.describe(
+        code="Code",
+        max_uses="Max. Gesamtnutzungen (0 = unbegrenzt)",
+        max_per_user="Max. pro User",
+    )
+    async def code_limit(
+        self,
+        interaction: discord.Interaction,
+        code: str,
+        max_uses: app_commands.Range[int, 0, 1_000_000] | None = None,
+        max_per_user: app_commands.Range[int, 1, 100] | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        row = await self.bot.db.get_discount_code(interaction.guild.id, code)
+        if not row:
+            await interaction.response.send_message(
+                embed=error_embed("Nicht gefunden", f"Code `{code}` unbekannt."),
+                ephemeral=True,
+            )
+            return
+        fields: dict = {}
+        if max_uses is not None:
+            fields["max_uses"] = None if int(max_uses) == 0 else int(max_uses)
+        if max_per_user is not None:
+            fields["max_per_user"] = int(max_per_user)
+        if not fields:
+            await interaction.response.send_message(
+                embed=error_embed("Nichts geändert", "Mindestens ein Limit angeben."),
+                ephemeral=True,
+            )
+            return
+        await self.bot.db.update_discount_code(int(row["id"]), **fields)
+        updated = await self.bot.db.get_discount_code_by_id(int(row["id"]))
+        assert updated is not None
+        mx = updated.get("max_uses")
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Limit aktualisiert",
+                f"`{updated['code']}`: "
+                f"{'unbegrenzt' if mx is None else f'{mx}×'} gesamt · "
+                f"≤{int(updated.get('max_per_user') or 1)}/User "
+                f"(bisher {int(updated.get('uses') or 0)} Nutzungen)",
+            ),
+            ephemeral=True,
+        )
+
+    @code.command(name="disable", description="Code deaktivieren")
+    @app_commands.describe(code="Code")
+    async def code_disable(
+        self, interaction: discord.Interaction, code: str
+    ) -> None:
+        assert interaction.guild is not None
+        row = await self.bot.db.get_discount_code(interaction.guild.id, code)
+        if not row:
+            await interaction.response.send_message(
+                embed=error_embed("Nicht gefunden"), ephemeral=True
+            )
+            return
+        await self.bot.db.update_discount_code(int(row["id"]), active=0)
+        await interaction.response.send_message(
+            embed=success_embed("Deaktiviert", f"`{row['code']}` ist aus."),
+            ephemeral=True,
+        )
+
+    @code.command(name="enable", description="Code aktivieren")
+    @app_commands.describe(code="Code")
+    async def code_enable(
+        self, interaction: discord.Interaction, code: str
+    ) -> None:
+        assert interaction.guild is not None
+        row = await self.bot.db.get_discount_code(interaction.guild.id, code)
+        if not row:
+            await interaction.response.send_message(
+                embed=error_embed("Nicht gefunden"), ephemeral=True
+            )
+            return
+        await self.bot.db.update_discount_code(int(row["id"]), active=1)
+        await interaction.response.send_message(
+            embed=success_embed("Aktiviert", f"`{row['code']}` ist an."),
+            ephemeral=True,
+        )
+
+    @code.command(name="delete", description="Code löschen")
+    @app_commands.describe(code="Code")
+    async def code_delete(
+        self, interaction: discord.Interaction, code: str
+    ) -> None:
+        assert interaction.guild is not None
+        row = await self.bot.db.get_discount_code(interaction.guild.id, code)
+        if not row:
+            await interaction.response.send_message(
+                embed=error_embed("Nicht gefunden"), ephemeral=True
+            )
+            return
+        await self.bot.db.db.execute(
+            "DELETE FROM discount_codes WHERE id = ?", (int(row["id"]),)
+        )
+        await self.bot.db.db.commit()
+        await interaction.response.send_message(
+            embed=success_embed("Gelöscht", f"`{row['code']}` entfernt."),
+            ephemeral=True,
+        )
+
+
+async def setup(bot: ShopBot) -> None:
+    await bot.add_cog(DiscountCodesCog(bot))

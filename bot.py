@@ -26,6 +26,7 @@ class ShopBot(commands.Bot):
             "cogs.daily_deals",
             "cogs.tickets",
             "cogs.credits",
+            "cogs.discount_codes",
             "cogs.vouch",
         ):
             await self.load_extension(ext)

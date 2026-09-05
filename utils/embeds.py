@@ -105,6 +105,17 @@ def payment_info_embed(order: dict, settings: dict) -> discord.Embed:
         value=order_ref(order),
         inline=True,
     )
+    if order.get("discount_code") and float(order.get("discount_amount") or 0) > 0:
+        orig = float(order.get("original_total") or 0)
+        embed.add_field(
+            name="Rabatt / Creator-Code",
+            value=(
+                f"`{order['discount_code']}` — "
+                f"−{format_price(float(order['discount_amount']))}"
+                + (f" (vorher {format_price(orig)})" if orig else "")
+            ),
+            inline=False,
+        )
     embed.add_field(
         name=f"Zahlung an {name}",
         value=_field_value(f"**{format_price(float(order['total']))}**\n{details}"),
@@ -137,6 +148,16 @@ def order_cart_panel_embed(
         value=format_price(float(order["total"])),
         inline=True,
     )
+    if order.get("discount_code") and float(order.get("discount_amount") or 0) > 0:
+        orig = float(order.get("original_total") or 0)
+        embed.add_field(
+            name="Code",
+            value=(
+                f"`{order['discount_code']}` (−{format_price(float(order['discount_amount']))})"
+                + (f"\nVorher: ~~{format_price(orig)}~~" if orig else "")
+            ),
+            inline=True,
+        )
     if guild is not None:
         from utils.roles import collect_autorole_mentions
 

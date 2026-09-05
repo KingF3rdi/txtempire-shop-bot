@@ -9,6 +9,7 @@ import discord
 from utils.delivery import deliver_packs
 from utils.embeds import (
     error_embed,
+    format_price,
     order_cart_panel_embed,
     order_ref,
     order_ticket_embed,
@@ -461,7 +462,10 @@ async def action_cancel_order(bot: ShopBot, interaction: discord.Interaction) ->
         return
 
     await interaction.response.defer()
+    code_id = order.get("discount_code_id")
     await bot.db.update_order(int(order["id"]), status="cancelled")
+    if code_id:
+        await bot.db.decrement_code_use(int(code_id))
 
     await interaction.followup.send(
         embed=warn_embed(
@@ -507,7 +511,10 @@ async def action_close_ticket(
 
     note = ""
     if order and order["status"] not in ("completed", "cancelled"):
+        code_id = order.get("discount_code_id")
         await bot.db.update_order(int(order["id"]), status="cancelled")
+        if code_id:
+            await bot.db.decrement_code_use(int(code_id))
         note = f" Offene Bestellung **{order_ref(order)}** wurde storniert."
 
     if delete_channel:
@@ -551,6 +558,16 @@ class TicketOrderView(discord.ui.View):
             )
             fast_btn.callback = self._fast_buy  # type: ignore[method-assign]
             self.add_item(fast_btn)
+
+        code_btn = discord.ui.Button(
+            label="Rabatt / Creator Code",
+            style=discord.ButtonStyle.secondary,
+            custom_id="ticket:discount",
+            emoji="🏷️",
+            row=2,
+        )
+        code_btn.callback = self._discount_code  # type: ignore[method-assign]
+        self.add_item(code_btn)
 
     @discord.ui.button(
         label="Bestellung anzeigen",
@@ -621,6 +638,212 @@ class TicketOrderView(discord.ui.View):
 
     async def _fast_buy(self, interaction: discord.Interaction) -> None:
         await action_fast_buy(self.bot, interaction)
+
+    async def _discount_code(self, interaction: discord.Interaction) -> None:
+        await action_apply_discount_code(self.bot, interaction)
+
+
+async def action_apply_discount_code(
+    bot: ShopBot, interaction: discord.Interaction
+) -> None:
+    """Öffnet Modal zum Einlösen eines Rabatt-/Creator-Codes."""
+    order = await get_order_for_interaction(bot, interaction)
+    if not order:
+        await interaction.response.send_message(
+            embed=error_embed("Keine Bestellung"), ephemeral=True
+        )
+        return
+    if interaction.user.id != int(order["user_id"]):
+        await interaction.response.send_message(
+            embed=error_embed("Nur Käufer", "Nur der Käufer kann einen Code einlösen."),
+            ephemeral=True,
+        )
+        return
+    if order["status"] in ("completed", "cancelled"):
+        await interaction.response.send_message(
+            embed=error_embed("Geschlossen", "Diese Bestellung ist bereits beendet."),
+            ephemeral=True,
+        )
+        return
+    if str(order.get("order_kind") or "shop") == "credits":
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Nicht verfügbar",
+                "Codes gelten nicht für Credits-Kauf-Tickets.",
+            ),
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_modal(
+        DiscountCodeModal(bot, int(order["id"]))
+    )
+
+
+class DiscountCodeModal(discord.ui.Modal, title="Rabatt / Creator Code"):
+    code_input = discord.ui.TextInput(
+        label="Code",
+        placeholder="z.B. CREATOR10",
+        max_length=32,
+        required=True,
+    )
+
+    def __init__(self, bot: ShopBot, order_id: int) -> None:
+        super().__init__()
+        self.bot = bot
+        self.order_id = order_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        from utils.discount_codes import compute_code_discount, format_code_discount
+
+        order = await self.bot.db.get_order(self.order_id)
+        if not order or order["status"] in ("completed", "cancelled"):
+            await interaction.response.send_message(
+                embed=error_embed("Bestellung ungültig"), ephemeral=True
+            )
+            return
+        if interaction.user.id != int(order["user_id"]):
+            await interaction.response.send_message(
+                embed=error_embed("Nur Käufer"), ephemeral=True
+            )
+            return
+
+        raw = str(self.code_input.value).strip()
+        row = await self.bot.db.get_discount_code(int(order["guild_id"]), raw)
+        if not row or not int(row.get("active") or 0):
+            await interaction.response.send_message(
+                embed=error_embed("Ungültig", "Dieser Code existiert nicht oder ist inaktiv."),
+                ephemeral=True,
+            )
+            return
+
+        # Pro-User-Limit (inkl. aktueller Order falls schon derselbe Code)
+        user_uses = await self.bot.db.count_user_code_uses(
+            int(order["guild_id"]), int(row["id"]), interaction.user.id
+        )
+        already_this = int(order.get("discount_code_id") or 0) == int(row["id"])
+        effective_uses = user_uses - (1 if already_this else 0)
+        max_per = int(row.get("max_per_user") or 1)
+        if effective_uses >= max_per:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Limit erreicht",
+                    f"Du kannst `{row['code']}` max. **{max_per}×** nutzen.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        base_total = float(
+            order.get("original_total")
+            if order.get("discount_code_id")
+            else order["total"]
+        )
+        try:
+            new_total, savings = compute_code_discount(
+                base_total,
+                str(row["discount_type"]),
+                float(row["discount_value"]),
+            )
+        except ValueError as e:
+            await interaction.response.send_message(
+                embed=error_embed("Rabatt nicht anwendbar", str(e)),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Alten Code freigeben falls Wechsel
+        old_code_id = order.get("discount_code_id")
+        if old_code_id and int(old_code_id) != int(row["id"]):
+            await self.bot.db.decrement_code_use(int(old_code_id))
+        elif old_code_id and int(old_code_id) == int(row["id"]):
+            # Gleicher Code erneut — uses nicht nochmal erhöhen
+            await self.bot.db.apply_discount_to_order(
+                self.order_id,
+                code_id=int(row["id"]),
+                code=str(row["code"]),
+                original_total=base_total,
+                new_total=new_total,
+                discount_amount=savings,
+            )
+            order = await self.bot.db.get_order(self.order_id) or order
+            await _repost_ticket_totals(self.bot, interaction, order)
+            await interaction.followup.send(
+                embed=success_embed(
+                    "Code aktualisiert",
+                    f"`{row['code']}` — {format_code_discount(row['discount_type'], float(row['discount_value']))}\n"
+                    f"Neu: **{format_price(new_total)}** "
+                    f"(−{format_price(savings)})",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        ok = await self.bot.db.try_increment_code_use(int(row["id"]))
+        if not ok:
+            mx = row.get("max_uses")
+            await interaction.followup.send(
+                embed=error_embed(
+                    "Limit erreicht",
+                    f"`{row['code']}` ist ausgeschöpft"
+                    + (f" ({mx}×)" if mx is not None else "")
+                    + ".",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await self.bot.db.apply_discount_to_order(
+            self.order_id,
+            code_id=int(row["id"]),
+            code=str(row["code"]),
+            original_total=base_total,
+            new_total=new_total,
+            discount_amount=savings,
+        )
+        order = await self.bot.db.get_order(self.order_id) or order
+        await _repost_ticket_totals(self.bot, interaction, order)
+
+        label = f" ({row['label']})" if row.get("label") else ""
+        await interaction.followup.send(
+            embed=success_embed(
+                "Code eingelöst",
+                f"`{row['code']}`{label} — "
+                f"{format_code_discount(row['discount_type'], float(row['discount_value']))}\n"
+                f"Vorher: {format_price(base_total)} → "
+                f"**{format_price(new_total)}** (−{format_price(savings)})",
+            ),
+            ephemeral=True,
+        )
+
+
+async def _repost_ticket_totals(
+    bot: ShopBot, interaction: discord.Interaction, order: dict
+) -> None:
+    """Postet aktualisierte Zahlungsinfos nach Code-Einlösung."""
+    channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel) or not interaction.guild:
+        return
+    settings = await bot.db.ensure_guild(int(order["guild_id"]))
+    items = await bot.db.get_order_items(int(order["id"]))
+    buyer: discord.abc.User = interaction.user
+    try:
+        buyer = await interaction.guild.fetch_member(int(order["user_id"]))
+    except discord.HTTPException:
+        pass
+    try:
+        await channel.send(
+            content=f"🏷️ Preis aktualisiert durch Code `{order.get('discount_code')}`.",
+            embeds=[
+                payment_info_embed(order, settings),
+                order_cart_panel_embed(
+                    order, items, settings, buyer, interaction.guild
+                ),
+            ],
+        )
+    except discord.HTTPException:
+        pass
 
 
 class PaymentProofModal(discord.ui.Modal, title="Payment beweisen"):

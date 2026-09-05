@@ -142,6 +142,22 @@ class Database:
                 PRIMARY KEY (guild_id, user_id)
             );
 
+            CREATE TABLE IF NOT EXISTS discount_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                code TEXT NOT NULL,
+                discount_type TEXT NOT NULL CHECK (discount_type IN ('percent', 'amount')),
+                discount_value REAL NOT NULL,
+                max_uses INTEGER,
+                uses INTEGER NOT NULL DEFAULT 0,
+                max_per_user INTEGER NOT NULL DEFAULT 1,
+                active INTEGER NOT NULL DEFAULT 1,
+                label TEXT NOT NULL DEFAULT '',
+                created_by INTEGER,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (guild_id, code)
+            );
+
             CREATE TABLE IF NOT EXISTS daily_deals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER NOT NULL,
@@ -220,6 +236,10 @@ class Database:
             ("orders", "credits_amount", "REAL"),
             ("orders", "paid_with_credits", "INTEGER NOT NULL DEFAULT 0"),
             ("orders", "source_panel_slot", "INTEGER"),
+            ("orders", "discount_code", "TEXT"),
+            ("orders", "discount_code_id", "INTEGER"),
+            ("orders", "discount_amount", "REAL NOT NULL DEFAULT 0"),
+            ("orders", "original_total", "REAL"),
         ):
             try:
                 await self.db.execute(
@@ -236,6 +256,29 @@ class Database:
                     user_id INTEGER NOT NULL,
                     balance REAL NOT NULL DEFAULT 0,
                     PRIMARY KEY (guild_id, user_id)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discount_codes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    code TEXT NOT NULL,
+                    discount_type TEXT NOT NULL CHECK (discount_type IN ('percent', 'amount')),
+                    discount_value REAL NOT NULL,
+                    max_uses INTEGER,
+                    uses INTEGER NOT NULL DEFAULT 0,
+                    max_per_user INTEGER NOT NULL DEFAULT 1,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    label TEXT NOT NULL DEFAULT '',
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE (guild_id, code)
                 )
                 """
             )
@@ -894,6 +937,179 @@ class Database:
         )
         await self.db.commit()
         return (cur.rowcount or 0) > 0
+
+    # ── Discount / creator codes ────────────────────────────────────
+
+    async def create_discount_code(
+        self,
+        guild_id: int,
+        code: str,
+        *,
+        discount_type: str,
+        discount_value: float,
+        max_uses: int | None = None,
+        max_per_user: int = 1,
+        label: str = "",
+        created_by: int | None = None,
+    ) -> int:
+        normalized = code.strip().upper()
+        if not normalized:
+            raise ValueError("Code darf nicht leer sein.")
+        if discount_type not in ("percent", "amount"):
+            raise ValueError("discount_type muss percent oder amount sein.")
+        cur = await self.db.execute(
+            """
+            INSERT INTO discount_codes
+              (guild_id, code, discount_type, discount_value, max_uses,
+               max_per_user, label, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                normalized,
+                discount_type,
+                float(discount_value),
+                max_uses,
+                max(1, int(max_per_user)),
+                (label or "").strip()[:100],
+                created_by,
+            ),
+        )
+        await self.db.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    async def get_discount_code(
+        self, guild_id: int, code: str
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            """
+            SELECT * FROM discount_codes
+            WHERE guild_id = ? AND code = ?
+            """,
+            (guild_id, code.strip().upper()),
+        )
+        return dict(row) if row else None
+
+    async def get_discount_code_by_id(
+        self, code_id: int
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            "SELECT * FROM discount_codes WHERE id = ?", (code_id,)
+        )
+        return dict(row) if row else None
+
+    async def list_discount_codes(
+        self, guild_id: int, *, active_only: bool = False
+    ) -> list[dict[str, Any]]:
+        q = """
+            SELECT * FROM discount_codes
+            WHERE guild_id = ?
+        """
+        if active_only:
+            q += " AND active = 1"
+        q += " ORDER BY active DESC, code ASC"
+        rows = await self.fetchall(q, (guild_id,))
+        return [dict(r) for r in rows]
+
+    async def update_discount_code(self, code_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [code_id]
+        await self.db.execute(
+            f"UPDATE discount_codes SET {cols} WHERE id = ?", values
+        )
+        await self.db.commit()
+
+    async def count_user_code_uses(
+        self, guild_id: int, code_id: int, user_id: int
+    ) -> int:
+        row = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt FROM orders
+            WHERE guild_id = ? AND discount_code_id = ? AND user_id = ?
+              AND status != 'cancelled'
+            """,
+            (guild_id, code_id, user_id),
+        )
+        return int(row["cnt"]) if row else 0
+
+    async def try_increment_code_use(self, code_id: int) -> bool:
+        cur = await self.db.execute(
+            """
+            UPDATE discount_codes
+            SET uses = uses + 1
+            WHERE id = ? AND active = 1
+              AND (max_uses IS NULL OR uses < max_uses)
+            """,
+            (code_id,),
+        )
+        await self.db.commit()
+        return (cur.rowcount or 0) > 0
+
+    async def decrement_code_use(self, code_id: int) -> None:
+        await self.db.execute(
+            """
+            UPDATE discount_codes
+            SET uses = MAX(uses - 1, 0)
+            WHERE id = ?
+            """,
+            (code_id,),
+        )
+        await self.db.commit()
+
+    async def apply_discount_to_order(
+        self,
+        order_id: int,
+        *,
+        code_id: int,
+        code: str,
+        original_total: float,
+        new_total: float,
+        discount_amount: float,
+    ) -> None:
+        await self.db.execute(
+            """
+            UPDATE orders SET
+              discount_code = ?,
+              discount_code_id = ?,
+              original_total = ?,
+              total = ?,
+              half_a = ?,
+              discount_amount = ?
+            WHERE id = ?
+            """,
+            (
+                code.strip().upper(),
+                code_id,
+                float(original_total),
+                float(new_total),
+                float(new_total),
+                float(discount_amount),
+                order_id,
+            ),
+        )
+        await self.db.commit()
+
+    async def clear_order_discount(self, order_id: int) -> None:
+        order = await self.get_order(order_id)
+        if not order:
+            return
+        restore = float(order.get("original_total") or order["total"])
+        await self.db.execute(
+            """
+            UPDATE orders SET
+              discount_code = NULL,
+              discount_code_id = NULL,
+              original_total = NULL,
+              total = ?,
+              half_a = ?,
+              discount_amount = 0
+            WHERE id = ?
+            """,
+            (restore, restore, order_id),
+        )
+        await self.db.commit()
 
     async def get_order(self, order_id: int) -> dict[str, Any] | None:
         row = await self.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
