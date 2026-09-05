@@ -158,6 +158,21 @@ class Database:
                 UNIQUE (guild_id, code)
             );
 
+            CREATE TABLE IF NOT EXISTS scan_premium (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS scan_usage (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                day TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id, day)
+            );
+
             CREATE TABLE IF NOT EXISTS daily_deals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER NOT NULL,
@@ -279,6 +294,35 @@ class Database:
                     created_by INTEGER,
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     UNIQUE (guild_id, code)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scan_premium (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scan_usage (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    day TEXT NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id, day)
                 )
                 """
             )
@@ -837,7 +881,7 @@ class Database:
             (guild_id,),
         )
         order_number = int(mx["mx"]) + 1 if mx else 1
-        kind = order_kind if order_kind in ("shop", "credits") else "shop"
+        kind = order_kind if order_kind in ("shop", "credits", "scan_premium") else "shop"
         cur = await self.db.execute(
             """
             INSERT INTO orders
@@ -1110,6 +1154,98 @@ class Database:
             (restore, restore, order_id),
         )
         await self.db.commit()
+
+    # ── Scan premium & daily usage ──────────────────────────────────
+
+    def _utc_day(self) -> str:
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    async def get_scan_premium_expires(
+        self, guild_id: int, user_id: int
+    ) -> str | None:
+        row = await self.fetchone(
+            """
+            SELECT expires_at FROM scan_premium
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        return str(row["expires_at"]) if row else None
+
+    async def is_scan_premium(self, guild_id: int, user_id: int) -> bool:
+        from datetime import datetime, timezone
+
+        expires = await self.get_scan_premium_expires(guild_id, user_id)
+        if not expires:
+            return False
+        try:
+            exp = datetime.strptime(expires, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            try:
+                exp = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+            except ValueError:
+                return False
+        return exp > datetime.now(timezone.utc)
+
+    async def extend_scan_premium(
+        self, guild_id: int, user_id: int, days: int
+    ) -> str:
+        """Verlängert Premium ab max(jetzt, aktuelles Ende)."""
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        current = await self.get_scan_premium_expires(guild_id, user_id)
+        start = now
+        if current:
+            try:
+                exp = datetime.strptime(current, "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=timezone.utc
+                )
+                if exp > now:
+                    start = exp
+            except ValueError:
+                pass
+        new_exp = start + timedelta(days=max(1, int(days)))
+        stamp = new_exp.strftime("%Y-%m-%d %H:%M:%S")
+        await self.db.execute(
+            """
+            INSERT INTO scan_premium (guild_id, user_id, expires_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET expires_at = excluded.expires_at
+            """,
+            (guild_id, user_id, stamp),
+        )
+        await self.db.commit()
+        return stamp
+
+    async def get_scan_usage_today(self, guild_id: int, user_id: int) -> int:
+        row = await self.fetchone(
+            """
+            SELECT count FROM scan_usage
+            WHERE guild_id = ? AND user_id = ? AND day = ?
+            """,
+            (guild_id, user_id, self._utc_day()),
+        )
+        return int(row["count"]) if row else 0
+
+    async def increment_scan_usage(self, guild_id: int, user_id: int) -> int:
+        day = self._utc_day()
+        await self.db.execute(
+            """
+            INSERT INTO scan_usage (guild_id, user_id, day, count)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(guild_id, user_id, day) DO UPDATE SET count = count + 1
+            """,
+            (guild_id, user_id, day),
+        )
+        await self.db.commit()
+        return await self.get_scan_usage_today(guild_id, user_id)
 
     async def get_order(self, order_id: int) -> dict[str, Any] | None:
         row = await self.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))

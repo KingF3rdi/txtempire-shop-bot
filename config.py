@@ -26,3 +26,10 @@ EMBED_WARN = 0xD69E2E
 
 DEFAULT_PAYEE = "TxtEmpire"
 PAYMENT_NOTICE = "Das gesamte Geld geht an TxtEmpire."
+
+# File-Scanner Limits
+SCAN_FREE_DAILY = int(os.getenv("SCAN_FREE_DAILY", "1") or "1")
+SCAN_PREMIUM_DAILY = int(os.getenv("SCAN_PREMIUM_DAILY", "15") or "15")
+# Preise für Scan-Premium (Shop-Währung, 1 Credit = 100k)
+SCAN_PREMIUM_14_PRICE = float(os.getenv("SCAN_PREMIUM_14_PRICE", "500000") or "500000")
+SCAN_PREMIUM_30_PRICE = float(os.getenv("SCAN_PREMIUM_30_PRICE", "900000") or "900000")

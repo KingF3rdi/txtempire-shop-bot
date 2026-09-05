@@ -272,9 +272,10 @@ async def action_confirm_order(
         update_fields["paid_with_credits"] = 1
     await bot.db.update_order(int(order["id"]), **update_fields)
 
-    # Credits-Kauf: Guthaben gutschreiben statt Packs
+    # Credits-Kauf / Scan-Premium: keine Packs
     credits_granted: float | None = None
     credits_balance = None
+    scan_premium_until: str | None = None
     if order_kind == "credits":
         amount = float(order.get("credits_amount") or 0)
         if amount <= 0:
@@ -285,6 +286,13 @@ async def action_confirm_order(
             int(order["guild_id"]), int(order["user_id"]), amount
         )
         credits_granted = amount
+    elif order_kind == "scan_premium":
+        days = int(float(order.get("credits_amount") or 14))
+        if days not in (14, 30):
+            days = 14 if days < 30 else 30
+        scan_premium_until = await bot.db.extend_scan_premium(
+            int(order["guild_id"]), int(order["user_id"]), days
+        )
 
     member = None
     try:
@@ -294,12 +302,13 @@ async def action_confirm_order(
 
     role_result: dict = {"granted": [], "skipped": [], "failed": []}
     delivery_info: dict = {}
-    if member and order_kind != "credits":
+    non_product = order_kind in ("credits", "scan_premium")
+    if member and not non_product:
         role_result = await grant_purchase_roles(member, settings, order_items)
         channel = interaction.channel
         if isinstance(channel, discord.TextChannel):
             delivery_info = await deliver_packs(member, channel, order_items)
-    elif member and order_kind == "credits":
+    elif member and non_product:
         role_result = await grant_purchase_roles(member, settings, [])
     elif not member:
         role_result["failed"].append(
@@ -322,6 +331,14 @@ async def action_confirm_order(
             f"🪙 **{format_credits(credits_granted)} Credits** gutgeschrieben "
             f"(Guthaben jetzt: **{format_credits(credits_balance or 0)}**)."
         )
+    if scan_premium_until is not None:
+        import config as _cfg
+
+        days = int(float(order.get("credits_amount") or 14))
+        extra_parts.append(
+            f"⭐ **Scan Premium** aktiv bis `{scan_premium_until}` "
+            f"({days} Tage · {_cfg.SCAN_PREMIUM_DAILY} Scans/Tag)."
+        )
     if paid_with_credits and charged is not None:
         bal = await bot.db.get_credits(int(order["guild_id"]), int(order["user_id"]))
         extra_parts.append(
@@ -334,14 +351,14 @@ async def action_confirm_order(
         extra_parts.append("Pack-Datei(en) gesendet.")
     if delivery_info.get("links_posted"):
         extra_parts.append("Pack-Links im Ticket gepostet.")
-    if order_kind != "credits" and not any(
+    if not non_product and not any(
         role_result.get(k) for k in ("granted", "skipped", "failed")
     ):
         extra_parts.append(
             "Keine Autorole hinterlegt — setze sie mit `/item setrole` "
             "oder Admin-Panel → Item → **Autorole**."
         )
-    if order_kind != "credits":
+    if not non_product:
         extra_parts.append("Käufer kann einmalig `/vouch` nutzen.")
     extra_parts.append("⏳ Dieses Ticket wird in 5 Sekunden automatisch gelöscht.")
     if extra_parts:
@@ -353,7 +370,7 @@ async def action_confirm_order(
 
     await interaction.followup.send(embed=success)
 
-    if order_kind != "credits":
+    if not non_product:
         from utils.vouch_request import send_vouch_request_dm
 
         product_names = ", ".join(
@@ -665,11 +682,11 @@ async def action_apply_discount_code(
             ephemeral=True,
         )
         return
-    if str(order.get("order_kind") or "shop") == "credits":
+    if str(order.get("order_kind") or "shop") in ("credits", "scan_premium"):
         await interaction.response.send_message(
             embed=error_embed(
                 "Nicht verfügbar",
-                "Codes gelten nicht für Credits-Kauf-Tickets.",
+                "Codes gelten nicht für Credits- oder Scan-Premium-Tickets.",
             ),
             ephemeral=True,
         )

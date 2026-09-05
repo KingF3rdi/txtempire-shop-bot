@@ -141,7 +141,13 @@ async def create_order_ticket(
     order = await bot.db.get_order(order_id)
     assert order is not None
     seq = int(order.get("order_number") or order_id)
-    prefix = "credits" if order_kind == "credits" else "order"
+    prefix = (
+        "credits"
+        if order_kind == "credits"
+        else "scanprem"
+        if order_kind == "scan_premium"
+        else "order"
+    )
     channel_name = f"{prefix}-{seq:04d}-{safe_name}"[:100]
     try:
         channel = await guild.create_text_channel(
@@ -218,6 +224,14 @@ async def create_order_ticket(
         credits_hint = (
             "\n🪙 **Credits-Kauf** — nach Staff-Bestätigung werden Credits "
             "gutgeschrieben."
+        )
+    elif order_kind == "scan_premium":
+        import config as _cfg
+
+        days = int(float(credits_amount or 14))
+        credits_hint = (
+            f"\n⭐ **Scan Premium ({days} Tage)** — nach Bestätigung "
+            f"**{_cfg.SCAN_PREMIUM_DAILY} Scans/Tag**."
         )
     elif show_fast_buy:
         from utils.credits import credits_needed_for_total, format_credits
