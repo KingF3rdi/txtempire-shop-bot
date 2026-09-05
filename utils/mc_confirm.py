@@ -391,13 +391,14 @@ async def handle_mc_link_redeem(
 
     confirm = success_embed(
         "✅ Minecraft-Account verknüpft",
-        f"Dein Discord ist jetzt mit IGN **{ign_clean}** verknüpft.\n\n"
+        f"<@{user_id}> ist jetzt mit IGN **{ign_clean}** verknüpft.\n\n"
         "Bei offenen Kauf-Tickets mit **passendem Betrag** wird die Zahlung "
         "automatisch bestätigt — ohne Screenshot.",
     )
     confirm.set_footer(text=f"Code {code.strip().upper()} eingelöst")
 
     dm_ok = False
+    channel_ok = False
     log_ok = False
 
     user = None
@@ -406,7 +407,6 @@ async def handle_mc_link_redeem(
     except discord.HTTPException:
         pass
 
-    # Nur privat an den User (DM) — keine öffentliche Channel-Bestätigung
     if user is not None:
         try:
             await user.send(embed=confirm)
@@ -417,13 +417,22 @@ async def handle_mc_link_redeem(
     guild = bot.get_guild(guild_id)
     if guild is not None:
         try:
-            from views.mc_link_views import refresh_mc_link_panel_status
+            from views.mc_link_views import (
+                MC_LINK_PANEL_TYPE,
+                refresh_mc_link_panel_status,
+            )
 
+            # Sichtbare Bestätigung im Link-Panel (Fallback wenn DM zu / sichtbar für User)
+            panel = await bot.db.get_service_panel(guild_id, MC_LINK_PANEL_TYPE)
+            if panel and panel.get("channel_id"):
+                ch = guild.get_channel(int(panel["channel_id"]))
+                if isinstance(ch, discord.TextChannel):
+                    await ch.send(content=f"<@{user_id}>", embed=confirm)
+                    channel_ok = True
             await refresh_mc_link_panel_status(bot, guild_id)
         except Exception:
             pass
 
-        # Optional: Staff-Log (nicht öffentlich im Panel-Channel)
         settings = await bot.db.ensure_guild(guild_id)
         log_ch_id = settings.get("mc_payment_log_channel_id")
         if log_ch_id:
@@ -440,12 +449,27 @@ async def handle_mc_link_redeem(
                 except discord.HTTPException:
                     pass
 
+        # Letzter Fallback: System-/erster Kanal wenn weder DM noch Panel ging
+        if not channel_ok and not dm_ok:
+            fallback = guild.system_channel
+            if fallback is None:
+                for c in guild.text_channels:
+                    if c.permissions_for(guild.me).send_messages:  # type: ignore[union-attr]
+                        fallback = c
+                        break
+            if fallback is not None:
+                try:
+                    await fallback.send(content=f"<@{user_id}>", embed=confirm)
+                    channel_ok = True
+                except discord.HTTPException:
+                    pass
+
     return {
         "ok": True,
         "guild_id": guild_id,
         "user_id": user_id,
         "ign": ign_clean,
         "notified_dm": dm_ok,
-        "notified_channel": False,
+        "notified_channel": channel_ok,
         "notified_log": log_ok,
     }

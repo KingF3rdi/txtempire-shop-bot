@@ -48,7 +48,10 @@ public final class ApiClient {
 		body.addProperty("ign", ign);
 		// Webhook zuerst (funktioniert ohne offenen Server-Port)
 		postWebhookLine("MC_LINK " + code + " " + ign + " " + config.apiKey);
-		post("/mc/v1/link", body);
+		// HTTP nur als Fallback, wenn kein Webhook — sonst Doppel-Events + Retry-Spam
+		if (!config.hasWebhook()) {
+			post("/mc/v1/link", body);
+		}
 	}
 
 	public void postPayment(String ign, double amount, String raw) {
@@ -64,11 +67,13 @@ public final class ApiClient {
 			"MC_PAY " + ign + " " + amount + " " + config.apiKey
 				+ (safeRaw.isEmpty() ? "" : " " + safeRaw)
 		);
-		post("/mc/v1/payment", body);
+		if (!config.hasWebhook()) {
+			post("/mc/v1/payment", body);
+		}
 	}
 
 	public void postHeartbeat() {
-		// Kein Webhook-Spam — nur HTTP (optional)
+		// Nur HTTP — Webhook nicht alle 15s spammen
 		post("/mc/v1/heartbeat", config.basePayload());
 	}
 
