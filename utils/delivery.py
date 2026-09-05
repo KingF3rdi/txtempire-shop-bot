@@ -88,14 +88,19 @@ async def deliver_packs(
             )
             await send_to(ticket_channel, mention=member.mention)
 
-    if link_parts:
+    # Nur Text-Links posten die KEIN Datei-Download sind, wenn wir die Datei schon haben
+    # (kein Pack-CDN im Ticket leaken)
+    if link_parts and not pack_paths:
         await ticket_channel.send(
             f"**Pack-Links für {member.mention}:**\n" + "\n".join(link_parts)
         )
+    elif link_parts and pack_paths:
+        # Datei geht per DM — keine öffentlichen Download-Links im Ticket
+        pass
 
     return {
         "dm_sent": dm_sent,
-        "links_posted": links_posted,
+        "links_posted": links_posted if not pack_paths else [],
         "files_sent": files_sent,
         "dm_failed": ["1"] if dm_failed else [],
     }

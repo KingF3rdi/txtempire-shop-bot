@@ -20,21 +20,27 @@ async def apply_pack_attachment(
     channel: discord.abc.Messageable | None = None,
 ) -> tuple[str, str]:
     """
-    Speichert Pack lokal und setzt pack_link auf eine Discord-URL.
-    Gibt (pack_file_rel, pack_link_url) zurück.
+    Speichert Pack lokal. Kein öffentlicher Channel-Post (Leak-Schutz).
+
+    Optional: Archiv-Kopie nur in eine DM (nicht in Guild-Channels).
+    Gibt (pack_file_rel, pack_link_url) zurück — pack_link oft leer,
+    Lieferung läuft über die lokale Datei.
     """
     rel = await save_pack_attachment(item_id, attachment)
-    pack_link = attachment.url
+    # Kein öffentlicher Discord-CDN-Link speichern — sonst Leak im Ticket/Channel
+    pack_link = ""
 
-    if channel is not None:
+    # Nur in DMs re-hosten (Admin-Archiv), nie in Server-Channels
+    if channel is not None and isinstance(channel, discord.DMChannel):
         path = resolve_pack_path(rel)
         if path is not None:
             try:
                 posted = await channel.send(
-                    content=f"📦 Pack für Item `{item_id}` — bitte nicht löschen.",
+                    content=f"📦 Pack-Archiv Item `{item_id}` (privat).",
                     file=discord.File(path, filename=path.name),
                 )
                 if posted.attachments:
+                    # Nur für Admin-DM; Delivery nutzt trotzdem pack_file lokal
                     pack_link = posted.attachments[0].url
             except discord.HTTPException:
                 pass
@@ -50,18 +56,20 @@ async def collect_pack_from_user(
 ) -> None:
     """
     Pack per Drag & Drop im Channel (ohne DM) oder Fallback per DM / Slash.
+    Channel-Drops werden nach dem Speichern gelöscht (kein Leak).
     """
     user = interaction.user
     timeout_s = 120.0
     guild_channel = interaction.channel
 
-    # 1) Channel-Drop (Message Content Intent)
+    # 1) Channel-Drop (Message Content Intent) — Datei speichern, Nachricht löschen
     if isinstance(guild_channel, discord.TextChannel):
         await interaction.followup.send(
             embed=success_embed(
                 f"Pack für Item `{item_id}`",
-                f"{user.mention}: Droppe die Pack-Datei **hier in diesen Channel** "
+                f"{user.mention}: Droppe die Pack-Datei **hier** "
                 f"(innerhalb {int(timeout_s)} Sekunden).\n"
+                "Die Nachricht wird danach **gelöscht** — Pack bleibt nur intern.\n"
                 "Alternative: DM an den Bot oder `/item setpack` mit Anhang.",
             ),
             ephemeral=True,
@@ -79,17 +87,22 @@ async def collect_pack_from_user(
                 "message", check=ch_check, timeout=timeout_s
             )
             attachment = message.attachments[0]
-            _rel, pack_link = await apply_pack_attachment(
-                bot, item_id, attachment, channel=guild_channel
+            # Nicht in Guild-Channel posten
+            _rel, _pack_link = await apply_pack_attachment(
+                bot, item_id, attachment, channel=None
             )
             try:
-                await message.add_reaction("✅")
+                await message.delete()
             except discord.HTTPException:
-                pass
+                try:
+                    await message.add_reaction("✅")
+                except discord.HTTPException:
+                    pass
             await interaction.followup.send(
                 embed=success_embed(
-                    "Pack-Link gesetzt",
-                    f"**{attachment.filename}** → Item `{item_id}`\n{pack_link}",
+                    "Pack gespeichert",
+                    f"**{attachment.filename}** → Item `{item_id}` "
+                    "(lokal, nicht öffentlich).",
                 ),
                 ephemeral=True,
             )
@@ -135,14 +148,15 @@ async def collect_pack_from_user(
         )
         await dm.send(
             embed=success_embed(
-                "Pack-Link gesetzt",
-                f"**{attachment.filename}** gespeichert.\nLink: {pack_link}",
+                "Pack gespeichert",
+                f"**{attachment.filename}** intern gespeichert."
+                + (f"\nArchiv-Link (nur DM): {pack_link}" if pack_link else ""),
             )
         )
         await interaction.followup.send(
             embed=success_embed(
-                "Pack-Link gesetzt",
-                f"**{attachment.filename}** → Item `{item_id}`\n{pack_link}",
+                "Pack gespeichert",
+                f"**{attachment.filename}** → Item `{item_id}` (nicht öffentlich).",
             ),
             ephemeral=True,
         )

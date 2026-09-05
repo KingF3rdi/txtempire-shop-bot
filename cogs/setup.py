@@ -359,9 +359,9 @@ class SetupCog(commands.Cog):
 
             try:
                 _rel, url = await apply_pack_attachment(
-                    self.bot, iid, pack_file, channel=interaction.channel
+                    self.bot, iid, pack_file, channel=None
                 )
-                pack_note = f"\nPack-Link: {url}"
+                pack_note = f"\nPack gespeichert: **{pack_file.filename}** (nicht öffentlich)"
             except ValueError as e:
                 pack_note = f"\nPack-Upload fehlgeschlagen: {e}"
         role_note = f"\nAutorole: {role.mention}" if role else ""
@@ -433,7 +433,7 @@ class SetupCog(commands.Cog):
 
         try:
             _rel, url = await apply_pack_attachment(
-                self.bot, item, pack_file, channel=interaction.channel
+                self.bot, item, pack_file, channel=None
             )
         except ValueError as e:
             await interaction.followup.send(
@@ -442,9 +442,9 @@ class SetupCog(commands.Cog):
             return
         await interaction.followup.send(
             embed=success_embed(
-                "Pack-Link gesetzt",
+                "Pack gespeichert",
                 f"**{pack_file.filename}** → Item `{item}` (**{row['name']}**)\n"
-                f"Link: {url}",
+                "Lokal gespeichert — nicht im Channel sichtbar.",
             ),
             ephemeral=True,
         )
@@ -955,9 +955,9 @@ class SetupCog(commands.Cog):
 
             try:
                 _rel, url = await apply_pack_attachment(
-                    self.bot, iid, pack_file, channel=interaction.channel
+                    self.bot, iid, pack_file, channel=None
                 )
-                pack_note = f"\nPack-Link: {url}"
+                pack_note = f"\nPack gespeichert: **{pack_file.filename}** (nicht öffentlich)"
             except ValueError as e:
                 pack_note = f"\nPack-Upload fehlgeschlagen: {e}"
 
@@ -1304,9 +1304,9 @@ class SetupCog(commands.Cog):
         pack_note = ""
         try:
             _rel, url = await apply_pack_attachment(
-                self.bot, iid, pack_file, channel=interaction.channel
+                self.bot, iid, pack_file, channel=None
             )
-            pack_note = f"\nPack: **{pack_file.filename}** → {url}"
+            pack_note = f"\nPack: **{pack_file.filename}** (lokal, nicht öffentlich)"
         except ValueError as e:
             await interaction.followup.send(
                 embed=error_embed("Pack-Upload fehlgeschlagen", str(e)),
