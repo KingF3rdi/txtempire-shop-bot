@@ -66,9 +66,9 @@ FAQ: tuple[FaqEntry, ...] = (
         "**Packs kaufen:**\n"
         "1) Buy-Panel → Produkt wählen → Ticket öffnet sich\n"
         "2) Betrag **überweisen** (Daten im Ticket oben)\n"
-        "3) **Fullscreen Money-Log** Screenshot machen\n"
-        "4) **Payment beweisen** (IGN + Bild)\n"
-        "5) Staff bestätigt → Pack per DM",
+        "3) **Verlinkter Account:** Ticket wird automatisch bestätigt\n"
+        "   **Sonst:** Fullscreen Money-Log → **Payment beweisen** → Staff\n"
+        "4) Pack per DM",
     ),
     FaqEntry(
         (
@@ -179,8 +179,30 @@ FAQ: tuple[FaqEntry, ...] = (
         "Abbrechen: Button **Kauf abbrechen** oder `/order cancel`.",
     ),
     FaqEntry(
+        (
+            "link account",
+            "account link",
+            "account verlinken",
+            "mc link",
+            "minecraft link",
+            "verknüpf",
+            "verknuepf",
+            "unverifiz",
+            "unlink",
+            "auto confirm",
+            "automatisch bestätigt",
+            "automatisch bestaetigt",
+        ),
+        "**Account verlinken:** Panel **Minecraft Account** → "
+        "**Account verlinken** → IGN → Code bekommen → Ingame "
+        "`!link CODE` schreiben.\n"
+        "Danach wird dein Ticket nach korrekter Zahlung **automatisch bestätigt**.\n"
+        "**Unverifizieren:** gleicher Panel-Button oder `/unlink`.",
+    ),
+    FaqEntry(
         ("ign", "minecraft name", "spielername", "ingame", "in game name"),
-        "**IGN** trägst du beim **Payment beweisen** ein.",
+        "**IGN:** Am besten einmalig über **Account verlinken** verbinden.\n"
+        "Sonst trägst du den IGN beim **Payment beweisen** ein.",
     ),
     FaqEntry(
         ("rolle", "autorole", "customer rolle", "zugang"),

@@ -325,6 +325,33 @@ class SetupCog(commands.Cog):
         return await self._cat_ac(interaction, current)
 
     @item.command(
+        name="set",
+        description="Item bearbeiten — öffnet Formular (Name, Preis, Pack-DM)",
+    )
+    @app_commands.describe(item="Item (tippen zum Suchen)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def item_set(
+        self,
+        interaction: discord.Interaction,
+        item: int,
+    ) -> None:
+        row = await self.bot.db.get_item(item)
+        if not row or row["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message(
+                embed=error_embed("Item nicht gefunden"), ephemeral=True
+            )
+            return
+        from cogs.admin_panel import EditItemModal
+
+        await interaction.response.send_modal(EditItemModal(self.bot, row))
+
+    @item_set.autocomplete("item")
+    async def item_set_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[int]]:
+        return await self.item_setpack_ac(interaction, current)
+
+    @item.command(
         name="setpack",
         description="Pack-Datei anhängen (Drag & Drop) → Pack-Link",
     )

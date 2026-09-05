@@ -73,3 +73,10 @@ INVITE_REWARDS: tuple[tuple[int, float], ...] = (
     (100, 25_000_000.0),
 )
 
+# Minecraft Account-Link + Chat-Watcher Mod API
+MC_API_HOST = os.getenv("MC_API_HOST", "0.0.0.0")
+MC_API_PORT = int(os.getenv("MC_API_PORT", "8765") or "8765")
+MC_API_KEY = os.getenv("MC_API_KEY", "").strip()
+MC_LINK_CODE_TTL_MINUTES = int(os.getenv("MC_LINK_CODE_TTL_MINUTES", "10") or "10")
+
+

@@ -36,6 +36,7 @@ class ShopBot(commands.Bot):
             "cogs.boost",
             "cogs.giveaways",
             "cogs.invites",
+            "cogs.mc_link",
             ):
             await self.load_extension(ext)
 
@@ -75,6 +76,9 @@ class ShopBot(commands.Bot):
         from views.giveaway_views import GiveawayEnterView
 
         self.add_view(GiveawayEnterView(self))
+        from views.mc_link_views import McLinkPanelView
+
+        self.add_view(McLinkPanelView(self))
         n_deals = await register_daily_deal_views(self)
         if n_deals:
             print(f"[DailyDeal] {n_deals} aktive Deal-View(s) registriert")
@@ -247,6 +251,10 @@ class ShopBot(commands.Bot):
 
                 for line in await refresh_service_panels_on_ready(self):
                     print(f"[ServicePanel] {line}")
+                from views.mc_link_views import refresh_mc_link_panel_on_ready
+
+                for line in await refresh_mc_link_panel_on_ready(self):
+                    print(f"[McLink] {line}")
         else:
             from utils.panels import (
                 refresh_all_saved_buy_panels,
@@ -266,6 +274,10 @@ class ShopBot(commands.Bot):
 
             for line in await refresh_service_panels_on_ready(self):
                 print(f"[ServicePanel] {line}")
+            from views.mc_link_views import refresh_mc_link_panel_on_ready
+
+            for line in await refresh_mc_link_panel_on_ready(self):
+                print(f"[McLink] {line}")
         from utils.scan_premium_role import sweep_expired_scan_premium_roles
 
         removed = await sweep_expired_scan_premium_roles(self)

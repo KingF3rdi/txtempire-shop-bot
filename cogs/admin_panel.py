@@ -167,24 +167,8 @@ class AdminPanelView(discord.ui.View):
 
         async def on_pick(inter: discord.Interaction, item: dict) -> None:
             fresh = await self.bot.db.get_item(int(item["id"])) or item
-            role_txt = "—"
-            if fresh.get("role_id") and inter.guild:
-                role = inter.guild.get_role(int(fresh["role_id"]))
-                role_txt = role.mention if role else f"`{fresh['role_id']}`"
-            view = ItemActionsView(self.bot, fresh)
-            await inter.response.send_message(
-                embed=base_embed(
-                    fresh["name"],
-                    f"ID `{fresh['id']}` · {format_price(float(fresh['price']))}\n"
-                    f"{fresh.get('description') or '_'}\n"
-                    f"Pack-DM: `{bool(fresh.get('pack_dm_text'))}` · "
-                    f"Link: `{bool(fresh.get('pack_link'))}` · "
-                    f"Datei: `{bool(fresh.get('pack_file'))}` · "
-                    f"Autorole: {role_txt}",
-                ),
-                view=view,
-                ephemeral=True,
-            )
+            # Wie bei „Item hinzufügen“: Auswahl → Formular sofort öffnen
+            await inter.response.send_modal(EditItemModal(self.bot, fresh))
 
         keep_txt = f"Items ({len(items)}) — suchen oder auswählen:"
         view = ItemSearchView(
@@ -324,24 +308,7 @@ class ManageItemsView(discord.ui.View):
                 embed=error_embed("Nicht gefunden"), ephemeral=True
             )
             return
-        view = ItemActionsView(self.bot, item)
-        role_txt = "—"
-        if item.get("role_id") and interaction.guild:
-            role = interaction.guild.get_role(int(item["role_id"]))
-            role_txt = role.mention if role else f"`{item['role_id']}`"
-        await interaction.response.send_message(
-            embed=base_embed(
-                item["name"],
-                f"ID `{item['id']}` · {format_price(float(item['price']))}\n"
-                f"{item.get('description') or '_'}\n"
-                f"Pack-DM: `{bool(item.get('pack_dm_text'))}` · "
-                f"Link: `{bool(item.get('pack_link'))}` · "
-                f"Datei: `{bool(item.get('pack_file'))}` · "
-                f"Autorole: {role_txt}",
-            ),
-            view=view,
-            ephemeral=True,
-        )
+        await interaction.response.send_modal(EditItemModal(self.bot, item))
 
 
 class ItemActionsView(discord.ui.View):
@@ -728,12 +695,15 @@ class EditItemModal(discord.ui.Modal, title="Item bearbeiten"):
             price=price,
             pack_dm_text=str(self.pack_dm.value or ""),
         )
+        fresh = await self.bot.db.get_item(self.item_id)
+        extras = ItemActionsView(self.bot, fresh or {"id": self.item_id, "name": self.name.value})
         await interaction.response.send_message(
             embed=success_embed(
                 "Item aktualisiert",
                 f"**{self.name.value}** · {format_price(price)}\n"
-                "Pack-Link weiter über „Pack-Datei“ (Drag & Drop).",
+                "Weiter: Pack-Link, Autorole oder löschen.",
             ),
+            view=extras,
             ephemeral=True,
         )
 

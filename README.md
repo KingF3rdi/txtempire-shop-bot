@@ -57,13 +57,28 @@ python bot.py
 | `/dailydeal list` | Aktive Daily Deals anzeigen |
 | `/cart` | Warenkorb öffnen |
 | `/vouch` | Einmalig pro bestätigtem Kauf |
+| `/mclinkpanel` | Panel: Minecraft-Account verlinken / unverifizieren |
+| `/link` · `/unlink` · `/mcstatus` | Account verknüpfen, lösen, Status |
+| `/mcsetup` | Auto-Confirm + Payment-Log-Channel |
 
 ## Kauf-Flow
 
 1. User wählt Kategorie → Item → Warenkorb → **Kaufen**
-2. Privates Ticket mit Gesamtpreis und **50/50**-Aufteilung
-3. User: **Payment beweisen** (IGN + Bild-Anhang)
-4. Staff: **Payment bestätigen** → Pack per DM/Link, Rollen, `/vouch` freigeschaltet
+2. Privates Ticket mit Gesamtpreis
+3. **Mit verknüpftem MC-Account:** Ingame zahlen → Ticket wird **automatisch bestätigt**
+4. **Ohne Link:** User **Payment beweisen** (IGN + Bild) → Staff **Payment bestätigen**
+5. Pack per DM/Link, Rollen, `/vouch` freigeschaltet
+
+## Minecraft Account-Link
+
+1. `/mclinkpanel` posten
+2. User: **Account verlinken** → IGN → Code `TXTE-…`
+3. Ingame (sichtbar für den Shop-Bot-Client): `!link TXTE-…`
+4. Fabric-Mod `minecraft-mod/` meldet den Code an die Bot-API
+5. Discord ↔ IGN verknüpft · **Unverifizieren** löst die Bindung
+6. Bei passender Zahlung zum offenen Ticket → Auto-Confirm
+
+Voraussetzungen: `MC_API_KEY` in `.env`, Fabric-Mod auf dem Bot-Account (siehe `minecraft-mod/README.md`).
 
 ## Website-Anbindung
 
@@ -75,16 +90,19 @@ Wenn `SHOP_API_URL` und `BOT_API_KEY` gesetzt sind:
 
 | Komponente | Rolle |
 |------------|--------|
-| **discord-bot/** | Discord-Shop (Slash-Commands, Tickets, Warenkorb) |
-| **backend/** | Website-Shop, OAuth, MC-Bot-API |
-| **minecraft-bot/** | Ingame-Zahlungen + Link-Codes |
+| **/** (dieses Repo) | Discord-Shop (Slash-Commands, Tickets, Warenkorb, MC-Link) |
+| **minecraft-mod/** | Fabric Chat-Watcher (Link-Codes + Payments → Bot-API) |
+| **backend/** | Optional: Website-Shop, OAuth |
 
 Vouches werden optional an `POST /api/bot/vouches/sync` gesendet, wenn `SHOP_API_URL` gesetzt ist.
 
 ## Dateien
 
 - `bot.py` — Einstieg
-- `cogs/` — Slash-Commands
-- `views/` — Buttons, Selects, Panels
+- `cogs/` — Slash-Commands (inkl. `mc_link`)
+- `views/` — Buttons, Selects, Panels (inkl. MC-Link)
 - `db/database.py` — SQLite (eigene Bot-Datenbank in `data/shop.db`)
 - `integrations/shop_api.py` — Website-API Bridge
+- `integrations/mc_api.py` — HTTP-API für die Fabric-Mod
+- `utils/mc_confirm.py` — Auto-Bestätigung nach Ingame-Zahlung
+- `minecraft-mod/` — Fabric Client-Mod

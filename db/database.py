@@ -299,6 +299,8 @@ class Database:
             ("guild_settings", "ticket_money_log_hint", "INTEGER NOT NULL DEFAULT 1"),
             ("orders", "faq_turns", "INTEGER NOT NULL DEFAULT 0"),
             ("service_tickets", "faq_turns", "INTEGER NOT NULL DEFAULT 0"),
+            ("guild_settings", "mc_payment_log_channel_id", "INTEGER"),
+            ("guild_settings", "mc_auto_confirm", "INTEGER NOT NULL DEFAULT 1"),
         ):
             try:
                 await self.db.execute(
@@ -538,6 +540,56 @@ class Database:
                     invite_code TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     PRIMARY KEY (competition_id, invitee_id)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mc_account_links (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    ign TEXT NOT NULL,
+                    linked_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (guild_id, user_id),
+                    UNIQUE (guild_id, ign)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mc_link_codes (
+                    code TEXT PRIMARY KEY,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    ign TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mc_payment_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    ign TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    raw_text TEXT NOT NULL DEFAULT '',
+                    order_id INTEGER,
+                    auto_confirmed INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 )
                 """
             )
@@ -2527,6 +2579,215 @@ class Database:
             (guild_id, user_id, *OPEN_STATUSES),
         )
         return int(row["cnt"]) if row else 0
+
+    async def list_open_orders_for_user(
+        self, guild_id: int, user_id: int
+    ) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in OPEN_STATUSES)
+        rows = await self.fetchall(
+            f"""
+            SELECT * FROM orders
+            WHERE guild_id = ? AND user_id = ? AND status IN ({placeholders})
+            ORDER BY id DESC
+            """,
+            (guild_id, user_id, *OPEN_STATUSES),
+        )
+        return [dict(r) for r in rows]
+
+    async def find_open_order_by_amount(
+        self, guild_id: int, user_id: int, amount: float, *, tol: float = 1.0
+    ) -> dict[str, Any] | None:
+        orders = await self.list_open_orders_for_user(guild_id, user_id)
+        matches = [
+            o
+            for o in orders
+            if abs(float(o["total"]) - float(amount)) <= float(tol)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            # neueste
+            return matches[0]
+        return None
+
+    # ── Minecraft account links ─────────────────────────────────────
+
+    async def get_mc_link(
+        self, guild_id: int, user_id: int
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            """
+            SELECT * FROM mc_account_links
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        return dict(row) if row else None
+
+    async def get_mc_link_by_ign(
+        self, guild_id: int, ign: str
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            """
+            SELECT * FROM mc_account_links
+            WHERE guild_id = ? AND lower(ign) = lower(?)
+            """,
+            (guild_id, ign.strip()),
+        )
+        return dict(row) if row else None
+
+    async def set_mc_link(self, guild_id: int, user_id: int, ign: str) -> None:
+        ign_n = ign.strip()[:32]
+        # freigeben falls IGN woanders
+        await self.db.execute(
+            """
+            DELETE FROM mc_account_links
+            WHERE guild_id = ? AND lower(ign) = lower(?) AND user_id != ?
+            """,
+            (guild_id, ign_n, user_id),
+        )
+        await self.db.execute(
+            """
+            INSERT INTO mc_account_links (guild_id, user_id, ign)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+              ign = excluded.ign,
+              linked_at = datetime('now')
+            """,
+            (guild_id, user_id, ign_n),
+        )
+        await self.db.commit()
+
+    async def unlink_mc_account(self, guild_id: int, user_id: int) -> bool:
+        cur = await self.db.execute(
+            """
+            DELETE FROM mc_account_links
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        await self.db.execute(
+            "DELETE FROM mc_link_codes WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        await self.db.commit()
+        return (cur.rowcount or 0) > 0
+
+    async def create_mc_link_code(
+        self,
+        guild_id: int,
+        user_id: int,
+        ign: str,
+        *,
+        code: str,
+        expires_at: str,
+    ) -> None:
+        await self.db.execute(
+            "DELETE FROM mc_link_codes WHERE user_id = ? AND guild_id = ?",
+            (user_id, guild_id),
+        )
+        await self.db.execute(
+            """
+            INSERT INTO mc_link_codes (code, guild_id, user_id, ign, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (code.upper(), guild_id, user_id, ign.strip()[:32], expires_at),
+        )
+        await self.db.commit()
+
+    def _mc_code_expired(self, row: dict[str, Any]) -> bool:
+        from datetime import datetime, timezone
+
+        try:
+            exp_raw = str(row.get("expires_at") or "")
+            exp = datetime.fromisoformat(exp_raw.replace("Z", "+00:00"))
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            return datetime.now(timezone.utc) > exp
+        except Exception:
+            return False
+
+    async def peek_mc_link_code(self, code: str) -> dict[str, Any] | None:
+        norm = code.strip().upper()
+        row = await self.fetchone(
+            "SELECT * FROM mc_link_codes WHERE code = ?",
+            (norm,),
+        )
+        if not row:
+            return None
+        data = dict(row)
+        if self._mc_code_expired(data):
+            await self.db.execute(
+                "DELETE FROM mc_link_codes WHERE code = ?", (norm,)
+            )
+            await self.db.commit()
+            return None
+        return data
+
+    async def consume_mc_link_code(
+        self, code: str
+    ) -> dict[str, Any] | None:
+        data = await self.peek_mc_link_code(code)
+        if not data:
+            return None
+        norm = code.strip().upper()
+        await self.db.execute(
+            "DELETE FROM mc_link_codes WHERE code = ?",
+            (norm,),
+        )
+        await self.db.commit()
+        return data
+
+    async def get_pending_mc_link_code(
+        self, guild_id: int, user_id: int
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            """
+            SELECT * FROM mc_link_codes
+            WHERE guild_id = ? AND user_id = ?
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (guild_id, user_id),
+        )
+        if not row:
+            return None
+        data = dict(row)
+        if self._mc_code_expired(data):
+            await self.db.execute(
+                "DELETE FROM mc_link_codes WHERE code = ?",
+                (str(data["code"]),),
+            )
+            await self.db.commit()
+            return None
+        return data
+
+    async def log_mc_payment(
+        self,
+        guild_id: int,
+        *,
+        ign: str,
+        amount: float,
+        raw_text: str = "",
+        order_id: int | None = None,
+        auto_confirmed: bool = False,
+    ) -> int:
+        cur = await self.db.execute(
+            """
+            INSERT INTO mc_payment_events
+              (guild_id, ign, amount, raw_text, order_id, auto_confirmed)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                ign.strip()[:32],
+                float(amount),
+                (raw_text or "")[:500],
+                order_id,
+                1 if auto_confirmed else 0,
+            ),
+        )
+        await self.db.commit()
+        return int(cur.lastrowid)  # type: ignore[arg-type]
 
     async def list_cancelled_orders(self, guild_id: int) -> list[dict[str, Any]]:
         rows = await self.fetchall(
