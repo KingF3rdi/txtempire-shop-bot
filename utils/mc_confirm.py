@@ -386,10 +386,21 @@ async def handle_mc_link_redeem(
 
     guild_id = int(data["guild_id"])
     user_id = int(data["user_id"])
-    await bot.db.set_mc_link(guild_id, user_id, ign)
+    ign_clean = ign.strip()[:32]
+    await bot.db.set_mc_link(guild_id, user_id, ign_clean)
 
-    # User + optional Log benachrichtigen
-    guild = bot.get_guild(guild_id)
+    confirm = success_embed(
+        "✅ Minecraft-Account verknüpft",
+        f"<@{user_id}> ist jetzt mit IGN **{ign_clean}** verknüpft.\n\n"
+        "Bei offenen Kauf-Tickets mit **passendem Betrag** wird die Zahlung "
+        "automatisch bestätigt — ohne Screenshot.",
+    )
+    confirm.set_footer(text=f"Code {code.strip().upper()} eingelöst")
+
+    dm_ok = False
+    channel_ok = False
+    log_ok = False
+
     user = None
     try:
         user = await bot.fetch_user(user_id)
@@ -398,30 +409,57 @@ async def handle_mc_link_redeem(
 
     if user is not None:
         try:
-            await user.send(
-                embed=success_embed(
-                    "Minecraft-Account verknüpft",
-                    f"Dein Discord ist jetzt mit IGN **{ign.strip()}** verknüpft.\n"
-                    "Offene Tickets werden nach korrekter Ingame-Zahlung "
-                    "**automatisch bestätigt**.",
-                )
-            )
+            await user.send(embed=confirm)
+            dm_ok = True
         except discord.HTTPException:
             pass
 
+    guild = bot.get_guild(guild_id)
     if guild is not None:
+        # 1) Sichtbare Bestätigung im Link-Panel-Channel
+        try:
+            from views.mc_link_views import (
+                MC_LINK_PANEL_TYPE,
+                refresh_mc_link_panel_status,
+            )
+
+            panel = await bot.db.get_service_panel(guild_id, MC_LINK_PANEL_TYPE)
+            if panel and panel.get("channel_id"):
+                ch = guild.get_channel(int(panel["channel_id"]))
+                if isinstance(ch, discord.TextChannel):
+                    await ch.send(
+                        content=f"<@{user_id}>",
+                        embed=confirm,
+                    )
+                    channel_ok = True
+            await refresh_mc_link_panel_status(bot, guild_id)
+        except Exception:
+            pass
+
+        # 2) Optionaler Log-Channel
         settings = await bot.db.ensure_guild(guild_id)
         log_ch_id = settings.get("mc_payment_log_channel_id")
         if log_ch_id:
             log_ch = guild.get_channel(int(log_ch_id))
             if isinstance(log_ch, discord.TextChannel):
                 try:
-                    await log_ch.send(
-                        embed=success_embed(
-                            "MC Account verlinkt",
-                            f"<@{user_id}> ↔ **{ign.strip()}**",
-                        )
-                    )
+                    await log_ch.send(embed=confirm)
+                    log_ok = True
+                except discord.HTTPException:
+                    pass
+
+        # 3) Fallback: System-Channel / erster Textkanal wenn nichts ging
+        if not channel_ok and not dm_ok:
+            fallback = guild.system_channel
+            if fallback is None:
+                for c in guild.text_channels:
+                    if c.permissions_for(guild.me).send_messages:  # type: ignore[union-attr]
+                        fallback = c
+                        break
+            if fallback is not None:
+                try:
+                    await fallback.send(content=f"<@{user_id}>", embed=confirm)
+                    channel_ok = True
                 except discord.HTTPException:
                     pass
 
@@ -429,5 +467,8 @@ async def handle_mc_link_redeem(
         "ok": True,
         "guild_id": guild_id,
         "user_id": user_id,
-        "ign": ign.strip()[:32],
+        "ign": ign_clean,
+        "notified_dm": dm_ok,
+        "notified_channel": channel_ok,
+        "notified_log": log_ok,
     }

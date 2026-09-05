@@ -32,7 +32,7 @@ def _make_code() -> str:
 async def build_mc_link_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embed:
     ttl = int(config.MC_LINK_CODE_TTL_MINUTES)
     target = config.MC_LINK_IGN
-    return base_embed(
+    embed = base_embed(
         "Minecraft Account verknüpfen",
         "Verlinke deinen **Minecraft-IGN** mit Discord.\n"
         "Nach korrekter Ingame-Zahlung wird dein Kauf-Ticket "
@@ -43,7 +43,118 @@ async def build_mc_link_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embe
         f"   `/msg {target} !link DEIN-CODE`\n"
         f"4. Fertig — Status siehst du hier oder per DM\n\n"
         "Mit **Unverifizieren** kannst du die Verknüpfung jederzeit lösen.",
-    ).set_footer(text="Nur dein eigener Account · Ein IGN = ein Discord")
+    )
+    status = await collect_bot_link_status(bot, guild_id)
+    embed.add_field(
+        name="Bot-Status",
+        value=format_bot_link_status(status),
+        inline=False,
+    )
+    embed.set_footer(text="Nur dein eigener Account · Ein IGN = ein Discord")
+    return embed
+
+
+async def collect_bot_link_status(bot: ShopBot, guild_id: int) -> dict:
+    """Status für Linking-Panel / `/bot status`."""
+    settings = await bot.db.ensure_guild(guild_id)
+    linked = await bot.db.fetchone(
+        "SELECT COUNT(*) AS c FROM mc_account_links WHERE guild_id = ?",
+        (guild_id,),
+    )
+    pending = await bot.db.fetchone(
+        "SELECT COUNT(*) AS c FROM mc_link_codes WHERE guild_id = ?",
+        (guild_id,),
+    )
+    api = None
+    cog = bot.get_cog("McLinkCog")
+    if cog is not None:
+        api = getattr(cog, "api", None)
+
+    listening = bool(api and getattr(api, "listening", False))
+    last_at = getattr(api, "last_watcher_at", None) if api else None
+    last_ev = getattr(api, "last_watcher_event", None) if api else None
+    hits = int(getattr(api, "watcher_hits", 0) or 0) if api else 0
+
+    watcher_online = False
+    if last_at:
+        from datetime import datetime, timezone
+
+        try:
+            ts = datetime.strptime(last_at.replace(" UTC", "").strip(), "%Y-%m-%d %H:%M:%S")
+            ts = ts.replace(tzinfo=timezone.utc)
+            watcher_online = (datetime.now(timezone.utc) - ts).total_seconds() < 180
+        except Exception:
+            watcher_online = False
+
+    return {
+        "discord_online": bot.is_ready(),
+        "api_key_set": bool(config.MC_API_KEY),
+        "api_listening": listening,
+        "api_port": int(config.MC_API_PORT),
+        "link_ign": config.MC_LINK_IGN,
+        "auto_confirm": bool(int(settings.get("mc_auto_confirm") or 0)),
+        "linked_count": int(linked["c"]) if linked else 0,
+        "pending_codes": int(pending["c"]) if pending else 0,
+        "watcher_online": watcher_online,
+        "last_watcher_at": last_at,
+        "last_watcher_event": last_ev,
+        "watcher_hits": hits,
+    }
+
+
+def format_bot_link_status(status: dict) -> str:
+    def lamp(ok: bool) -> str:
+        return "🟢" if ok else "🔴"
+
+    lines = [
+        f"{lamp(status.get('discord_online'))} Discord-Bot",
+        f"{lamp(status.get('api_listening'))} MC-API "
+        f"(`:{status.get('api_port')}`)"
+        + ("" if status.get("api_key_set") else " · _MC_API_KEY fehlt_"),
+        f"{lamp(status.get('watcher_online'))} Ingame-Watcher "
+        f"(`/msg {status.get('link_ign')}`)",
+        f"{'🟢' if status.get('auto_confirm') else '🟡'} Auto-Confirm "
+        f"{'an' if status.get('auto_confirm') else 'aus'}",
+        f"🔗 Verknüpft: **{status.get('linked_count', 0)}** · "
+        f"Offene Codes: **{status.get('pending_codes', 0)}**",
+    ]
+    if status.get("last_watcher_at"):
+        lines.append(
+            f"📡 Letzter Watcher-Ping: `{status['last_watcher_at']}`"
+            + (
+                f" (`{status['last_watcher_event']}`)"
+                if status.get("last_watcher_event")
+                else ""
+            )
+        )
+    else:
+        lines.append("📡 Noch kein Watcher-Ping (Mod online + API erreichbar?)")
+    return "\n".join(lines)
+
+
+async def refresh_mc_link_panel_status(
+    bot: ShopBot, guild_id: int
+) -> discord.Message | None:
+    """Aktualisiert das gespeicherte Linking-Panel mit frischem Bot-Status."""
+    row = await bot.db.get_service_panel(guild_id, MC_LINK_PANEL_TYPE)
+    if not row or not row.get("channel_id") or not row.get("message_id"):
+        return None
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return None
+    channel = guild.get_channel(int(row["channel_id"]))
+    if not isinstance(channel, discord.TextChannel):
+        return None
+    try:
+        msg = await channel.fetch_message(int(row["message_id"]))
+    except (discord.NotFound, discord.HTTPException):
+        return None
+    embed = await build_mc_link_panel_embed(bot, guild_id)
+    try:
+        await msg.edit(embed=embed, view=McLinkPanelView(bot))
+    except discord.HTTPException:
+        return None
+    return msg
 
 
 class LinkIgnModal(discord.ui.Modal, title="Minecraft IGN eingeben"):

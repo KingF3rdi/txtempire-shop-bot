@@ -55,10 +55,27 @@ class McApiServer:
         self.bot = bot
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
+        self.last_watcher_at: str | None = None
+        self.last_watcher_event: str | None = None
+        self.watcher_hits: int = 0
+
+    @property
+    def listening(self) -> bool:
+        return self._site is not None and bool(config.MC_API_KEY)
+
+    def _touch_watcher(self, event: str) -> None:
+        from datetime import datetime, timezone
+
+        self.last_watcher_at = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+        self.last_watcher_event = event
+        self.watcher_hits += 1
 
     def _app(self) -> web.Application:
         app = web.Application()
         app.router.add_get("/mc/v1/health", self.health)
+        app.router.add_post("/mc/v1/heartbeat", self.heartbeat)
         app.router.add_post("/mc/v1/link", self.link)
         app.router.add_post("/mc/v1/payment", self.payment)
         app.router.add_post("/mc/v1/chat", self.chat)
@@ -85,11 +102,25 @@ class McApiServer:
             self._site = None
 
     async def health(self, request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "service": "txtempire-mc-api"})
+        return web.json_response(
+            {
+                "ok": True,
+                "service": "txtempire-mc-api",
+                "listening": self.listening,
+                "last_watcher_at": self.last_watcher_at,
+            }
+        )
+
+    async def heartbeat(self, request: web.Request) -> web.Response:
+        if not _auth_ok(request):
+            raise web.HTTPUnauthorized(text='{"ok":false,"reason":"unauthorized"}')
+        self._touch_watcher("heartbeat")
+        return web.json_response({"ok": True})
 
     async def link(self, request: web.Request) -> web.Response:
         if not _auth_ok(request):
             raise web.HTTPUnauthorized(text='{"ok":false,"reason":"unauthorized"}')
+        self._touch_watcher("link")
         data = await _read_json(request)
         code = str(data.get("code") or "").strip().upper()
         ign = str(data.get("ign") or "").strip()
@@ -108,6 +139,7 @@ class McApiServer:
     async def payment(self, request: web.Request) -> web.Response:
         if not _auth_ok(request):
             raise web.HTTPUnauthorized(text='{"ok":false,"reason":"unauthorized"}')
+        self._touch_watcher("payment")
         data = await _read_json(request)
         ign = str(data.get("ign") or "").strip()
         raw = str(data.get("raw") or data.get("raw_text") or "")[:500]
@@ -143,6 +175,7 @@ class McApiServer:
         """Generischer Chat-Event: Mod schickt Klartext, Bot parst Link/Payment."""
         if not _auth_ok(request):
             raise web.HTTPUnauthorized(text='{"ok":false,"reason":"unauthorized"}')
+        self._touch_watcher("chat")
         data = await _read_json(request)
         text = str(data.get("text") or data.get("message") or "").strip()
         sender = str(data.get("sender") or data.get("ign") or "").strip()

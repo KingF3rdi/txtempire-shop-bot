@@ -13,7 +13,10 @@ from integrations.mc_api import McApiServer
 from utils.embeds import error_embed, success_embed, warn_embed
 from views.mc_link_views import (
     LinkIgnModal,
+    collect_bot_link_status,
+    format_bot_link_status,
     post_or_refresh_mc_link_panel,
+    refresh_mc_link_panel_status,
 )
 
 if TYPE_CHECKING:
@@ -30,6 +33,40 @@ class McLinkCog(commands.Cog):
 
     async def cog_unload(self) -> None:
         await self.api.stop()
+
+    bot_group = app_commands.Group(
+        name="bot",
+        description="Bot-Status & Linking",
+    )
+
+    @bot_group.command(
+        name="status",
+        description="Bot-/Watcher-Status aufs Minecraft-Link-Panel schreiben",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def bot_status(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        await interaction.response.defer(ephemeral=True)
+        status = await collect_bot_link_status(self.bot, interaction.guild.id)
+        msg = await refresh_mc_link_panel_status(self.bot, interaction.guild.id)
+        text = format_bot_link_status(status)
+        if msg is None:
+            await interaction.followup.send(
+                embed=warn_embed(
+                    "Bot-Status",
+                    f"{text}\n\n"
+                    "_Kein Link-Panel gefunden — bitte zuerst `/mclinkpanel` posten._",
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            embed=success_embed(
+                "Status aufs Link-Panel geschrieben",
+                f"{text}\n\nPanel: {msg.jump_url}",
+            ),
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="mclinkpanel",

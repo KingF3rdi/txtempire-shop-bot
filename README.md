@@ -58,6 +58,7 @@ python bot.py
 | `/cart` | Warenkorb öffnen |
 | `/vouch` | Einmalig pro bestätigtem Kauf |
 | `/mclinkpanel` | Panel: Minecraft-Account verlinken / unverifizieren |
+| `/bot status` | Bot-/Watcher-Status aufs Link-Panel schreiben |
 | `/link` · `/unlink` · `/mcstatus` | Account verknüpfen, lösen, Status |
 | `/mcsetup` | Auto-Confirm + Payment-Log-Channel |
 

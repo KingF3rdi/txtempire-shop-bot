@@ -51,6 +51,10 @@ public final class ApiClient {
 		post("/mc/v1/payment", body);
 	}
 
+	public void postHeartbeat() {
+		post("/mc/v1/heartbeat", config.basePayload());
+	}
+
 	private void post(String path, JsonObject body) {
 		if (!config.enabled) {
 			return;

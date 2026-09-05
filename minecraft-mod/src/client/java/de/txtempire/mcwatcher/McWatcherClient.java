@@ -10,13 +10,25 @@ import net.minecraft.network.chat.PlayerChatMessage;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
+/**
+ * Liest den Chat unten links (Chat-HUD) + Fabric Message-Events.
+ */
 public class McWatcherClient implements ClientModInitializer {
 	private static final long DEDUPE_MS = 2500L;
 
-	private WatcherConfig config;
-	private ApiClient api;
-	private final Map<String, Long> recent = new ConcurrentHashMap<>();
+	private static WatcherConfig config;
+	private static ApiClient api;
+	private static final Map<String, Long> recent = new ConcurrentHashMap<>();
+	private static final ScheduledExecutorService HEARTBEAT =
+		Executors.newSingleThreadScheduledExecutor(r -> {
+			Thread t = new Thread(r, "txtempire-mc-heartbeat");
+			t.setDaemon(true);
+			return t;
+		});
 
 	@Override
 	public void onInitializeClient() {
@@ -30,6 +42,21 @@ public class McWatcherClient implements ClientModInitializer {
 
 		ClientReceiveMessageEvents.CHAT.register(this::onChat);
 		ClientReceiveMessageEvents.GAME.register(this::onGame);
+
+		// Alle 60s Ping → Discord `/bot status` zeigt Watcher online
+		api.postHeartbeat();
+		HEARTBEAT.scheduleAtFixedRate(
+			() -> {
+				try {
+					api.postHeartbeat();
+				} catch (Exception e) {
+					McWatcher.LOGGER.debug("Heartbeat failed: {}", e.toString());
+				}
+			},
+			60L,
+			60L,
+			TimeUnit.SECONDS
+		);
 	}
 
 	private void onChat(
@@ -40,20 +67,29 @@ public class McWatcherClient implements ClientModInitializer {
 		Instant receptionTimestamp
 	) {
 		String name = sender != null ? sender.name() : null;
-		handle(message.getString(), name);
+		onChatLine(message.getString(), name);
 	}
 
 	private void onGame(Component message, boolean overlay) {
 		if (overlay) {
 			return;
 		}
-		handle(message.getString(), null);
+		onChatLine(message.getString(), null);
 	}
 
-	private void handle(String text, String sender) {
-		if (!config.enabled || text == null || text.isBlank()) {
+	/** Wird auch vom ChatComponent-Mixin (HUD unten links) aufgerufen. */
+	public static void onChatLine(String text, String sender) {
+		if (config == null || api == null || !config.enabled) {
 			return;
 		}
+		if (text == null || text.isBlank()) {
+			return;
+		}
+
+		if (config.debug) {
+			McWatcher.LOGGER.info("[chat] {}", text);
+		}
+
 		ChatParser.Parsed parsed = ChatParser.parse(text, sender);
 		if (parsed == null) {
 			return;

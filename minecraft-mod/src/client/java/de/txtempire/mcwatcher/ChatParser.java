@@ -1,6 +1,7 @@
 package de.txtempire.mcwatcher;
 
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -8,7 +9,20 @@ import java.util.regex.Pattern;
 public final class ChatParser {
 	private static final Pattern STRIP = Pattern.compile("§[0-9A-FK-OR]|&#[0-9A-Fa-f]{6}");
 
+	/** Wörter, die nie ein Spieler-IGN sind (Chat-Labels / System). */
+	private static final Set<String> RESERVED = Set.of(
+		"nachricht", "msg", "whisper", "pn", "pm", "message", "system",
+		"money", "geld", "zahlung", "payment", "link", "verify", "code",
+		"txtempire", "dir", "you", "dich", "du", "sell", "auktionshaus"
+	);
+
 	private static final Pattern[] WHISPERS = new Pattern[] {
+		// Server: "[Nachricht] p9x1 -> Du: !link …"
+		Pattern.compile(
+			"(?i)^\\[(?:nachricht|msg|whisper|pn|pm|message)\\]\\s*"
+				+ "([A-Za-z0-9_]{3,16})\\s*(?:->|→|»|›)\\s*"
+				+ "(?:dir|you|dich|du|[A-Za-z0-9_]{3,16})\\s*[:»>]\\s*(.+)$"
+		),
 		Pattern.compile(
 			"(?i)^([A-Za-z0-9_]{3,16})\\s+whispers?(?:\\s+to\\s+you)?\\s*:\\s*(.+)$"
 		),
@@ -16,18 +30,31 @@ public final class ChatParser {
 			"(?i)^([A-Za-z0-9_]{3,16})\\s+fl[uü]ster(?:t|te)(?:\\s+dir)?(?:\\s+zu)?\\s*:\\s*(.+)$"
 		),
 		Pattern.compile(
-			"(?i)^\\[(?:msg|whisper|pn|pm|nachricht)\\]\\s*([A-Za-z0-9_]{3,16})\\s*:\\s*(.+)$"
+			"(?i)^\\[(?:msg|whisper|pn|pm|nachricht|message)\\]\\s*"
+				+ "([A-Za-z0-9_]{3,16})\\s*[:»>]\\s*(.+)$"
+		),
+		// "Steve -> TxTEmpire: !link …" / "Steve » dir: …"
+		Pattern.compile(
+			"(?i)^([A-Za-z0-9_]{3,16})\\s*(?:->|→|»|›)\\s*"
+				+ "(?:dir|you|dich|du|[A-Za-z0-9_]{3,16})?\\s*[:»>]\\s*(.+)$"
 		),
 		Pattern.compile(
-			"(?i)^([A-Za-z0-9_]{3,16})\\s*(?:->|→|»)\\s*(?:dir|you|dich)?\\s*:\\s*(.+)$"
-		),
-		Pattern.compile(
-			"(?i)^von\\s+([A-Za-z0-9_]{3,16})\\s*:\\s*(.+)$"
+			"(?i)^von\\s+([A-Za-z0-9_]{3,16})\\s*[:»>]\\s*(.+)$"
 		),
 		Pattern.compile(
 			"^[<\\[]\\s*([A-Za-z0-9_]{3,16})\\s*[>\\]]\\s*(.+)$"
 		),
+		Pattern.compile(
+			"(?i)^(?:msg|pn|pm)\\s*[|\\-–]\\s*([A-Za-z0-9_]{3,16})\\s*[|\\-–:]\\s*(.+)$"
+		),
 	};
+
+	private static final Pattern CODE_ANYWHERE = Pattern.compile(
+		"(?i)\\b(TXT[E]?-[A-Z0-9]{4,12})\\b"
+	);
+	private static final Pattern NAME_BEFORE_CODE = Pattern.compile(
+		"(?i)\\b([A-Za-z0-9_]{3,16})\\b[^A-Za-z0-9_]{0,48}?\\b(TXT[E]?-[A-Z0-9]{4,12})\\b"
+	);
 
 	private static final Pattern LINK_CMD = Pattern.compile(
 		"(?i)(?:^|[\\s\\[\\]<>:])(!?link|!?verify|!verknüpf|!verknuepf)\\s+([A-Za-z0-9\\-]{4,24})\\b"
@@ -37,6 +64,18 @@ public final class ChatParser {
 	);
 
 	private static final Pattern[] PAYMENTS = new Pattern[] {
+		// "Gamerleo15 » TxTEmpire - $450,000" / "p9x1 » Du - $100"
+		Pattern.compile(
+			"(?i)([A-Za-z0-9_]{3,16})\\s*[»›→>]\\s*"
+				+ "(?:you|dir|dich|du|txtempire|[A-Za-z0-9_]{3,16})\\s*[-–:]\\s*"
+				+ "\\$?\\s*([\\d][\\d.,]*)"
+		),
+		// Historie: "[05.09.26] (17:06) Gamerleo15 » TxTEmpire - $450,000"
+		Pattern.compile(
+			"(?i)\\)\\s*([A-Za-z0-9_]{3,16})\\s*[»›→>]\\s*"
+				+ "(?:you|dir|dich|du|txtempire|[A-Za-z0-9_]{3,16})\\s*[-–:]\\s*"
+				+ "\\$?\\s*([\\d][\\d.,]*)"
+		),
 		Pattern.compile(
 			"(?i)([A-Za-z0-9_]{3,16})\\s+hat\\s+dir\\s+([\\d][\\d.,]*)\\s*(?:\\$|€|euro|geld|coins?)?\\s+gegeben"
 		),
@@ -63,20 +102,33 @@ public final class ChatParser {
 		return STRIP.matcher(text).replaceAll("").replaceAll("\\s+", " ").trim();
 	}
 
+	private static boolean isIgn(String name) {
+		if (name == null || name.isBlank()) {
+			return false;
+		}
+		String n = name.trim();
+		if (n.length() < 3 || n.length() > 16) {
+			return false;
+		}
+		return !RESERVED.contains(n.toLowerCase(Locale.ROOT));
+	}
+
 	public static Parsed parse(String raw, String senderHint) {
 		String clean = strip(raw);
 		if (clean.isEmpty()) {
 			return null;
 		}
 
-		String sender = senderHint;
+		String sender = isIgn(senderHint) ? senderHint.trim() : null;
 		String body = clean;
 		for (Pattern wp : WHISPERS) {
 			Matcher wm = wp.matcher(clean);
-			if (wm.matches()) {
-				if (sender == null || sender.isBlank()) {
-					sender = wm.group(1);
-				}
+			if (!wm.matches()) {
+				continue;
+			}
+			String from = wm.group(1);
+			if (isIgn(from)) {
+				sender = from.trim();
 				body = wm.group(2).trim();
 				break;
 			}
@@ -88,14 +140,30 @@ public final class ChatParser {
 			lm = LINK_CMD.matcher(clean);
 			linkFound = lm.find();
 		}
-		if (linkFound && sender != null && !sender.isBlank()) {
-			return Parsed.link(lm.group(2).toUpperCase(Locale.ROOT), sender.trim());
+		if (linkFound && isIgn(sender)) {
+			return Parsed.link(lm.group(2).toUpperCase(Locale.ROOT), sender);
 		}
 		Matcher only = LINK_ONLY.matcher(body);
-		if (only.matches() && sender != null && !sender.isBlank()) {
-			return Parsed.link(only.group(1).toUpperCase(Locale.ROOT), sender.trim());
+		if (only.matches() && isIgn(sender)) {
+			return Parsed.link(only.group(1).toUpperCase(Locale.ROOT), sender);
 		}
 
+		Matcher named = NAME_BEFORE_CODE.matcher(clean);
+		while (named.find()) {
+			String ign = named.group(1);
+			String code = named.group(2).toUpperCase(Locale.ROOT);
+			if (isIgn(ign)) {
+				return Parsed.link(code, ign);
+			}
+		}
+		if (isIgn(sender)) {
+			Matcher anywhere = CODE_ANYWHERE.matcher(clean);
+			if (anywhere.find()) {
+				return Parsed.link(anywhere.group(1).toUpperCase(Locale.ROOT), sender);
+			}
+		}
+
+		// Index 3 in PAYMENTS is "du hast … von … erhalten" → amount then ign
 		for (int i = 0; i < PAYMENTS.length; i++) {
 			Matcher pm = PAYMENTS[i].matcher(clean);
 			if (!pm.find()) {
@@ -103,7 +171,7 @@ public final class ChatParser {
 			}
 			String ign;
 			String amountRaw;
-			if (i == 1) {
+			if (i == 3) {
 				amountRaw = pm.group(1);
 				ign = pm.group(2);
 			} else {
@@ -111,7 +179,7 @@ public final class ChatParser {
 				amountRaw = pm.group(2);
 			}
 			Double amount = parseAmount(amountRaw);
-			if (amount != null && amount > 0 && ign != null) {
+			if (amount != null && amount > 0 && isIgn(ign)) {
 				return Parsed.payment(ign, amount);
 			}
 		}
