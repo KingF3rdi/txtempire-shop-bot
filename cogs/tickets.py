@@ -615,25 +615,26 @@ class TicketsCog(commands.Cog):
             interaction.guild.get_role(int(role_id)) if role_id else None
         )
         role_note = (
-            f"\nExklusiv-Rolle: {role.mention}"
+            f"\nRolle bei Annahme: {role.mention}"
             if role
-            else "\n⚠️ Noch keine Exklusiv-Rolle — setze mit `/texturepackrole`."
+            else "\n⚠️ Noch keine Annahme-Rolle — setze mit `/texturepackrole`."
         )
         await interaction.followup.send(
             embed=success_embed(
                 "Texturepack-Panel",
-                f"Panel in {target.mention}: {msg.jump_url}{role_note}",
+                f"Panel in {target.mention}: {msg.jump_url}{role_note}\n"
+                "Ankauf & Tausch sind für alle verfügbar.",
             ),
             ephemeral=True,
         )
 
     @app_commands.command(
         name="texturepackrole",
-        description="Exklusiv-Rolle für Texturepack Ankauf/Tausch setzen",
+        description="Rolle die bei Ankauf/Tausch-Annahme vergeben wird",
     )
     @app_commands.describe(
-        role="Nur diese Rolle darf Ankauf/Tausch öffnen (leer = anzeigen)",
-        clear="Rolle entfernen (Feature gesperrt bis neu gesetzt)",
+        role="Rolle die User bei Staff-Annahme erhalten (leer = anzeigen)",
+        clear="Rolle entfernen",
     )
     @app_commands.default_permissions(manage_guild=True)
     async def texturepackrole(
@@ -650,8 +651,8 @@ class TicketsCog(commands.Cog):
             await interaction.response.send_message(
                 embed=success_embed(
                     "Texturepack-Rolle",
-                    "Exklusiv-Rolle entfernt. Ankauf/Tausch ist gesperrt, "
-                    "bis wieder eine Rolle gesetzt wird.",
+                    "Annahme-Rolle entfernt. Ankauf/Tausch bleiben für alle offen; "
+                    "bei Annahme wird keine Rolle mehr vergeben.",
                 ),
                 ephemeral=True,
             )
@@ -668,7 +669,8 @@ class TicketsCog(commands.Cog):
             await interaction.response.send_message(
                 embed=success_embed(
                     "Texturepack-Rolle",
-                    f"{body}\n\nSetzen: `/texturepackrole role:@…`",
+                    f"{body}\n\nWird bei **Tausch annehmen** vergeben.\n"
+                    "Setzen: `/texturepackrole role:@…`",
                 ),
                 ephemeral=True,
             )
@@ -696,7 +698,8 @@ class TicketsCog(commands.Cog):
         await interaction.response.send_message(
             embed=success_embed(
                 "Texturepack-Rolle",
-                f"Nur {role.mention} darf Ankauf/Tausch öffnen.{panel_note}",
+                f"Bei Annahme erhalten User {role.mention}."
+                f"{panel_note}",
             ),
             ephemeral=True,
         )

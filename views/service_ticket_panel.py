@@ -54,11 +54,9 @@ def build_service_panel_embed(
         )
     if panel_type == "texturepack":
         role_line = (
-            f"\n• **Ankauf** — nur mit Rolle {role_mention}\n"
-            f"• **Tausch** — nach Annahme durch Staff erhältst du {role_mention}\n"
+            f"\nNach **Annehmen** (Staff) erhältst du die Rolle {role_mention}.\n"
             if role_mention
-            else "\n⚠️ Exklusiv-Rolle noch nicht gesetzt (`/texturepackrole`).\n"
-            "• **Ankauf** braucht die Rolle · **Tausch** vergibt sie bei Annahme\n"
+            else "\n⚠️ Rolle für Tausch-Annahme: `/texturepackrole` setzen.\n"
         )
         return base_embed(
             "📦 Texturepack Ankauf & Tausch",
@@ -66,7 +64,8 @@ def build_service_panel_embed(
             "• **Ankauf** — Verkauf an den Server (Preis-Vorschlag)\n"
             "• **Tausch** — Gegen Texturepacks / Guthaben / anderes\n"
             f"{role_line}\n"
-            "Im Formular: Pack-Namen, Anzahl, vorgestellter Preis/Tausch.",
+            "**Für alle verfügbar.** Im Formular: Pack-Namen, Anzahl, "
+            "vorgestellter Preis/Tausch.",
         )
     return base_embed(
         "🎬 Media / Creator Bewerbung",
@@ -75,46 +74,6 @@ def build_service_panel_embed(
         "(Plattform, Links, Reichweite, Angebot).\n"
         "Wir melden uns im Ticket.",
     )
-
-
-async def _texturepack_role_gate(
-    bot: ShopBot, interaction: discord.Interaction
-) -> bool:
-    """True = darf Ankauf öffnen. Staff immer erlaubt."""
-    if interaction.guild is None:
-        await interaction.response.send_message(
-            embed=error_embed("Nur auf dem Server"), ephemeral=True
-        )
-        return False
-    if await is_staff(bot, interaction):
-        return True
-    settings = await bot.db.ensure_guild(interaction.guild.id)
-    role_id = settings.get("texturepack_role_id")
-    if not role_id:
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Nicht konfiguriert",
-                "Die Exklusiv-Rolle für Texturepack ist noch nicht gesetzt. "
-                "Staff: `/texturepackrole`.\n"
-                "Ohne Rolle kannst du trotzdem **Tausch** öffnen.",
-            ),
-            ephemeral=True,
-        )
-        return False
-    role = interaction.guild.get_role(int(role_id))
-    member = interaction.user
-    if not isinstance(member, discord.Member) or role is None or role not in member.roles:
-        mention = role.mention if role else f"`{role_id}`"
-        await interaction.response.send_message(
-            embed=error_embed(
-                "Keine Berechtigung",
-                f"Nur Mitglieder mit der Rolle {mention} können **Ankauf** öffnen.\n"
-                f"**Tausch** steht allen offen — nach Annahme erhältst du {mention}.",
-            ),
-            ephemeral=True,
-        )
-        return False
-    return True
 
 
 async def grant_texturepack_role(
@@ -173,7 +132,7 @@ class TexturepackTicketView(discord.ui.View):
         self.bot = bot
 
     @discord.ui.button(
-        label="Tausch annehmen",
+        label="Annehmen",
         style=discord.ButtonStyle.success,
         custom_id="serviceticket:texture_accept",
         emoji="✅",
@@ -224,7 +183,7 @@ class TexturepackTicketView(discord.ui.View):
             title = "Ankauf angenommen"
             body = (
                 f"Angenommen von {interaction.user.mention}.\n"
-                f"Rolle (falls Tausch-Zugang): {note}\n\n"
+                f"**Rolle:** {note}\n\n"
                 "Deal bitte im Ticket abschließen, danach Ticket schließen."
             )
         await interaction.followup.send(embed=success_embed(title, body))
@@ -493,10 +452,7 @@ class TexturepackModal(discord.ui.Modal):
             self.offer.placeholder = "z.B. gegen Pack X · oder 300k + Pack Y"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if self.kind == "ankauf":
-            if not await _texturepack_role_gate(self.bot, interaction):
-                return
-        elif interaction.guild is None:
+        if interaction.guild is None:
             await interaction.response.send_message(
                 embed=error_embed("Nur auf dem Server"), ephemeral=True
             )
@@ -534,7 +490,10 @@ class TexturepackPanelView(discord.ui.View):
     async def open_ankauf(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        if not await _texturepack_role_gate(self.bot, interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Nur auf dem Server"), ephemeral=True
+            )
             return
         await interaction.response.send_modal(
             TexturepackModal(self.bot, kind="ankauf")
@@ -681,10 +640,13 @@ async def create_service_ticket_channel(
         "support": "Beschreibe dein Anliegen — Staff meldet sich.",
         "application": "Media-/Creator-Bewerbung unten. Staff prüft sie.",
         "partner": "Partnerschafts-Anfrage unten. Staff meldet sich.",
-        "texture_ankauf": "Ankauf-Anfrage unten. Staff prüft Preis & Packs.",
+        "texture_ankauf": (
+            "Ankauf-Anfrage unten. Staff: **Annehmen** vergibt die Rolle "
+            "und bestätigt den Deal."
+        ),
         "texture_tausch": (
-            "Tausch-Anfrage unten. Staff: **Tausch annehmen** vergibt die "
-            "Exklusiv-Rolle."
+            "Tausch-Anfrage unten. Staff: **Annehmen** vergibt die "
+            "konfigurierte Rolle."
         ),
     }.get(ticket_type, "Staff meldet sich.")
     embed = success_embed(
