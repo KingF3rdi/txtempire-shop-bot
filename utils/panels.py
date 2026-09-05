@@ -85,15 +85,18 @@ def buy_panel_slot_suffix(slot: int) -> str:
 
 
 def is_valid_buy_panel_message(message: discord.Message, slot: int) -> bool:
-    """Prüft ob eine Nachricht die drei Buy-Panel-Buttons für den Slot hat."""
+    """Prüft ob eine Nachricht die Buy-Panel-Buttons für den Slot hat.
+
+    Credits-Button ist optional (abhängig von Panel-Config).
+    """
     required = {f"buy:{action}:slot:{slot}" for action in ("start", "cart", "info")}
     found: set[str] = set()
     for row in message.components:
         for item in row.children:
             cid = getattr(item, "custom_id", None)
-            if cid in required:
+            if cid:
                 found.add(cid)
-    return found == required
+    return required.issubset(found)
 
 
 def parse_buy_custom_id(custom_id: str | None) -> tuple[int | None, int | None]:
@@ -147,8 +150,15 @@ def build_buy_panel_embed(
     title: str | None = None,
     panel_filter: PanelFilter | None = None,
     slot: int | None = None,
+    credits_enabled: bool = False,
 ) -> discord.Embed:
     filtered = apply_panel_filter(categories, panel_filter or PanelFilter.all_categories())
+
+    credits_line = (
+        "\n• **Buy Credits** — Credits kaufen (1 Credit = 100k)"
+        if credits_enabled
+        else ""
+    )
 
     if category:
         panel_title = title or category["name"]
@@ -158,6 +168,7 @@ def build_buy_panel_embed(
             "• **Kaufen** — Items dieser Kategorie wählen\n"
             "• **Warenkorb** — Überblick & Checkout\n"
             "• **Info** — Zahlungsablauf"
+            f"{credits_line}"
         )
         embed = base_embed(panel_title, description)
         emoji = (category.get("emoji") or "").strip() or "•"
@@ -174,6 +185,7 @@ def build_buy_panel_embed(
             "• **Kaufen** — Kategorie & Item wählen, in den Warenkorb legen\n"
             "• **Warenkorb** — Überblick, Gesamtpreis, Checkout\n"
             "• **Info** — Zahlungsablauf"
+            f"{credits_line}"
         )
         embed = base_embed(panel_title, description)
         pf = panel_filter or PanelFilter.all_categories()
@@ -199,6 +211,16 @@ def build_buy_panel_embed(
                 inline=False,
             )
 
+    if credits_enabled:
+        embed.add_field(
+            name="Credits",
+            value=(
+                "**Aktiv** — 1 Credit = **100k**\n"
+                "Nach dem Checkout: **Fast Buy** im Ticket mit Credits bezahlen."
+            ),
+            inline=False,
+        )
+
     name = settings.get("payee_a_label") or DEFAULT_PAYEE
     embed.add_field(name="Zahlung", value=f"**{PAYMENT_NOTICE}**", inline=False)
     embed.set_footer(text=f"{PAYMENT_NOTICE} · Zahlung an {name}")
@@ -213,7 +235,11 @@ async def get_panel_filter_for_slot(
 
 
 def register_slot_panel_views(bot: "ShopBot", *, force: bool = False) -> None:
-    """Registriert Slot-Panel-Views (1/2) und Legacy-All-Panel."""
+    """Registriert Slot-Panel-Views (1/2) und Legacy-All-Panel.
+
+    Slot-Views werden inkl. Credits-Button registriert, damit custom_ids
+    auch nach Bot-Neustart funktionieren (Button erscheint nur wenn aktiv).
+    """
     registered: set[str] = getattr(bot, "_buy_panel_registered", set())
     from views.shop_views import BuyPanelView
 
@@ -221,7 +247,7 @@ def register_slot_panel_views(bot: "ShopBot", *, force: bool = False) -> None:
         suffix = buy_panel_slot_suffix(slot)
         if not force and suffix in registered:
             return
-        bot.add_view(BuyPanelView(bot, panel_slot=slot))
+        bot.add_view(BuyPanelView(bot, panel_slot=slot, credits_enabled=True))
         registered.add(suffix)
         print(f"[BuyPanel] View registriert: slot {slot} (buy:start:slot:{slot})")
 
@@ -274,17 +300,19 @@ async def refresh_slot_panel(bot: "ShopBot", guild: discord.Guild, slot: int) ->
     settings = await bot.db.ensure_guild(guild.id)
     panel_filter, stored_title = await get_panel_filter_for_slot(bot, guild.id, slot)
     filtered = apply_panel_filter(cats, panel_filter)
+    credits_on = bool(int(row.get("credits_enabled") or 0))
     embed = build_buy_panel_embed(
         categories=filtered,
         settings=settings,
         title=stored_title,
         panel_filter=panel_filter,
         slot=slot,
+        credits_enabled=credits_on,
     )
     await ensure_buy_panel_slot_view(bot, slot)
     from views.shop_views import BuyPanelView
 
-    view = BuyPanelView(bot, panel_slot=slot)
+    view = BuyPanelView(bot, panel_slot=slot, credits_enabled=credits_on)
     try:
         msg = await channel.fetch_message(int(message_id))
     except discord.NotFound:
@@ -349,6 +377,6 @@ async def ensure_buy_panel_slot_view(bot: "ShopBot", slot: int) -> None:
         return
     from views.shop_views import BuyPanelView
 
-    bot.add_view(BuyPanelView(bot, panel_slot=slot))
+    bot.add_view(BuyPanelView(bot, panel_slot=slot, credits_enabled=True))
     registered.add(suffix)
     bot._buy_panel_registered = registered

@@ -158,7 +158,11 @@ async def action_post_panel(bot: ShopBot, interaction: discord.Interaction) -> N
             embed=order_cart_panel_embed(
                 order, items, settings, buyer, interaction.guild
             ),
-            view=TicketOrderView(bot),
+            view=TicketOrderView(
+                bot,
+                show_fast_buy=bool(int(order.get("credits_enabled") or 0))
+                and str(order.get("order_kind") or "shop") == "shop",
+            ),
         )
     except discord.Forbidden:
         await interaction.followup.send(
@@ -192,8 +196,15 @@ async def _delete_channel_later(channel: discord.abc.GuildChannel, delay: float,
         pass
 
 
-async def action_confirm_order(bot: ShopBot, interaction: discord.Interaction) -> None:
-    if not await is_staff(bot, interaction):
+async def action_confirm_order(
+    bot: ShopBot,
+    interaction: discord.Interaction,
+    *,
+    require_staff: bool = True,
+    paid_with_credits: bool = False,
+    credits_charged: float | None = None,
+) -> None:
+    if require_staff and not await is_staff(bot, interaction):
         await interaction.response.send_message(
             embed=error_embed("Keine Berechtigung", "Nur Staff/Admin."),
             ephemeral=True,
@@ -217,17 +228,62 @@ async def action_confirm_order(bot: ShopBot, interaction: discord.Interaction) -
         )
         return
 
-    await interaction.response.defer()
+    from utils.credits import credits_needed_for_total, format_credits
+
+    charged = credits_charged
+    if paid_with_credits:
+        if charged is None:
+            charged = credits_needed_for_total(float(order["total"]))
+
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+
+    if paid_with_credits and charged is not None:
+        ok = await bot.db.try_deduct_credits(
+            int(order["guild_id"]), int(order["user_id"]), charged
+        )
+        if not ok:
+            bal = await bot.db.get_credits(
+                int(order["guild_id"]), int(order["user_id"])
+            )
+            await interaction.followup.send(
+                embed=error_embed(
+                    "Zu wenig Credits",
+                    f"Benötigt: **{format_credits(charged)}** · "
+                    f"Guthaben: **{format_credits(bal)}**\n"
+                    "Kaufe Credits über **Buy Credits** auf dem Panel.",
+                ),
+                ephemeral=True,
+            )
+            return
+
     assert interaction.guild is not None
     settings = await bot.db.ensure_guild(interaction.guild.id)
     order_items = await bot.db.get_order_items(int(order["id"]))
     order_items = await enrich_order_item_roles(bot, order_items)
+    order_kind = str(order.get("order_kind") or "shop")
 
-    await bot.db.update_order(
-        int(order["id"]),
-        status="completed",
-        completed_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-    )
+    update_fields: dict = {
+        "status": "completed",
+        "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if paid_with_credits:
+        update_fields["paid_with_credits"] = 1
+    await bot.db.update_order(int(order["id"]), **update_fields)
+
+    # Credits-Kauf: Guthaben gutschreiben statt Packs
+    credits_granted: float | None = None
+    credits_balance = None
+    if order_kind == "credits":
+        amount = float(order.get("credits_amount") or 0)
+        if amount <= 0:
+            from utils.credits import currency_to_credits
+
+            amount = currency_to_credits(float(order["total"]))
+        credits_balance = await bot.db.add_credits(
+            int(order["guild_id"]), int(order["user_id"]), amount
+        )
+        credits_granted = amount
 
     member = None
     try:
@@ -237,12 +293,14 @@ async def action_confirm_order(bot: ShopBot, interaction: discord.Interaction) -
 
     role_result: dict = {"granted": [], "skipped": [], "failed": []}
     delivery_info: dict = {}
-    if member:
+    if member and order_kind != "credits":
         role_result = await grant_purchase_roles(member, settings, order_items)
         channel = interaction.channel
         if isinstance(channel, discord.TextChannel):
             delivery_info = await deliver_packs(member, channel, order_items)
-    else:
+    elif member and order_kind == "credits":
+        role_result = await grant_purchase_roles(member, settings, [])
+    elif not member:
         role_result["failed"].append(
             "Käufer nicht auf dem Server — Rollen konnten nicht vergeben werden."
         )
@@ -258,18 +316,32 @@ async def action_confirm_order(bot: ShopBot, interaction: discord.Interaction) -
     success = purchase_success_embed(order, order_items, buyer, role_result)
 
     extra_parts: list[str] = []
+    if credits_granted is not None:
+        extra_parts.append(
+            f"🪙 **{format_credits(credits_granted)} Credits** gutgeschrieben "
+            f"(Guthaben jetzt: **{format_credits(credits_balance or 0)}**)."
+        )
+    if paid_with_credits and charged is not None:
+        bal = await bot.db.get_credits(int(order["guild_id"]), int(order["user_id"]))
+        extra_parts.append(
+            f"⚡ Fast Buy: **{format_credits(charged)} Credits** abgezogen "
+            f"(Rest: **{format_credits(bal)}**)."
+        )
     if delivery_info.get("dm_sent"):
         extra_parts.append("Pack-DM gesendet.")
     if delivery_info.get("files_sent"):
         extra_parts.append("Pack-Datei(en) gesendet.")
     if delivery_info.get("links_posted"):
         extra_parts.append("Pack-Links im Ticket gepostet.")
-    if not any(role_result.get(k) for k in ("granted", "skipped", "failed")):
+    if order_kind != "credits" and not any(
+        role_result.get(k) for k in ("granted", "skipped", "failed")
+    ):
         extra_parts.append(
             "Keine Autorole hinterlegt — setze sie mit `/item setrole` "
             "oder Admin-Panel → Item → **Autorole**."
         )
-    extra_parts.append("Käufer kann einmalig `/vouch` nutzen.")
+    if order_kind != "credits":
+        extra_parts.append("Käufer kann einmalig `/vouch` nutzen.")
     extra_parts.append("⏳ Dieses Ticket wird in 5 Sekunden automatisch gelöscht.")
     if extra_parts:
         success.add_field(
@@ -280,27 +352,94 @@ async def action_confirm_order(bot: ShopBot, interaction: discord.Interaction) -
 
     await interaction.followup.send(embed=success)
 
-    from utils.vouch_request import send_vouch_request_dm
+    if order_kind != "credits":
+        from utils.vouch_request import send_vouch_request_dm
 
-    product_names = ", ".join(
-        str(item.get("name_snapshot") or "Produkt") for item in order_items[:3]
-    )
-    if len(order_items) > 3:
-        product_names += " …"
-    asyncio.create_task(
-        send_vouch_request_dm(
-            bot,
-            buyer,
-            order_ref_text=order_ref(order),
-            product_hint=product_names or "dein Kauf",
+        product_names = ", ".join(
+            str(item.get("name_snapshot") or "Produkt") for item in order_items[:3]
         )
-    )
+        if len(order_items) > 3:
+            product_names += " …"
+        asyncio.create_task(
+            send_vouch_request_dm(
+                bot,
+                buyer,
+                order_ref_text=order_ref(order),
+                product_hint=product_names or "dein Kauf",
+            )
+        )
 
     channel = interaction.channel
     if isinstance(channel, discord.TextChannel):
         asyncio.create_task(
-            _delete_channel_later(channel, 5.0, reason="Kauf bestätigt — Ticket automatisch geschlossen")
+            _delete_channel_later(
+                channel, 5.0, reason="Kauf bestätigt — Ticket automatisch geschlossen"
+            )
         )
+
+
+async def action_fast_buy(bot: ShopBot, interaction: discord.Interaction) -> None:
+    """Käufer bezahlt Sofort mit Credits und bestätigt die Bestellung."""
+    order = await get_order_for_interaction(bot, interaction)
+    if not order:
+        await interaction.response.send_message(
+            embed=error_embed("Keine Bestellung"), ephemeral=True
+        )
+        return
+    if interaction.user.id != int(order["user_id"]):
+        await interaction.response.send_message(
+            embed=error_embed("Nur Käufer", "Nur der Käufer kann Fast Buy nutzen."),
+            ephemeral=True,
+        )
+        return
+    if not int(order.get("credits_enabled") or 0):
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Nicht verfügbar",
+                "Fast Buy ist nur bei Credits-aktivierten Buy-Panels verfügbar.",
+            ),
+            ephemeral=True,
+        )
+        return
+    if str(order.get("order_kind") or "shop") != "shop":
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Nicht verfügbar",
+                "Fast Buy gilt nur für Produkt-Käufe, nicht für Credits-Tickets.",
+            ),
+            ephemeral=True,
+        )
+        return
+    if order["status"] in ("completed", "cancelled"):
+        await interaction.response.send_message(
+            embed=error_embed("Geschlossen", "Diese Bestellung ist bereits beendet."),
+            ephemeral=True,
+        )
+        return
+
+    from utils.credits import credits_needed_for_total, format_credits
+
+    need = credits_needed_for_total(float(order["total"]))
+    balance = await bot.db.get_credits(int(order["guild_id"]), int(order["user_id"]))
+    if balance < need:
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Zu wenig Credits",
+                f"Benötigt: **{format_credits(need)}** · "
+                f"Guthaben: **{format_credits(balance)}**\n"
+                "Kaufe Credits über **Buy Credits** auf dem Panel.",
+            ),
+            ephemeral=True,
+        )
+        return
+
+    await action_confirm_order(
+        bot,
+        interaction,
+        require_staff=False,
+        paid_with_credits=True,
+        credits_charged=need,
+    )
 
 
 async def action_cancel_order(bot: ShopBot, interaction: discord.Interaction) -> None:
@@ -397,9 +536,21 @@ async def action_close_ticket(
 class TicketOrderView(discord.ui.View):
     """Persistente Ticket-Buttons für Bestellungen."""
 
-    def __init__(self, bot: ShopBot) -> None:
+    def __init__(self, bot: ShopBot, *, show_fast_buy: bool = False) -> None:
         super().__init__(timeout=None)
         self.bot = bot
+        self.show_fast_buy = show_fast_buy
+
+        if show_fast_buy:
+            fast_btn = discord.ui.Button(
+                label="Fast Buy (Credits)",
+                style=discord.ButtonStyle.success,
+                custom_id="ticket:fast_buy",
+                emoji="⚡",
+                row=1,
+            )
+            fast_btn.callback = self._fast_buy  # type: ignore[method-assign]
+            self.add_item(fast_btn)
 
     @discord.ui.button(
         label="Bestellung anzeigen",
@@ -467,6 +618,9 @@ class TicketOrderView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         await action_confirm_order(self.bot, interaction)
+
+    async def _fast_buy(self, interaction: discord.Interaction) -> None:
+        await action_fast_buy(self.bot, interaction)
 
 
 class PaymentProofModal(discord.ui.Modal, title="Payment beweisen"):

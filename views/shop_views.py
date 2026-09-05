@@ -104,11 +104,14 @@ class BuyPanelView(discord.ui.View):
         bot: ShopBot,
         category_id: int | None = None,
         panel_slot: int | None = None,
+        *,
+        credits_enabled: bool = False,
     ) -> None:
         super().__init__(timeout=None)
         self.bot = bot
         self.category_id = category_id
         self.panel_slot = panel_slot
+        self.credits_enabled = credits_enabled
         if panel_slot is not None:
             suffix = f":slot:{panel_slot}"
         else:
@@ -143,6 +146,17 @@ class BuyPanelView(discord.ui.View):
         )
         info_btn.callback = self._on_info_click
         self.add_item(info_btn)
+
+        if panel_slot is not None and credits_enabled:
+            credits_btn = discord.ui.Button(
+                label="Buy Credits",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"buy:credits{suffix}",
+                emoji="🪙",
+                row=1,
+            )
+            credits_btn.callback = self._on_credits_click
+            self.add_item(credits_btn)
 
     def _sync_ctx_from_interaction(self, interaction: discord.Interaction) -> None:
         """Slot/Kategorie aus custom_id lesen — wichtig für parallele Panels 1/2."""
@@ -183,6 +197,43 @@ class BuyPanelView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
         self._sync_ctx_from_interaction(interaction)
         await self._info(interaction)
+
+    async def _on_credits_click(self, interaction: discord.Interaction) -> None:
+        self._sync_ctx_from_interaction(interaction)
+        await self._buy_credits(interaction)
+
+    async def _buy_credits(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await _reply_ephemeral(
+                interaction,
+                embed=error_embed("Nur auf dem Server", "Bitte im Server-Channel."),
+            )
+            return
+        slot = self.panel_slot
+        if slot is None:
+            await _reply_ephemeral(
+                interaction,
+                embed=error_embed(
+                    "Nicht verfügbar", "Credits nur über Buy Panel 1/2."
+                ),
+            )
+            return
+        row = await self.bot.db.ensure_buy_panel_slot(interaction.guild.id, slot)
+        if not int(row.get("credits_enabled") or 0):
+            await _reply_ephemeral(
+                interaction,
+                embed=error_embed(
+                    "Credits deaktiviert",
+                    "Credits sind für dieses Panel nicht aktiviert. "
+                    "Admin: `/buypanelconfig` mit Credits an.",
+                ),
+            )
+            return
+        from views.credits_views import BuyCreditsModal
+
+        await interaction.response.send_modal(
+            BuyCreditsModal(self.bot, panel_slot=slot)
+        )
 
     async def _buy(self, interaction: discord.Interaction) -> None:
         try:
@@ -249,6 +300,23 @@ class BuyPanelView(discord.ui.View):
         pay_line = f"4. **Gesamten Betrag** an **{name}** überweisen"
         if details:
             pay_line += f"\n{details}"
+        credits_info = ""
+        if self.panel_slot is not None:
+            row = await self.bot.db.ensure_buy_panel_slot(
+                interaction.guild.id, self.panel_slot
+            )
+            if int(row.get("credits_enabled") or 0):
+                from utils.credits import CREDIT_VALUE, format_credits
+
+                balance = await self.bot.db.get_credits(
+                    interaction.guild.id, interaction.user.id
+                )
+                credits_info = (
+                    f"\n\n**Credits** (dein Guthaben: **{format_credits(balance)}**)\n"
+                    f"• 1 Credit = **{int(CREDIT_VALUE / 1000)}k**\n"
+                    "• **Buy Credits** — Credits kaufen\n"
+                    "• Im Ticket: **Fast Buy** — sofort mit Credits bezahlen"
+                )
         await interaction.followup.send(
             embed=success_embed(
                 "So funktioniert der Kauf",
@@ -258,7 +326,8 @@ class BuyPanelView(discord.ui.View):
                 f"{pay_line}\n"
                 "5. Payment beweisen (Bild + IGN)\n"
                 "6. Staff bestätigt → Pack + Rollen\n\n"
-                f"**{PAYMENT_NOTICE}**",
+                f"**{PAYMENT_NOTICE}**"
+                f"{credits_info}",
             ),
             ephemeral=True,
         )
@@ -277,13 +346,17 @@ async def handle_buy_panel_interaction(
     action, slot, category_id = parse_buy_panel_custom_id(custom_id)
     if not action:
         return False
-    view = BuyPanelView(bot, category_id=category_id, panel_slot=slot)
+    view = BuyPanelView(
+        bot, category_id=category_id, panel_slot=slot, credits_enabled=True
+    )
     if action == "start":
         await view._on_buy_click(interaction)
     elif action == "cart":
         await view._on_cart_click(interaction)
     elif action == "info":
         await view._on_info_click(interaction)
+    elif action == "credits":
+        await view._on_credits_click(interaction)
     else:
         return False
     return True
@@ -414,15 +487,32 @@ async def _browse_categories(
     )
 
 
-async def start_checkout(bot: ShopBot, interaction: discord.Interaction) -> None:
+async def start_checkout(
+    bot: ShopBot,
+    interaction: discord.Interaction,
+    *,
+    browse_ctx: BrowseContext | None = None,
+) -> None:
     """Erstellt das Kauf-Ticket aus dem aktuellen Warenkorb."""
     from cogs.tickets import create_order_ticket
 
     assert interaction.guild is not None
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True)
+
+    panel_slot = browse_ctx.panel_slot if browse_ctx else None
+    credits_enabled = False
+    if panel_slot is not None:
+        row = await bot.db.ensure_buy_panel_slot(interaction.guild.id, panel_slot)
+        credits_enabled = bool(int(row.get("credits_enabled") or 0))
+
     try:
-        channel = await create_order_ticket(bot, interaction)
+        channel = await create_order_ticket(
+            bot,
+            interaction,
+            credits_enabled=credits_enabled,
+            source_panel_slot=panel_slot,
+        )
     except ValueError as e:
         await interaction.followup.send(
             embed=error_embed("Kauf fehlgeschlagen", str(e)[:1500]),
@@ -438,10 +528,20 @@ async def start_checkout(bot: ShopBot, interaction: discord.Interaction) -> None
             ephemeral=True,
         )
         return
+
+    extra = ""
+    if credits_enabled:
+        from utils.credits import format_credits
+
+        balance = await bot.db.get_credits(interaction.guild.id, interaction.user.id)
+        extra = (
+            f"\n\n🪙 **Credits aktiv** — Guthaben: **{format_credits(balance)}**\n"
+            "Im Ticket kannst du **Fast Buy** nutzen."
+        )
     await interaction.followup.send(
         embed=success_embed(
             "Ticket erstellt",
-            f"Dein Kauf-Ticket: {channel.mention}\n\n**{PAYMENT_NOTICE}**",
+            f"Dein Kauf-Ticket: {channel.mention}\n\n**{PAYMENT_NOTICE}**{extra}",
         ),
         ephemeral=True,
     )
@@ -634,7 +734,7 @@ class ItemSelectView(SafeView):
 
     async def _buy(self, interaction: discord.Interaction) -> None:
         await self._add_selected(interaction)
-        await start_checkout(self.bot, interaction)
+        await start_checkout(self.bot, interaction, browse_ctx=self.browse_ctx)
 
 
 class PostAddToCartView(SafeView):
@@ -673,7 +773,7 @@ class PostAddToCartView(SafeView):
     async def buy_now(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        await start_checkout(self.bot, interaction)
+        await start_checkout(self.bot, interaction, browse_ctx=self.browse_ctx)
 
 
 class AddToCartView(SafeView):
@@ -797,7 +897,7 @@ class CartView(SafeView):
         await _browse_categories(self.bot, interaction, ctx=self.browse_ctx)
 
     async def _buy(self, interaction: discord.Interaction) -> None:
-        await start_checkout(self.bot, interaction)
+        await start_checkout(self.bot, interaction, browse_ctx=self.browse_ctx)
 
 
 class CartItemAdjustView(SafeView):

@@ -25,6 +25,7 @@ class ShopBot(commands.Bot):
             "cogs.shop",
             "cogs.daily_deals",
             "cogs.tickets",
+            "cogs.credits",
             "cogs.vouch",
         ):
             await self.load_extension(ext)
@@ -38,7 +39,8 @@ class ShopBot(commands.Bot):
         self.add_view(ShopPanelView(self))
         register_slot_panel_views(self)
         await register_category_panel_views(self)
-        self.add_view(TicketOrderView(self))
+        # Mit Fast-Buy-Button registrieren (erscheint nur auf Credits-Tickets)
+        self.add_view(TicketOrderView(self, show_fast_buy=True))
         n_deals = await register_daily_deal_views(self)
         if n_deals:
             print(f"[DailyDeal] {n_deals} aktive Deal-View(s) registriert")

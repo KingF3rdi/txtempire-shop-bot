@@ -131,7 +131,15 @@ class Database:
                 title TEXT,
                 channel_id INTEGER,
                 message_id INTEGER,
+                credits_enabled INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (guild_id, slot)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_credits (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                balance REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
             );
 
             CREATE TABLE IF NOT EXISTS daily_deals (
@@ -206,6 +214,12 @@ class Database:
             ("items", "api_id", "INTEGER"),
             ("buy_panel_slots", "channel_id", "INTEGER"),
             ("buy_panel_slots", "message_id", "INTEGER"),
+            ("buy_panel_slots", "credits_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            ("orders", "credits_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            ("orders", "order_kind", "TEXT NOT NULL DEFAULT 'shop'"),
+            ("orders", "credits_amount", "REAL"),
+            ("orders", "paid_with_credits", "INTEGER NOT NULL DEFAULT 0"),
+            ("orders", "source_panel_slot", "INTEGER"),
         ):
             try:
                 await self.db.execute(
@@ -214,6 +228,20 @@ class Database:
                 await self.db.commit()
             except Exception:
                 pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_credits (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    balance REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
         try:
             await self.db.execute(
                 """
@@ -376,6 +404,7 @@ class Database:
         title: str | None = None,
         channel_id: int | None = None,
         message_id: int | None = None,
+        credits_enabled: bool | None = None,
     ) -> None:
         ids_json = json.dumps(sorted({int(i) for i in category_ids}))
         existing = await self.get_buy_panel_slot(guild_id, slot)
@@ -383,18 +412,47 @@ class Database:
             channel_id = existing.get("channel_id")
         if message_id is None and existing:
             message_id = existing.get("message_id")
+        if credits_enabled is None:
+            credits_flag = int(existing.get("credits_enabled") or 0) if existing else 0
+        else:
+            credits_flag = 1 if credits_enabled else 0
         await self.db.execute(
             """
-            INSERT INTO buy_panel_slots (guild_id, slot, filter_mode, category_ids, title, channel_id, message_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO buy_panel_slots
+              (guild_id, slot, filter_mode, category_ids, title, channel_id, message_id, credits_enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, slot) DO UPDATE SET
                 filter_mode = excluded.filter_mode,
                 category_ids = excluded.category_ids,
                 title = COALESCE(excluded.title, buy_panel_slots.title),
                 channel_id = COALESCE(excluded.channel_id, buy_panel_slots.channel_id),
-                message_id = COALESCE(excluded.message_id, buy_panel_slots.message_id)
+                message_id = COALESCE(excluded.message_id, buy_panel_slots.message_id),
+                credits_enabled = excluded.credits_enabled
             """,
-            (guild_id, slot, filter_mode, ids_json, title, channel_id, message_id),
+            (
+                guild_id,
+                slot,
+                filter_mode,
+                ids_json,
+                title,
+                channel_id,
+                message_id,
+                credits_flag,
+            ),
+        )
+        await self.db.commit()
+
+    async def set_buy_panel_credits(
+        self, guild_id: int, slot: int, enabled: bool
+    ) -> None:
+        await self.ensure_buy_panel_slot(guild_id, slot)
+        await self.db.execute(
+            """
+            UPDATE buy_panel_slots
+            SET credits_enabled = ?
+            WHERE guild_id = ? AND slot = ?
+            """,
+            (1 if enabled else 0, guild_id, slot),
         )
         await self.db.commit()
 
@@ -721,6 +779,11 @@ class Database:
         user_id: int,
         cart_rows: list[dict[str, Any]],
         ticket_channel_id: int | None = None,
+        *,
+        credits_enabled: bool = False,
+        order_kind: str = "shop",
+        credits_amount: float | None = None,
+        source_panel_slot: int | None = None,
     ) -> int:
         total = sum(float(r["price"]) * int(r["qty"]) for r in cart_rows)
         mx = await self.fetchone(
@@ -731,14 +794,27 @@ class Database:
             (guild_id,),
         )
         order_number = int(mx["mx"]) + 1 if mx else 1
+        kind = order_kind if order_kind in ("shop", "credits") else "shop"
         cur = await self.db.execute(
             """
             INSERT INTO orders
               (guild_id, user_id, ticket_channel_id, status, total, half_a, half_b,
-               order_number)
-            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)
+               order_number, credits_enabled, order_kind, credits_amount, source_panel_slot)
+            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (guild_id, user_id, ticket_channel_id, total, total, 0.0, order_number),
+            (
+                guild_id,
+                user_id,
+                ticket_channel_id,
+                total,
+                total,
+                0.0,
+                order_number,
+                1 if credits_enabled else 0,
+                kind,
+                credits_amount,
+                source_panel_slot,
+            ),
         )
         order_id = cur.lastrowid
         for r in cart_rows:
@@ -751,8 +827,8 @@ class Database:
                 """,
                 (
                     order_id,
-                    r["item_id"],
-                    r["category_id"],
+                    r.get("item_id"),
+                    r.get("category_id"),
                     r["name"],
                     float(r["price"]),
                     int(r["qty"]),
@@ -765,6 +841,59 @@ class Database:
             )
         await self.db.commit()
         return order_id  # type: ignore[return-value]
+
+    # ── User credits ────────────────────────────────────────────────
+
+    async def get_credits(self, guild_id: int, user_id: int) -> float:
+        row = await self.fetchone(
+            "SELECT balance FROM user_credits WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        return float(row["balance"]) if row else 0.0
+
+    async def set_credits(self, guild_id: int, user_id: int, balance: float) -> float:
+        bal = max(0.0, round(float(balance), 2))
+        await self.db.execute(
+            """
+            INSERT INTO user_credits (guild_id, user_id, balance)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET balance = excluded.balance
+            """,
+            (guild_id, user_id, bal),
+        )
+        await self.db.commit()
+        return bal
+
+    async def add_credits(self, guild_id: int, user_id: int, amount: float) -> float:
+        """Addiert Credits (auch negativ zum Abziehen ohne Balance-Check)."""
+        current = await self.get_credits(guild_id, user_id)
+        return await self.set_credits(guild_id, user_id, current + float(amount))
+
+    async def try_deduct_credits(
+        self, guild_id: int, user_id: int, amount: float
+    ) -> bool:
+        """Zieht Credits atomar ab. False wenn Guthaben nicht reicht."""
+        need = round(float(amount), 2)
+        if need <= 0:
+            return True
+        await self.db.execute(
+            """
+            INSERT INTO user_credits (guild_id, user_id, balance)
+            VALUES (?, ?, 0)
+            ON CONFLICT(guild_id, user_id) DO NOTHING
+            """,
+            (guild_id, user_id),
+        )
+        cur = await self.db.execute(
+            """
+            UPDATE user_credits
+            SET balance = ROUND(balance - ?, 2)
+            WHERE guild_id = ? AND user_id = ? AND balance >= ?
+            """,
+            (need, guild_id, user_id, need),
+        )
+        await self.db.commit()
+        return (cur.rowcount or 0) > 0
 
     async def get_order(self, order_id: int) -> dict[str, Any] | None:
         row = await self.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))

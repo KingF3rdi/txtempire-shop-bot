@@ -44,6 +44,10 @@ async def create_order_ticket(
     *,
     cart_rows: list[dict] | None = None,
     clear_cart: bool = True,
+    credits_enabled: bool = False,
+    order_kind: str = "shop",
+    credits_amount: float | None = None,
+    source_panel_slot: int | None = None,
 ) -> discord.TextChannel:
     """Erstellt Order + privates Ticket.
 
@@ -125,12 +129,20 @@ async def create_order_ticket(
         for c in interaction.user.name.lower()
     )[:20]
     order_id = await bot.db.create_order(
-        guild.id, interaction.user.id, cart, ticket_channel_id=None
+        guild.id,
+        interaction.user.id,
+        cart,
+        ticket_channel_id=None,
+        credits_enabled=credits_enabled,
+        order_kind=order_kind,
+        credits_amount=credits_amount,
+        source_panel_slot=source_panel_slot,
     )
     order = await bot.db.get_order(order_id)
     assert order is not None
     seq = int(order.get("order_number") or order_id)
-    channel_name = f"order-{seq:04d}-{safe_name}"[:100]
+    prefix = "credits" if order_kind == "credits" else "order"
+    channel_name = f"{prefix}-{seq:04d}-{safe_name}"[:100]
     try:
         channel = await guild.create_text_channel(
             name=channel_name,
@@ -198,6 +210,25 @@ async def create_order_ticket(
     cart_panel = order_cart_panel_embed(
         order, items, settings, interaction.user, guild
     )
+    show_fast_buy = bool(credits_enabled) and order_kind == "shop"
+    ticket_view = TicketOrderView(bot, show_fast_buy=show_fast_buy)
+
+    credits_hint = ""
+    if order_kind == "credits":
+        credits_hint = (
+            "\n🪙 **Credits-Kauf** — nach Staff-Bestätigung werden Credits "
+            "gutgeschrieben."
+        )
+    elif show_fast_buy:
+        from utils.credits import credits_needed_for_total, format_credits
+
+        need = credits_needed_for_total(float(order["total"]))
+        bal = await bot.db.get_credits(guild.id, interaction.user.id)
+        credits_hint = (
+            f"\n🪙 **Fast Buy verfügbar** — kostet **{format_credits(need)} Credits** "
+            f"(Guthaben: {format_credits(bal)})."
+        )
+
     try:
         await _send_with_retry(
             channel,
@@ -206,9 +237,10 @@ async def create_order_ticket(
                 f"**{PAYMENT_NOTICE}**\n"
                 "Admin sieht den Warenkorb · "
                 "Käufer: **Bestellung anzeigen** / **Kauf abbrechen**."
+                f"{credits_hint}"
             ),
             embed=cart_panel,
-            view=TicketOrderView(bot),
+            view=ticket_view,
         )
     except (discord.Forbidden, discord.HTTPException) as e:
         raise ValueError(

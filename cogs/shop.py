@@ -60,15 +60,17 @@ async def _post_slot_panel(
     panel_title = title or stored_title
     await ensure_buy_panel_slot_view(bot, slot)
     filtered = apply_panel_filter(cats, panel_filter)
+    row = await bot.db.ensure_buy_panel_slot(guild.id, slot)
+    credits_on = bool(int(row.get("credits_enabled") or 0))
     embed = build_buy_panel_embed(
         categories=filtered,
         settings=settings,
         title=panel_title,
         panel_filter=panel_filter,
         slot=slot,
+        credits_enabled=credits_on,
     )
-    view = BuyPanelView(bot, panel_slot=slot)
-    row = await bot.db.ensure_buy_panel_slot(guild.id, slot)
+    view = BuyPanelView(bot, panel_slot=slot, credits_enabled=credits_on)
     channel_id = row.get("channel_id")
     message_id = row.get("message_id")
     if channel_id and message_id and int(channel_id) == target.id:
@@ -157,6 +159,7 @@ class ShopCog(commands.Cog):
         slot="Welches Panel konfiguriert werden soll",
         mode="Welche Kategorien im Panel sichtbar sind",
         title="Optional: eigener Titel auf dem Panel",
+        credits="Credits / Fast Buy auf diesem Panel aktivieren",
     )
     @app_commands.choices(
         slot=[
@@ -168,6 +171,10 @@ class ShopCog(commands.Cog):
             app_commands.Choice(name="Nur diese Kategorien", value="include"),
             app_commands.Choice(name="Alle außer diese", value="exclude"),
         ],
+        credits=[
+            app_commands.Choice(name="Credits an (Buy Credits + Fast Buy)", value=1),
+            app_commands.Choice(name="Credits aus", value=0),
+        ],
     )
     @app_commands.default_permissions(manage_guild=True)
     async def buypanelconfig(
@@ -176,6 +183,7 @@ class ShopCog(commands.Cog):
         slot: app_commands.Choice[int],
         mode: app_commands.Choice[str],
         title: str | None = None,
+        credits: app_commands.Choice[int] | None = None,
     ) -> None:
         assert interaction.guild is not None
         from utils.embeds import error_embed
@@ -183,6 +191,7 @@ class ShopCog(commands.Cog):
 
         panel_slot = slot.value
         filter_mode = mode.value
+        credits_enabled = None if credits is None else bool(credits.value)
 
         if filter_mode in ("include", "exclude"):
             cats = await self.bot.db.list_categories(interaction.guild.id)
@@ -214,6 +223,8 @@ class ShopCog(commands.Cog):
             )
             if title:
                 header += f"\n\n_Titel: {title}_"
+            if credits_enabled is not None:
+                header += f"\n_Credits: {'an' if credits_enabled else 'aus'}_"
 
             row = await self.bot.db.ensure_buy_panel_slot(
                 interaction.guild.id, panel_slot
@@ -230,7 +241,13 @@ class ShopCog(commands.Cog):
             ) -> None:
                 ids = [int(c["id"]) for c in selected]
                 await self._save_buy_panel_config(
-                    inter, panel_slot, filter_mode, ids, title, edit=True
+                    inter,
+                    panel_slot,
+                    filter_mode,
+                    ids,
+                    title,
+                    credits_enabled=credits_enabled,
+                    edit=True,
                 )
 
             view = PanelCategoryConfigView(
@@ -248,7 +265,12 @@ class ShopCog(commands.Cog):
             return
 
         await self._save_buy_panel_config(
-            interaction, panel_slot, filter_mode, [], title
+            interaction,
+            panel_slot,
+            filter_mode,
+            [],
+            title,
+            credits_enabled=credits_enabled,
         )
 
     async def _save_buy_panel_config(
@@ -259,6 +281,7 @@ class ShopCog(commands.Cog):
         category_ids: list[int],
         title: str | None,
         *,
+        credits_enabled: bool | None = None,
         edit: bool = False,
     ) -> None:
         assert interaction.guild is not None
@@ -274,6 +297,7 @@ class ShopCog(commands.Cog):
             filter_mode=filter_mode,
             category_ids=category_ids,
             title=title,
+            credits_enabled=credits_enabled,
         )
         await ensure_buy_panel_slot_view(self.bot, slot)
 
@@ -283,6 +307,13 @@ class ShopCog(commands.Cog):
         names = ", ".join(c["name"] for c in filtered[:10])
         if len(filtered) > 10:
             names += f" … (+{len(filtered) - 10})"
+
+        saved = await self.bot.db.ensure_buy_panel_slot(
+            interaction.guild.id, slot
+        )
+        credits_line = (
+            f"**Credits:** {'an ✅' if int(saved.get('credits_enabled') or 0) else 'aus'}\n"
+        )
 
         refresh_note = ""
         if needs_refresh:
@@ -294,6 +325,7 @@ class ShopCog(commands.Cog):
         embed = success_embed(
             f"Buy Panel {slot} konfiguriert",
             f"**Filter:** {panel_filter_summary(pf)}\n"
+            + credits_line
             + (f"**Titel:** {title}\n" if title else "")
             + (f"**Sichtbar:** {names or '—'}\n\n" if filtered else "")
             + f"Posten: `/buypanel` → **Buy Panel {slot}**"
@@ -339,7 +371,8 @@ class ShopCog(commands.Cog):
                 if ch:
                     msg_hint = f"\n  Nachricht: {ch.mention} (`{row['message_id']}`)"
             lines.append(
-                f"**Panel {slot}** — {panel_filter_summary(pf)}\n"
+                f"**Panel {slot}** — {panel_filter_summary(pf)}"
+                f"{' · 🪙 Credits an' if int(row.get('credits_enabled') or 0) else ''}\n"
                 f"  Kategorien ({len(filtered)}): {names}{msg_hint}"
             )
         await interaction.response.send_message(
