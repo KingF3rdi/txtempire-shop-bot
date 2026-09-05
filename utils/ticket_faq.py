@@ -1,4 +1,4 @@
-"""Einfache Keyword-FAQ für Shop-Tickets."""
+"""Einfache Keyword-FAQ für Shop- und Service-Tickets."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 # channel_id → last reply timestamp
 _cooldowns: dict[int, float] = {}
-COOLDOWN_SEC = 45.0
+COOLDOWN_SEC = 25.0
 
 
 @dataclass(frozen=True)
@@ -17,94 +17,219 @@ class FaqEntry:
     answer: str
 
 
+# Reihenfolge egal — es gewinnt der längste Keyword-Treffer.
 FAQ: tuple[FaqEntry, ...] = (
     FaqEntry(
-        ("wie zahle", "wie bezahl", "zahlung", "überweis", "paypal", "iban", "geld senden"),
-        "**Zahlung:** Die genauen Zahlungsdaten stehen im Ticket-Embed oben "
-        "(Empfänger + Betrag).\n"
-        "Überweise den **gesamten Betrag** an den angegebenen Empfänger "
-        "(TxtEmpire), dann **Payment beweisen**.",
+        (
+            "wie kaufe ich",
+            "wie kauft man",
+            "wie bestelle",
+            "wie bestellen",
+            "pack kaufen",
+            "packs kaufen",
+            "wo kaufe",
+            "wo kaufen",
+            "wie shoppe",
+            "buy panel",
+            "buypanel",
+            "shop panel",
+            "wie hol ich",
+            "wie bekomme ich ein pack",
+            "wie bekomm ich ein pack",
+            "texturepack kaufen",
+            "produkt kaufen",
+        ),
+        "**Packs kaufen — so geht’s:**\n"
+        "1) Im **Buy-Panel** / Shop-Kanal Kategorie wählen und Produkt in den "
+        "Warenkorb legen\n"
+        "2) **Kaufen / Checkout** → es öffnet sich dein privates Ticket\n"
+        "3) Betrag laut Ticket **überweisen** (Empfänger steht im Embed)\n"
+        "4) **Payment beweisen** (IGN + Screenshot)\n"
+        "5) Staff bestätigt → Pack kommt per **DM** (+ ggf. Rolle)\n\n"
+        "Tipp: Mit genug **Credits** geht oft auch **Quick Buy** ohne Überweisung.",
     ),
     FaqEntry(
-        ("payment beweis", "beweis", "proof", "quittung", "screenshot zahlung"),
+        (
+            "wie zahle",
+            "wie bezahl",
+            "wie bezahle",
+            "wie kann ich zahl",
+            "wie kann ich bezahl",
+            "wohin überweis",
+            "wohin zahl",
+            "an wen zahl",
+            "an wen überweis",
+            "zahlung",
+            "zahlen",
+            "bezahlen",
+            "überweis",
+            "ueberweis",
+            "paypal",
+            "iban",
+            "geld senden",
+            "geld schicken",
+            "payment",
+            "payee",
+            "empfänger",
+            "empfaenger",
+            "betrag",
+            "was kostet",
+            "wie viel zahl",
+        ),
+        "**Zahlung:** Im Ticket oben stehen **Empfänger** und **Betrag**.\n"
+        "Überweise den **vollen Betrag** an diesen Empfänger (TxtEmpire).\n"
+        "Danach **Payment beweisen** (Button) mit IGN + Screenshot der Zahlung.\n"
+        "Ohne Beweis kann Staff den Kauf nicht bestätigen.",
+    ),
+    FaqEntry(
+        (
+            "payment beweis",
+            "zahlung beweis",
+            "beweis senden",
+            "beweis schicken",
+            "proof",
+            "quittung",
+            "screenshot zahlung",
+            "screenshot von der zahlung",
+            "zahlungsbeweis",
+        ),
         "**Payment beweisen:** Button **Payment beweisen** → IGN eintragen "
-        "und einen Screenshot der Zahlung anhängen.\n"
-        "Danach wartet Staff auf die Bestätigung.",
+        "und Screenshot der Zahlung anhängen.\n"
+        "Danach wartet Staff auf die Bestätigung — danach kommt dein Pack.",
     ),
     FaqEntry(
-        ("wie lange", "wartezeit", "wann bekomm", "wie schnell", "dauer"),
+        (
+            "wie lange",
+            "wartezeit",
+            "wann bekomm",
+            "wann krieg",
+            "wie schnell",
+            "wie lange dauert",
+            "dauer",
+        ),
         "Nach dem Zahlungsbeweis bestätigt Staff den Kauf. "
         "Packs/Rollen kommen danach automatisch (oft wenige Minuten, "
         "je nach Staff-Auslastung).",
     ),
     FaqEntry(
-        ("pack", "lieferung", "download", "dm", "datei bekomm"),
-        "Nach Bestätigung wird das **Pack per DM** (Text/Datei) und ggf. "
-        "als Link im Ticket geliefert. DMs vom Server bitte offen lassen.",
+        (
+            "wo ist mein pack",
+            "pack nicht bekommen",
+            "keine dm",
+            "kein pack",
+            "lieferung",
+            "download",
+            "datei bekomm",
+            "pack per dm",
+        ),
+        "Nach Bestätigung kommt das **Pack per DM** (Text/Datei) und ggf. "
+        "als Link im Ticket. DMs vom Server bitte erlauben.\n"
+        "Wenn schon bestätigt und nichts da ist: Staff im Ticket kurz anpingen.",
     ),
     FaqEntry(
-        ("credit", "guthaben", "coins"),
+        (
+            "credit",
+            "credits",
+            "guthaben",
+            "coins",
+            "quick buy",
+            "schnellkauf",
+        ),
         "**Credits:** Am Buy-Panel unter **Credits** kaufen. "
         "Bei aktiviertem Credits-Panel kannst du mit **Quick Buy** "
         "direkt ohne Überweisung zahlen (wenn genug Guthaben).",
     ),
     FaqEntry(
-        ("rabatt", "creator code", "gutschein", "discount", "code"),
-        "Im Ticket gibt es den Button **Rabatt / Creator Code**. "
-        "Gib deinen Code ein — der Preis wird angepasst (sofern gültig).",
+        (
+            "rabatt",
+            "creator code",
+            "creator-code",
+            "gutschein",
+            "discount",
+            "code eingeben",
+            "rabattcode",
+        ),
+        "Im Ticket: Button **Rabatt / Creator Code** → Code eingeben. "
+        "Der Preis wird angepasst, sofern der Code gültig ist.",
     ),
     FaqEntry(
-        ("vouch", "bewertung", "review", "sterne"),
-        "Nach erfolgreichem Kauf kannst du einmalig bewerten: "
-        "`/vouch` (Server oder DM) oder über die Sterne-Buttons in der DM.",
+        ("vouch", "bewertung", "review", "sterne", "bewerten"),
+        "Nach erfolgreichem Kauf einmalig bewerten: "
+        "`/vouch` (Server oder DM) oder Sterne-Buttons in der Pack-DM.",
     ),
     FaqEntry(
-        ("abbrechen", "stornier", "cancel", "schließen"),
+        ("abbrechen", "stornier", "cancel", "schließen", "schliessen"),
         "Kauf abbrechen: Button **Kauf abbrechen** oder `/order cancel`. "
         "Staff kann das Ticket mit **Ticket schließen** entfernen.",
     ),
     FaqEntry(
-        ("ign", "minecraft name", "spielername", "ingame"),
+        ("ign", "minecraft name", "spielername", "ingame", "in game name"),
         "Dein **IGN** (Ingame-Name) wird beim **Payment beweisen** abgefragt "
         "und in der Bestellung gespeichert.",
     ),
     FaqEntry(
-        ("rolle", "autorole", "customer", "zugang"),
+        ("rolle", "autorole", "customer rolle", "zugang"),
         "Nach Bestätigung vergibt der Bot die hinterlegten Rollen "
         "(Customer / Item- / Kategorie-Rolle), sofern konfiguriert.",
     ),
     FaqEntry(
-        ("scan premium", "scanner", "malware", "rat scan"),
+        ("scan premium", "scanner", "malware", "rat scan", "file scan"),
         "File-Scanner: Panel **Datei hier droppen** oder `/scan file`. "
-        "Premium erhöht das Tageslimit — Kauf über das Scan-Panel.",
+        "Premium erhöht das Limit — Kauf über das Scan-Panel.",
     ),
     FaqEntry(
-        ("hilfe", "help", "was tun", "wie geht", "anleitung"),
-        "**Kurzablauf:** 1) Betrag überweisen → 2) **Payment beweisen** "
-        "(IGN + Screenshot) → 3) Staff bestätigt → 4) Pack/Rollen kommen.\n"
-        "Bei Problemen einfach warten — Staff sieht dein Ticket.",
+        (
+            "hilfe",
+            "help",
+            "was tun",
+            "was muss ich",
+            "wie geht",
+            "anleitung",
+            "wie funktioniert",
+            "was soll ich machen",
+            "next step",
+            "nächster schritt",
+            "naechster schritt",
+        ),
+        "**Kurzablauf:**\n"
+        "1) Pack im Buy-Panel auswählen → Ticket öffnet sich\n"
+        "2) Betrag **überweisen** (Daten im Ticket-Embed)\n"
+        "3) **Payment beweisen** (IGN + Screenshot)\n"
+        "4) Staff bestätigt → Pack/Rollen kommen per DM\n\n"
+        "Fragen zu Zahlung oder Kauf einfach hier schreiben.",
     ),
 )
 
 
 def _normalize(text: str) -> str:
     t = text.lower().strip()
-    t = re.sub(r"\s+", " ", t)
+    # einfache Umlaute / Schreibweisen
+    for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        t = t.replace(a, b)
+    t = re.sub(r"[^\w\s+/.-]", " ", t, flags=re.UNICODE)
+    t = re.sub(r"\s+", " ", t).strip()
     return t
 
 
 def match_faq(content: str) -> str | None:
-    """Gibt FAQ-Antwort oder None zurück."""
+    """Gibt FAQ-Antwort oder None zurück (bester Keyword-Treffer)."""
     text = _normalize(content)
-    if len(text) < 4 or len(text) > 280:
+    if len(text) < 3 or len(text) > 400:
         return None
-    # Avoid matching pure order chatter / only mentions
-    if text.startswith("http") or text.count(" ") > 40:
+    if text.startswith("http"):
         return None
+
+    best: FaqEntry | None = None
+    best_len = 0
     for entry in FAQ:
-        if any(k in text for k in entry.keys):
-            return entry.answer
-    return None
+        for key in entry.keys:
+            k = _normalize(key)
+            if len(k) < 3:
+                continue
+            if k in text and len(k) > best_len:
+                best = entry
+                best_len = len(k)
+    return best.answer if best else None
 
 
 def faq_cooldown_ok(channel_id: int) -> bool:

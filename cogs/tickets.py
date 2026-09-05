@@ -307,6 +307,23 @@ class TicketsCog(commands.Cog):
         from utils.ticket_faq import faq_cooldown_ok, match_faq
 
         answer = match_faq(content)
+        if answer is None and len(content) <= 60:
+            # Kurze Nachricht mit Kauf-/Zahlungs-Stichwort → Ablauf-Hilfe
+            low = content.lower()
+            if any(
+                w in low
+                for w in (
+                    "zahl",
+                    "bezahl",
+                    "pay",
+                    "kauf",
+                    "hilfe",
+                    "help",
+                    "was tun",
+                    "wie",
+                )
+            ):
+                answer = match_faq("wie funktioniert der kauf und die zahlung")
         if answer is None:
             return
         if not faq_cooldown_ok(message.channel.id):

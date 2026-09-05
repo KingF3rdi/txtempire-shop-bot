@@ -59,6 +59,7 @@ class ShopBot(commands.Bot):
             ServiceCloseView,
             SupportPanelView,
             TexturepackPanelView,
+            TexturepackTicketView,
         )
         from views.boost_packs import BoostThanksView
 
@@ -67,6 +68,7 @@ class ShopBot(commands.Bot):
         self.add_view(ApplicationPanelView(self))
         self.add_view(PartnerPanelView(self))
         self.add_view(TexturepackPanelView(self))
+        self.add_view(TexturepackTicketView(self))
         self.add_view(ServiceCloseView(self))
         self.add_view(BoostThanksView(self))
         from views.giveaway_views import GiveawayEnterView

@@ -54,9 +54,11 @@ def build_service_panel_embed(
         )
     if panel_type == "texturepack":
         role_line = (
-            f"\n**Nur mit Rolle {role_mention}** zugänglich.\n"
+            f"\n• **Ankauf** — nur mit Rolle {role_mention}\n"
+            f"• **Tausch** — nach Annahme durch Staff erhältst du {role_mention}\n"
             if role_mention
             else "\n⚠️ Exklusiv-Rolle noch nicht gesetzt (`/texturepackrole`).\n"
+            "• **Ankauf** braucht die Rolle · **Tausch** vergibt sie bei Annahme\n"
         )
         return base_embed(
             "📦 Texturepack Ankauf & Tausch",
@@ -78,7 +80,7 @@ def build_service_panel_embed(
 async def _texturepack_role_gate(
     bot: ShopBot, interaction: discord.Interaction
 ) -> bool:
-    """True = darf fortfahren. Antwortet ephemeral bei Ablehnung."""
+    """True = darf Ankauf öffnen. Staff immer erlaubt."""
     if interaction.guild is None:
         await interaction.response.send_message(
             embed=error_embed("Nur auf dem Server"), ephemeral=True
@@ -93,7 +95,8 @@ async def _texturepack_role_gate(
             embed=error_embed(
                 "Nicht konfiguriert",
                 "Die Exklusiv-Rolle für Texturepack ist noch nicht gesetzt. "
-                "Staff: `/texturepackrole`.",
+                "Staff: `/texturepackrole`.\n"
+                "Ohne Rolle kannst du trotzdem **Tausch** öffnen.",
             ),
             ephemeral=True,
         )
@@ -105,13 +108,44 @@ async def _texturepack_role_gate(
         await interaction.response.send_message(
             embed=error_embed(
                 "Keine Berechtigung",
-                f"Nur Mitglieder mit der Rolle {mention} können "
-                "Texturepack Ankauf/Tausch öffnen.",
+                f"Nur Mitglieder mit der Rolle {mention} können **Ankauf** öffnen.\n"
+                f"**Tausch** steht allen offen — nach Annahme erhältst du {mention}.",
             ),
             ephemeral=True,
         )
         return False
     return True
+
+
+async def grant_texturepack_role(
+    bot: ShopBot, guild: discord.Guild, user_id: int
+) -> str:
+    """Vergibt texturepack_role_id. Gibt Status-Text zurück."""
+    settings = await bot.db.ensure_guild(guild.id)
+    role_id = settings.get("texturepack_role_id")
+    if not role_id:
+        return "Keine Texturepack-Rolle konfiguriert (`/texturepackrole`)."
+    role = guild.get_role(int(role_id))
+    if role is None:
+        return "Konfigurierte Rolle existiert nicht mehr."
+    member = guild.get_member(user_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(user_id)
+        except discord.HTTPException:
+            return "Mitglied nicht auf dem Server gefunden."
+    me = guild.me
+    if me is None or not me.guild_permissions.manage_roles:
+        return "Bot hat keine Rollen-Berechtigung."
+    if role >= me.top_role:
+        return "Texturepack-Rolle liegt zu hoch in der Hierarchie."
+    if role in member.roles:
+        return f"{member.mention} hat {role.mention} bereits."
+    try:
+        await member.add_roles(role, reason="Texturepack-Tausch angenommen")
+    except discord.HTTPException as e:
+        return f"Rollen-Fehler: {e}"
+    return f"{member.mention} hat {role.mention} erhalten."
 
 
 class ServiceCloseView(discord.ui.View):
@@ -128,11 +162,36 @@ class ServiceCloseView(discord.ui.View):
     async def close(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
+        await _close_service_ticket(self.bot, interaction)
+
+
+class TexturepackTicketView(discord.ui.View):
+    """Close + Staff kann Tausch annehmen → Exklusiv-Rolle."""
+
+    def __init__(self, bot: ShopBot) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(
+        label="Tausch annehmen",
+        style=discord.ButtonStyle.success,
+        custom_id="serviceticket:texture_accept",
+        emoji="✅",
+        row=0,
+    )
+    async def accept_tausch(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
         if interaction.guild is None or not isinstance(
             interaction.channel, discord.TextChannel
         ):
             await interaction.response.send_message(
                 embed=error_embed("Nur im Ticket"), ephemeral=True
+            )
+            return
+        if not await is_staff(self.bot, interaction):
+            await interaction.response.send_message(
+                embed=error_embed("Nur Staff"), ephemeral=True
             )
             return
         ticket = await self.bot.db.get_service_ticket_by_channel(
@@ -143,31 +202,85 @@ class ServiceCloseView(discord.ui.View):
                 embed=error_embed("Kein Service-Ticket"), ephemeral=True
             )
             return
-        staff = await is_staff(self.bot, interaction)
-        is_owner = interaction.user.id == int(ticket["user_id"])
-        if not staff and not is_owner:
+        ttype = str(ticket.get("ticket_type") or "")
+        if ttype not in ("texture_tausch", "texture_ankauf"):
             await interaction.response.send_message(
-                embed=error_embed("Keine Berechtigung"), ephemeral=True
+                embed=error_embed("Nur für Texturepack-Tickets"), ephemeral=True
             )
             return
+
         await interaction.response.defer()
-        await self.bot.db.update_service_ticket(
-            int(ticket["id"]), status="closed"
+        note = await grant_texturepack_role(
+            self.bot, interaction.guild, int(ticket["user_id"])
         )
-        await interaction.followup.send(
-            embed=warn_embed(
-                "Ticket wird geschlossen",
-                f"Geschlossen von {interaction.user.mention}. "
-                "Channel wird in 5 Sekunden gelöscht.",
+        if ttype == "texture_tausch":
+            title = "Tausch angenommen"
+            body = (
+                f"Angenommen von {interaction.user.mention}.\n"
+                f"**Rolle:** {note}\n\n"
+                "Deal bitte im Ticket abschließen, danach Ticket schließen."
             )
+        else:
+            title = "Ankauf angenommen"
+            body = (
+                f"Angenommen von {interaction.user.mention}.\n"
+                f"Rolle (falls Tausch-Zugang): {note}\n\n"
+                "Deal bitte im Ticket abschließen, danach Ticket schließen."
+            )
+        await interaction.followup.send(embed=success_embed(title, body))
+
+    @discord.ui.button(
+        label="Ticket schließen",
+        style=discord.ButtonStyle.danger,
+        custom_id="serviceticket:texture_close",
+        emoji="🔒",
+        row=0,
+    )
+    async def close(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await _close_service_ticket(self.bot, interaction)
+
+
+async def _close_service_ticket(
+    bot: ShopBot, interaction: discord.Interaction
+) -> None:
+    if interaction.guild is None or not isinstance(
+        interaction.channel, discord.TextChannel
+    ):
+        await interaction.response.send_message(
+            embed=error_embed("Nur im Ticket"), ephemeral=True
         )
-        await asyncio.sleep(5)
-        try:
-            await interaction.channel.delete(
-                reason=f"Service-Ticket geschlossen von {interaction.user}"
-            )
-        except discord.HTTPException:
-            pass
+        return
+    ticket = await bot.db.get_service_ticket_by_channel(interaction.channel.id)
+    if not ticket:
+        await interaction.response.send_message(
+            embed=error_embed("Kein Service-Ticket"), ephemeral=True
+        )
+        return
+    staff = await is_staff(bot, interaction)
+    is_owner = interaction.user.id == int(ticket["user_id"])
+    if not staff and not is_owner:
+        await interaction.response.send_message(
+            embed=error_embed("Keine Berechtigung"), ephemeral=True
+        )
+        return
+    await interaction.response.defer()
+    await bot.db.update_service_ticket(int(ticket["id"]), status="closed")
+    await interaction.followup.send(
+        embed=warn_embed(
+            "Ticket wird geschlossen",
+            f"Geschlossen von {interaction.user.mention}. "
+            "Channel wird in 5 Sekunden gelöscht.",
+        )
+    )
+    await asyncio.sleep(5)
+    try:
+        await interaction.channel.delete(
+            reason=f"Service-Ticket geschlossen von {interaction.user}"
+        )
+    except discord.HTTPException:
+        pass
 
 
 class ApplicationModal(discord.ui.Modal, title="Media / Creator Bewerbung"):
@@ -380,7 +493,13 @@ class TexturepackModal(discord.ui.Modal):
             self.offer.placeholder = "z.B. gegen Pack X · oder 300k + Pack Y"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if not await _texturepack_role_gate(self.bot, interaction):
+        if self.kind == "ankauf":
+            if not await _texturepack_role_gate(self.bot, interaction):
+                return
+        elif interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Nur auf dem Server"), ephemeral=True
+            )
             return
         kind_label = "Ankauf (Verkauf an Server)" if self.kind == "ankauf" else "Tausch"
         body = (
@@ -431,7 +550,10 @@ class TexturepackPanelView(discord.ui.View):
     async def open_tausch(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        if not await _texturepack_role_gate(self.bot, interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Nur auf dem Server"), ephemeral=True
+            )
             return
         await interaction.response.send_modal(
             TexturepackModal(self.bot, kind="tausch")
@@ -560,7 +682,10 @@ async def create_service_ticket_channel(
         "application": "Media-/Creator-Bewerbung unten. Staff prüft sie.",
         "partner": "Partnerschafts-Anfrage unten. Staff meldet sich.",
         "texture_ankauf": "Ankauf-Anfrage unten. Staff prüft Preis & Packs.",
-        "texture_tausch": "Tausch-Anfrage unten. Staff prüft den Vorschlag.",
+        "texture_tausch": (
+            "Tausch-Anfrage unten. Staff: **Tausch annehmen** vergibt die "
+            "Exklusiv-Rolle."
+        ),
     }.get(ticket_type, "Staff meldet sich.")
     embed = success_embed(
         f"{title}-Ticket #{ticket_id}",
@@ -568,7 +693,12 @@ async def create_service_ticket_channel(
     )
     mention = staff_role.mention if staff_role else "Staff"
     content = f"{mention} · {interaction.user.mention}"
-    await channel.send(content=content, embed=embed, view=ServiceCloseView(bot))
+    ticket_view: discord.ui.View
+    if ticket_type in ("texture_ankauf", "texture_tausch"):
+        ticket_view = TexturepackTicketView(bot)
+    else:
+        ticket_view = ServiceCloseView(bot)
+    await channel.send(content=content, embed=embed, view=ticket_view)
     if subject:
         label = {
             "application": "Media/Creator Angaben",
