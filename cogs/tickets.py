@@ -186,8 +186,15 @@ async def create_order_ticket(
 
     # 1) Zahlungsinfos ganz oben
     try:
+        from utils.ticket_faq import money_log_hint_enabled
+
         await _send_with_retry(
-            channel, embed=payment_info_embed(order, settings)
+            channel,
+            embed=payment_info_embed(
+                order,
+                settings,
+                money_log_hint=money_log_hint_enabled(settings),
+            ),
         )
     except (discord.Forbidden, discord.HTTPException) as e:
         # Fallback ohne Embed
@@ -270,18 +277,28 @@ class TicketsCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """Beantwortet Basic-Fragen automatisch in Shop- und Service-Tickets."""
+        """Erste 3 Kunden-Fragen im Ticket beantworten, sonst Staff pingen."""
         if message.author.bot or message.guild is None:
             return
         if not isinstance(message.channel, discord.TextChannel):
             return
+
         content = (message.content or "").strip()
-        if not content:
-            return
+        has_attach = bool(message.attachments)
 
         order = await self.bot.db.get_order_by_channel(message.channel.id)
         service = None
-        if order is None:
+        ticket_owner_id: int | None = None
+        faq_turns = 0
+        ticket_kind = ""
+
+        if order is not None:
+            if str(order.get("status") or "") in ("completed", "cancelled"):
+                return
+            ticket_owner_id = int(order["user_id"])
+            faq_turns = int(order.get("faq_turns") or 0)
+            ticket_kind = "order"
+        else:
             service = await self.bot.db.get_service_ticket_by_channel(
                 message.channel.id
             )
@@ -289,51 +306,106 @@ class TicketsCog(commands.Cog):
                 return
             if str(service.get("status") or "") != "open":
                 return
-        else:
-            if str(order.get("status") or "") in ("completed", "cancelled"):
-                return
+            ticket_owner_id = int(service["user_id"])
+            faq_turns = int(service.get("faq_turns") or 0)
+            ticket_kind = "service"
 
-        # Staff nicht auto-antworten
+        # Nur Ticket-Ersteller (nicht Staff)
         author = message.author
-        if isinstance(author, discord.Member):
-            if author.guild_permissions.administrator:
-                return
-            settings = await self.bot.db.ensure_guild(message.guild.id)
-            staff_id = settings.get("staff_role_id")
-            if staff_id and any(r.id == int(staff_id) for r in author.roles):
-                return
-
-        from utils.embeds import base_embed
-        from utils.ticket_faq import faq_cooldown_ok, match_faq
-
-        answer = match_faq(content)
-        if answer is None and len(content) <= 60:
-            # Kurze Nachricht mit Kauf-/Zahlungs-Stichwort → Ablauf-Hilfe
-            low = content.lower()
-            if any(
-                w in low
-                for w in (
-                    "zahl",
-                    "bezahl",
-                    "pay",
-                    "kauf",
-                    "hilfe",
-                    "help",
-                    "was tun",
-                    "wie",
-                )
-            ):
-                answer = match_faq("wie funktioniert der kauf und die zahlung")
-        if answer is None:
+        if not isinstance(author, discord.Member):
             return
+        if author.id != ticket_owner_id:
+            return
+        if author.guild_permissions.administrator:
+            return
+        settings = await self.bot.db.ensure_guild(message.guild.id)
+        staff_id = settings.get("staff_role_id")
+        if staff_id and any(r.id == int(staff_id) for r in author.roles):
+            return
+
+        from utils.embeds import base_embed, warn_embed
+        from utils.ticket_faq import (
+            MAX_FAQ_TURNS,
+            MONEY_LOG_HINT,
+            faq_cooldown_ok,
+            looks_like_question,
+            match_faq,
+            money_log_hint_enabled,
+        )
+
+        money_on = money_log_hint_enabled(settings)
+
+        # Nur Bild ohne Text → Money-Log Hinweis (zählt nicht als Frage-Turn)
+        if not content and has_attach:
+            if money_on and faq_cooldown_ok(message.channel.id):
+                try:
+                    await message.channel.send(
+                        embed=base_embed("Money-Log", MONEY_LOG_HINT),
+                        reference=message,
+                        mention_author=False,
+                    )
+                except discord.HTTPException:
+                    pass
+            return
+
+        if not content:
+            return
+        if faq_turns >= MAX_FAQ_TURNS:
+            return
+        if not looks_like_question(content) and not has_attach:
+            # kurze Bestätigungen ignorieren
+            low = content.lower().strip()
+            if low in ("ok", "okay", "danke", "thx", "thanks", "jo", "ja", "nein"):
+                return
+            # trotzdem zählen wenn längerer Text
+            if len(content) < 6:
+                return
+
         if not faq_cooldown_ok(message.channel.id):
             return
-        try:
-            await message.channel.send(
-                embed=base_embed("Schnelle Hilfe", answer),
-                reference=message,
-                mention_author=False,
+
+        # Turn erhöhen
+        new_turns = faq_turns + 1
+        if ticket_kind == "order" and order is not None:
+            await self.bot.db.update_order(int(order["id"]), faq_turns=new_turns)
+        elif service is not None:
+            await self.bot.db.update_service_ticket(
+                int(service["id"]), faq_turns=new_turns
             )
+
+        answer = match_faq(content)
+        staff_role = (
+            message.guild.get_role(int(staff_id)) if staff_id else None
+        )
+        staff_ping = staff_role.mention if staff_role else "Staff"
+
+        try:
+            if answer:
+                body = answer
+                if money_on and "Fullscreen" not in answer and "Money-Log" not in answer:
+                    body = f"{answer}\n\n{MONEY_LOG_HINT}"
+                await message.channel.send(
+                    embed=base_embed(
+                        f"Schnelle Hilfe ({new_turns}/{MAX_FAQ_TURNS})",
+                        body,
+                    ),
+                    reference=message,
+                    mention_author=False,
+                )
+            else:
+                await message.channel.send(
+                    content=staff_ping,
+                    embed=warn_embed(
+                        f"Staff nötig ({new_turns}/{MAX_FAQ_TURNS})",
+                        "Dazu habe ich keine passende Auto-Antwort.\n"
+                        f"{staff_ping} — bitte kurz helfen.\n\n"
+                        + (f"{MONEY_LOG_HINT}\n\n" if money_on else "")
+                        + f"Frage von {author.mention}:\n>>> {content[:500]}",
+                    ),
+                    reference=message,
+                    mention_author=False,
+                    allowed_mentions=discord.AllowedMentions(roles=True),
+                )
         except discord.HTTPException:
             pass
 
@@ -700,6 +772,48 @@ class TicketsCog(commands.Cog):
                 "Texturepack-Rolle",
                 f"Bei Annahme erhalten User {role.mention}."
                 f"{panel_note}",
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="ticketfaq",
+        description="Ticket-Auto-Hilfe: Money-Log-Hinweis an/aus (Staff)",
+    )
+    @app_commands.describe(
+        money_log="Fullscreen Money-Log Hinweis in Tickets (Standard: an)",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def ticketfaq(
+        self,
+        interaction: discord.Interaction,
+        money_log: bool | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        from views.ticket_views import is_staff
+
+        if not await is_staff(self.bot, interaction):
+            await interaction.response.send_message(
+                embed=error_embed("Keine Berechtigung"), ephemeral=True
+            )
+            return
+        settings = await self.bot.db.ensure_guild(interaction.guild.id)
+        if money_log is not None:
+            await self.bot.db.update_guild_settings(
+                interaction.guild.id,
+                ticket_money_log_hint=1 if money_log else 0,
+            )
+            settings = await self.bot.db.ensure_guild(interaction.guild.id)
+        on = int(settings.get("ticket_money_log_hint") or 1) != 0
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Ticket-FAQ",
+                f"**Money-Log-Hinweis:** {'an' if on else 'aus'}\n"
+                f"Auto-Hilfe: erste **3** Kunden-Fragen beantworten, "
+                f"sonst Staff-Ping.\n"
+                f"Ändern: `/ticketfaq money_log:True|False`\n\n"
+                f"Hinweis: **Message Content Intent** muss im Developer "
+                f"Portal aktiv sein.",
             ),
             ephemeral=True,
         )

@@ -110,8 +110,12 @@ def payee_details_text(settings: dict) -> str:
     return (settings.get("payee_a_details") or "").strip()
 
 
-def payment_info_embed(order: dict, settings: dict) -> discord.Embed:
+def payment_info_embed(
+    order: dict, settings: dict, *, money_log_hint: bool = True
+) -> discord.Embed:
     """Zahlungsinformationen - wird oben im Ticket gepostet."""
+    from utils.ticket_faq import MONEY_LOG_HINT
+
     name = payee_name(settings)
     details = payee_details_text(settings) or "_Keine Details hinterlegt_"
     embed = base_embed(
@@ -167,6 +171,12 @@ def payment_info_embed(order: dict, settings: dict) -> discord.Embed:
         value=_field_value(f"**{format_price(float(order['total']))}**\n{details}"),
         inline=False,
     )
+    if money_log_hint:
+        embed.add_field(
+            name="Money-Log",
+            value=MONEY_LOG_HINT,
+            inline=False,
+        )
     embed.set_footer(text=PAYMENT_NOTICE)
     return embed
 

@@ -103,7 +103,11 @@ async def action_show_order(
 
     await interaction.response.send_message(
         embeds=[
-            payment_info_embed(order, settings),
+            payment_info_embed(
+                order,
+                settings,
+                money_log_hint=int(settings.get("ticket_money_log_hint") or 1) != 0,
+            ),
             order_cart_panel_embed(order, items, settings, buyer, interaction.guild),
         ],
         ephemeral=ephemeral,
@@ -150,7 +154,13 @@ async def action_post_panel(bot: ShopBot, interaction: discord.Interaction) -> N
     mention = staff_role.mention if staff_role else "Staff"
 
     try:
-        await channel.send(embed=payment_info_embed(order, settings))
+        await channel.send(
+            embed=payment_info_embed(
+                order,
+                settings,
+                money_log_hint=int(settings.get("ticket_money_log_hint") or 1) != 0,
+            )
+        )
         await channel.send(
             content=(
                 f"{buyer.mention} {mention} — Bestellung **{order_ref(order)}**\n"
@@ -881,7 +891,12 @@ async def _repost_ticket_totals(
         await channel.send(
             content=f"🏷️ Preis aktualisiert durch Code `{order.get('discount_code')}`.",
             embeds=[
-                payment_info_embed(order, settings),
+                payment_info_embed(
+                    order,
+                    settings,
+                    money_log_hint=int(settings.get("ticket_money_log_hint") or 1)
+                    != 0,
+                ),
                 order_cart_panel_embed(
                     order, items, settings, buyer, interaction.guild
                 ),

@@ -296,6 +296,9 @@ class Database:
             ("guild_settings", "scan_credits_30", "REAL"),
             ("guild_settings", "texturepack_role_id", "INTEGER"),
             ("discount_codes", "owner_user_id", "INTEGER"),
+            ("guild_settings", "ticket_money_log_hint", "INTEGER NOT NULL DEFAULT 1"),
+            ("orders", "faq_turns", "INTEGER NOT NULL DEFAULT 0"),
+            ("service_tickets", "faq_turns", "INTEGER NOT NULL DEFAULT 0"),
         ):
             try:
                 await self.db.execute(
