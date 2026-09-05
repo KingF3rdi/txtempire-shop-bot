@@ -427,7 +427,7 @@ async def action_fast_buy(bot: ShopBot, interaction: discord.Interaction) -> Non
                 "Zu wenig Credits",
                 f"Benötigt: **{format_credits(need)}** · "
                 f"Guthaben: **{format_credits(balance)}**\n"
-                "Kaufe Credits über **Buy Credits** auf dem Panel.",
+                    "Kaufe Credits über den **Credits**-Button auf dem Panel.",
             ),
             ephemeral=True,
         )
