@@ -8,8 +8,10 @@ from discord.ext import commands
 
 import config
 from utils.archive_scanner import is_scannable_filename, scan_archive_bytes
+from utils.credits import format_credits
 from utils.embeds import error_embed, format_price, success_embed, warn_embed
 from utils.scan_limits import consume_scan_quota, get_scan_quota
+from utils.scan_prices import get_scan_prices, premium_scan_label
 from views.ticket_views import is_staff
 
 if TYPE_CHECKING:
@@ -54,9 +56,8 @@ async def open_scan_premium_ticket(
         return
 
     days = 14 if days not in (14, 30) else days
-    price = (
-        config.SCAN_PREMIUM_14_PRICE if days == 14 else config.SCAN_PREMIUM_30_PRICE
-    )
+    prices = await get_scan_prices(bot, interaction.guild.id)
+    price = prices["price_14"] if days == 14 else prices["price_30"]
     cart_rows = [
         {
             "item_id": None,
@@ -105,7 +106,7 @@ async def open_scan_premium_ticket(
         embed=success_embed(
             "Scan-Premium Ticket",
             f"**{days} Tage** Premium (= {format_price(price)})\n"
-            f"→ **{config.SCAN_PREMIUM_DAILY} Scans/Tag**\n"
+            f"→ **{premium_scan_label(days=days)}**\n"
             f"Ticket: {channel.mention}\n\n"
             "Zahle wie gewohnt — nach Staff-Bestätigung ist Premium aktiv.",
         ),
@@ -332,6 +333,12 @@ class ScannerCog(commands.Cog):
                 "**Staff** — unbegrenzte Scans.\n"
                 f"Heute genutzt: **{quota['used']}**"
             )
+        elif quota["premium"] and quota.get("unlimited"):
+            body = (
+                f"**Premium aktiv** bis `{quota['expires_at']}`\n"
+                f"**Unbegrenzte Scans**\n"
+                f"Heute genutzt: **{quota['used']}**"
+            )
         elif quota["premium"]:
             body = (
                 f"**Premium aktiv** bis `{quota['expires_at']}`\n"
@@ -340,14 +347,16 @@ class ScannerCog(commands.Cog):
                 f"(noch {quota['remaining']})"
             )
         else:
+            prices = await get_scan_prices(self.bot, interaction.guild.id)
             body = (
                 f"**Free** — **{config.SCAN_FREE_DAILY} Scan/Tag**\n"
                 f"Heute: **{quota['used']}/{quota['limit']}** "
                 f"(noch {quota['remaining']})\n\n"
-                f"Premium: `/scanpremium` — "
-                f"14 Tage ({format_price(config.SCAN_PREMIUM_14_PRICE)}) oder "
-                f"30 Tage ({format_price(config.SCAN_PREMIUM_30_PRICE)}) "
-                f"→ **{config.SCAN_PREMIUM_DAILY} Scans/Tag**"
+                f"Premium: `/scanpremium` —\n"
+                f"• 14 Tage ({format_price(prices['price_14'])}) → "
+                f"**{config.SCAN_PREMIUM_DAILY} Scans/Tag**\n"
+                f"• 30 Tage ({format_price(prices['price_30'])}) → "
+                f"**unbegrenzte Scans**"
             )
         await interaction.response.send_message(
             embed=success_embed("Scan-Status", body),
@@ -356,7 +365,7 @@ class ScannerCog(commands.Cog):
 
     @app_commands.command(
         name="scanpremium",
-        description="Scan Premium kaufen (14 oder 30 Tage → 15 Scans/Tag)",
+        description="Scan Premium kaufen (14 Tage limitiert / 30 Tage unbegrenzt)",
     )
     async def scanpremium(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
@@ -364,19 +373,31 @@ class ScannerCog(commands.Cog):
                 embed=error_embed("Nur auf dem Server"), ephemeral=True
             )
             return
+        prices = await get_scan_prices(self.bot, interaction.guild.id)
         quota = await get_scan_quota(
             self.bot, interaction.guild.id, interaction.user.id
         )
         extra = ""
         if quota["premium"]:
-            extra = f"\n\nDein Premium läuft bis `{quota['expires_at']}` (Kauf verlängert)."
+            tier = (
+                "unbegrenzt"
+                if quota.get("unlimited")
+                else f"{config.SCAN_PREMIUM_DAILY}/Tag"
+            )
+            extra = (
+                f"\n\nDein Premium läuft bis `{quota['expires_at']}` "
+                f"({tier}; Kauf verlängert)."
+            )
         await interaction.response.send_message(
             embed=success_embed(
                 "Scan Premium",
-                f"Free: **{config.SCAN_FREE_DAILY}/Tag** · "
-                f"Premium: **{config.SCAN_PREMIUM_DAILY}/Tag**\n\n"
-                f"• **14 Tage** — {format_price(config.SCAN_PREMIUM_14_PRICE)}\n"
-                f"• **30 Tage** — {format_price(config.SCAN_PREMIUM_30_PRICE)}"
+                f"Free: **{config.SCAN_FREE_DAILY}/Tag**\n"
+                f"• **14 Tage** — {format_price(prices['price_14'])} "
+                f"oder **{format_credits(prices['credits_14'])} Credits** "
+                f"→ **{config.SCAN_PREMIUM_DAILY}/Tag**\n"
+                f"• **30 Tage** — {format_price(prices['price_30'])} "
+                f"oder **{format_credits(prices['credits_30'])} Credits** "
+                f"→ **unbegrenzte Scans**"
                 f"{extra}",
             ),
             view=ScanPremiumBuyView(self.bot),
@@ -467,7 +488,113 @@ class ScannerCog(commands.Cog):
         await interaction.response.send_message(
             embed=success_embed(
                 "Premium vergeben",
-                f"{user.mention}: **+{days} Tage**\nLäuft bis `{expires}`{role_note}",
+                f"{user.mention}: **+{days} Tage** "
+                f"({premium_scan_label(days=int(days))})\n"
+                f"Läuft bis `{expires}`{role_note}",
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="scanprices",
+        description="Scan-Premium Preise anzeigen oder setzen (Staff)",
+    )
+    @app_commands.describe(
+        price_14="14-Tage Preis in Shop-Währung (z.B. 500000)",
+        price_30="30-Tage Preis in Shop-Währung (z.B. 900000)",
+        credits_14="14-Tage Preis in Credits (optional)",
+        credits_30="30-Tage Preis in Credits (optional)",
+        reset="Auf .env/Config-Defaults zurücksetzen",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def scanprices(
+        self,
+        interaction: discord.Interaction,
+        price_14: float | None = None,
+        price_30: float | None = None,
+        credits_14: float | None = None,
+        credits_30: float | None = None,
+        reset: bool = False,
+    ) -> None:
+        assert interaction.guild is not None
+        if not await is_staff(self.bot, interaction):
+            await interaction.response.send_message(
+                embed=error_embed("Keine Berechtigung"), ephemeral=True
+            )
+            return
+
+        if reset:
+            await self.bot.db.update_guild_settings(
+                interaction.guild.id,
+                scan_price_14=None,
+                scan_price_30=None,
+                scan_credits_14=None,
+                scan_credits_30=None,
+            )
+        else:
+            fields: dict = {}
+            if price_14 is not None:
+                if price_14 < 0:
+                    await interaction.response.send_message(
+                        embed=error_embed("Preis muss ≥ 0 sein"), ephemeral=True
+                    )
+                    return
+                fields["scan_price_14"] = float(price_14)
+            if price_30 is not None:
+                if price_30 < 0:
+                    await interaction.response.send_message(
+                        embed=error_embed("Preis muss ≥ 0 sein"), ephemeral=True
+                    )
+                    return
+                fields["scan_price_30"] = float(price_30)
+            if credits_14 is not None:
+                if credits_14 < 0:
+                    await interaction.response.send_message(
+                        embed=error_embed("Credits müssen ≥ 0 sein"), ephemeral=True
+                    )
+                    return
+                fields["scan_credits_14"] = round(float(credits_14), 2)
+            if credits_30 is not None:
+                if credits_30 < 0:
+                    await interaction.response.send_message(
+                        embed=error_embed("Credits müssen ≥ 0 sein"), ephemeral=True
+                    )
+                    return
+                fields["scan_credits_30"] = round(float(credits_30), 2)
+            if fields:
+                await self.bot.db.update_guild_settings(
+                    interaction.guild.id, **fields
+                )
+
+        prices = await get_scan_prices(self.bot, interaction.guild.id)
+        settings = await self.bot.db.ensure_guild(interaction.guild.id)
+        src = (
+            "Server-Preise"
+            if any(
+                settings.get(k) is not None
+                for k in (
+                    "scan_price_14",
+                    "scan_price_30",
+                    "scan_credits_14",
+                    "scan_credits_30",
+                )
+            )
+            else "Config/.env Defaults"
+        )
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Scan-Premium Preise",
+                f"**Quelle:** {src}\n\n"
+                f"• **14 Tage** — {format_price(prices['price_14'])} "
+                f"/ **{format_credits(prices['credits_14'])} Credits** "
+                f"→ {config.SCAN_PREMIUM_DAILY}/Tag\n"
+                f"• **30 Tage** — {format_price(prices['price_30'])} "
+                f"/ **{format_credits(prices['credits_30'])} Credits** "
+                f"→ unbegrenzt\n\n"
+                "Setzen: `/scanprices price_14:… price_30:…` "
+                "(optional `credits_14` / `credits_30`).\n"
+                "Zurücksetzen: `/scanprices reset:True`\n"
+                "Danach `/scanpanel` neu posten, damit das Panel die Preise zeigt.",
             ),
             ephemeral=True,
         )

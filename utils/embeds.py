@@ -46,13 +46,38 @@ def cart_embed(items: list[dict], total: float) -> discord.Embed:
         embed.set_footer(text=PAYMENT_NOTICE)
         return embed
     lines = []
+    pack_qty = 0
     for row in items:
         sub = float(row["price"]) * int(row["qty"])
+        pack_qty += int(row["qty"])
         lines.append(
             f"- **{row['name']}** x {row['qty']} - {format_price(sub)}"
         )
     embed.description = "\n".join(lines)
-    embed.add_field(name="Gesamtpreis", value=format_price(total), inline=False)
+    from utils.volume_discount import apply_volume_discount
+
+    new_total, savings, pct = apply_volume_discount(total, pack_qty)
+    if savings > 0:
+        embed.add_field(
+            name="Mengenrabatt",
+            value=(
+                f"**{pack_qty}** Packs → **−{pct:g} %** "
+                f"(−{format_price(savings)})\n"
+                f"Statt {format_price(total)} → **{format_price(new_total)}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Gesamtpreis", value=format_price(new_total), inline=False
+        )
+    else:
+        embed.add_field(name="Gesamtpreis", value=format_price(total), inline=False)
+        if pack_qty < 5:
+            embed.add_field(
+                name="Tipp",
+                value=f"Noch **{5 - pack_qty}** Pack(s) bis 5 % Mengenrabatt.",
+                inline=False,
+            )
     embed.set_footer(text=PAYMENT_NOTICE)
     return embed
 
@@ -105,14 +130,35 @@ def payment_info_embed(order: dict, settings: dict) -> discord.Embed:
         value=order_ref(order),
         inline=True,
     )
-    if order.get("discount_code") and float(order.get("discount_amount") or 0) > 0:
+    if float(order.get("volume_discount_amount") or 0) > 0:
+        pct = float(order.get("volume_discount_pct") or 0)
+        qty = int(order.get("pack_qty") or 0)
         orig = float(order.get("original_total") or 0)
+        embed.add_field(
+            name="Mengenrabatt",
+            value=(
+                f"**{qty}** Packs → **−{pct:g} %** "
+                f"(−{format_price(float(order['volume_discount_amount']))})"
+                + (f"\nWarenwert: {format_price(orig)}" if orig else "")
+            ),
+            inline=False,
+        )
+    if order.get("discount_code") and float(order.get("discount_amount") or 0) > 0:
+        vol = float(order.get("volume_discount_amount") or 0)
+        orig = float(order.get("original_total") or 0)
+        before_code = round(orig - vol, 2) if orig and vol else (
+            orig if orig else 0
+        )
         embed.add_field(
             name="Rabatt / Creator-Code",
             value=(
                 f"`{order['discount_code']}` — "
                 f"−{format_price(float(order['discount_amount']))}"
-                + (f" (vorher {format_price(orig)})" if orig else "")
+                + (
+                    f" (nach Mengenrabatt {format_price(before_code)})"
+                    if before_code
+                    else ""
+                )
             ),
             inline=False,
         )
@@ -148,13 +194,22 @@ def order_cart_panel_embed(
         value=format_price(float(order["total"])),
         inline=True,
     )
+    if float(order.get("volume_discount_amount") or 0) > 0:
+        embed.add_field(
+            name="Mengenrabatt",
+            value=(
+                f"{int(order.get('pack_qty') or 0)} Packs · "
+                f"−{float(order.get('volume_discount_pct') or 0):g} % "
+                f"(−{format_price(float(order['volume_discount_amount']))})"
+            ),
+            inline=True,
+        )
     if order.get("discount_code") and float(order.get("discount_amount") or 0) > 0:
-        orig = float(order.get("original_total") or 0)
         embed.add_field(
             name="Code",
             value=(
-                f"`{order['discount_code']}` (−{format_price(float(order['discount_amount']))})"
-                + (f"\nVorher: ~~{format_price(orig)}~~" if orig else "")
+                f"`{order['discount_code']}` "
+                f"(−{format_price(float(order['discount_amount']))})"
             ),
             inline=True,
         )
@@ -162,6 +217,15 @@ def order_cart_panel_embed(
         from utils.roles import collect_autorole_mentions
 
         role_lines = collect_autorole_mentions(guild, items)
+        pack_qty = int(order.get("pack_qty") or 0)
+        if pack_qty <= 0:
+            pack_qty = sum(int(i.get("qty") or 1) for i in items)
+        from utils.volume_discount import volume_role_ids_for_qty
+
+        for rid, label in volume_role_ids_for_qty(settings, pack_qty):
+            role = guild.get_role(rid)
+            if role:
+                role_lines.append(f"- {label}: {role.mention}")
         customer_id = settings.get("customer_role_id")
         if customer_id:
             cr = guild.get_role(int(customer_id))

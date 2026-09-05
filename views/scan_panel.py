@@ -18,19 +18,21 @@ from utils.credits import format_credits
 from utils.embeds import base_embed, error_embed, format_price, success_embed, warn_embed
 from utils.scan_limits import consume_scan_quota, get_scan_quota
 from utils.scan_premium_role import post_scan_log, sync_scan_premium_role
+from utils.scan_prices import get_scan_prices, premium_scan_label
 from views.ticket_views import is_staff
 
 if TYPE_CHECKING:
     from bot import ShopBot
 
 
-def build_scan_panel_embed() -> discord.Embed:
+async def build_scan_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embed:
+    prices = await get_scan_prices(bot, guild_id)
     embed = base_embed(
         "File Scanner",
         "Scanne **ZIP / RAR / JAR** auf RATs, Stealer und verdächtige Dateien.\n\n"
         f"• Free: **{config.SCAN_FREE_DAILY} Scan/Tag**\n"
-        f"• Premium: **{config.SCAN_PREMIUM_DAILY} Scans/Tag** "
-        f"(14 oder 30 Tage)\n\n"
+        f"• 14 Tage Premium: **{config.SCAN_PREMIUM_DAILY} Scans/Tag**\n"
+        f"• 30 Tage Premium: **unbegrenzte Scans**\n\n"
         "**Datei hier droppen** — ohne DM, direkt im Channel\n"
         "**URL scannen** — direkten Download-Link eingeben\n"
         "Ergebnis privat (ephemeral / DM). Erfolgreiche Scans landen im Log-Channel.\n\n"
@@ -39,10 +41,12 @@ def build_scan_panel_embed() -> discord.Embed:
     embed.add_field(
         name="Premium",
         value=(
-            f"14 Tage — {format_price(config.SCAN_PREMIUM_14_PRICE)} "
-            f"oder **{format_credits(config.SCAN_PREMIUM_14_CREDITS)} Credits**\n"
-            f"30 Tage — {format_price(config.SCAN_PREMIUM_30_PRICE)} "
-            f"oder **{format_credits(config.SCAN_PREMIUM_30_CREDITS)} Credits**"
+            f"14 Tage — {format_price(prices['price_14'])} "
+            f"oder **{format_credits(prices['credits_14'])} Credits** "
+            f"({config.SCAN_PREMIUM_DAILY}/Tag)\n"
+            f"30 Tage — {format_price(prices['price_30'])} "
+            f"oder **{format_credits(prices['credits_30'])} Credits** "
+            f"(unbegrenzt)"
         ),
         inline=False,
     )
@@ -530,9 +534,16 @@ class ScanPanelView(discord.ui.View):
         )
         if staff:
             body = f"**Staff** — kein Limit.\nHeute genutzt: **{quota['used']}**"
+        elif quota["premium"] and quota.get("unlimited"):
+            body = (
+                f"**Premium** bis `{quota['expires_at']}`\n"
+                f"**Unbegrenzte Scans**\n"
+                f"Heute genutzt: **{quota['used']}**"
+            )
         elif quota["premium"]:
             body = (
                 f"**Premium** bis `{quota['expires_at']}`\n"
+                f"**{config.SCAN_PREMIUM_DAILY} Scans/Tag**\n"
                 f"Heute: **{quota['used']}/{quota['limit']}** "
                 f"(noch {quota['remaining']})"
             )
@@ -562,10 +573,16 @@ class ScanPanelView(discord.ui.View):
                 embed=error_embed("Nur auf dem Server"), ephemeral=True
             )
             return
+        prices = await get_scan_prices(self.bot, interaction.guild.id)
         await interaction.response.send_message(
             embed=success_embed(
                 "Scan Premium",
-                f"**{config.SCAN_PREMIUM_DAILY} Scans/Tag**\n\n"
+                f"• **14 Tage** — {format_price(prices['price_14'])} / "
+                f"{format_credits(prices['credits_14'])} Credits → "
+                f"**{config.SCAN_PREMIUM_DAILY}/Tag**\n"
+                f"• **30 Tage** — {format_price(prices['price_30'])} / "
+                f"{format_credits(prices['credits_30'])} Credits → "
+                f"**unbegrenzt**\n\n"
                 "Wähle Dauer und Zahlungsart:",
             ),
             view=ScanPremiumPanelBuyView(self.bot),
@@ -638,11 +655,8 @@ async def buy_scan_premium_with_credits(
         )
         return
     days = 14 if days not in (14, 30) else days
-    need = (
-        config.SCAN_PREMIUM_14_CREDITS
-        if days == 14
-        else config.SCAN_PREMIUM_30_CREDITS
-    )
+    prices = await get_scan_prices(bot, interaction.guild.id)
+    need = prices["credits_14"] if days == 14 else prices["credits_30"]
     need = round(float(need), 2)
     bal = await bot.db.get_credits(interaction.guild.id, interaction.user.id)
     if bal < need:
@@ -696,7 +710,7 @@ async def buy_scan_premium_with_credits(
             f"**{days} Tage** Scan Premium (per Credits)\n"
             f"−**{format_credits(need)}** Credits · Rest: **{format_credits(new_bal)}**\n"
             f"Aktiv bis `{expires}` · "
-            f"**{config.SCAN_PREMIUM_DAILY} Scans/Tag**{role_note}",
+            f"**{premium_scan_label(days=days)}**{role_note}",
         ),
         ephemeral=True,
     )
@@ -710,7 +724,7 @@ async def post_or_refresh_scan_panel(
     force_new: bool = False,
 ) -> discord.Message:
     """Posted oder editiert das Scan-Panel (kein Auto-Neu-Post außer force_new)."""
-    embed = build_scan_panel_embed()
+    embed = await build_scan_panel_embed(bot, guild.id)
     view = ScanPanelView(bot)
     row = await bot.db.get_scan_panel(guild.id)
     if (
@@ -756,7 +770,10 @@ async def refresh_scan_panel_on_ready(bot: ShopBot) -> list[str]:
             )
             continue
         try:
-            await msg.edit(embed=build_scan_panel_embed(), view=ScanPanelView(bot))
+            await msg.edit(
+                embed=await build_scan_panel_embed(bot, gid),
+                view=ScanPanelView(bot),
+            )
             lines.append(f"Scan-Panel aktualisiert in {channel.mention}")
         except discord.HTTPException as e:
             lines.append(f"Scan-Panel Edit fehlgeschlagen: {e}")

@@ -209,6 +209,67 @@ class AnnounceCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="volumeroles",
+        description="Mengen-Rollen ab 10 / 15 / 20 Packs setzen",
+    )
+    @app_commands.describe(
+        role_10="Rolle ab 10 Packs",
+        role_15="Rolle ab 15 Packs",
+        role_20="Rolle ab 20 Packs",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def volumeroles(
+        self,
+        interaction: discord.Interaction,
+        role_10: discord.Role | None = None,
+        role_15: discord.Role | None = None,
+        role_20: discord.Role | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        fields: dict = {}
+        lines: list[str] = []
+        if role_10 is not None:
+            fields["volume_role_10_id"] = role_10.id
+            lines.append(f"**10+ Packs:** {role_10.mention}")
+        if role_15 is not None:
+            fields["volume_role_15_id"] = role_15.id
+            lines.append(f"**15+ Packs:** {role_15.mention}")
+        if role_20 is not None:
+            fields["volume_role_20_id"] = role_20.id
+            lines.append(f"**20+ Packs:** {role_20.mention}")
+        if not fields:
+            from utils.volume_discount import format_volume_tiers_help
+
+            settings = await self.bot.db.ensure_guild(interaction.guild.id)
+            cur = []
+            for key, label in (
+                ("volume_role_10_id", "10+"),
+                ("volume_role_15_id", "15+"),
+                ("volume_role_20_id", "20+"),
+            ):
+                rid = settings.get(key)
+                role = interaction.guild.get_role(int(rid)) if rid else None
+                cur.append(
+                    f"**{label}:** {role.mention if role else '_nicht gesetzt_'}"
+                )
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Mengen-Rollen / Rabatt",
+                    format_volume_tiers_help()
+                    + "\n\n"
+                    + "\n".join(cur)
+                    + "\n\nZum Setzen: `/volumeroles role_10:@… role_15:@… role_20:@…`",
+                ),
+                ephemeral=True,
+            )
+            return
+        await self.bot.db.update_guild_settings(interaction.guild.id, **fields)
+        await interaction.response.send_message(
+            embed=success_embed("Mengen-Rollen gespeichert", "\n".join(lines)),
+            ephemeral=True,
+        )
+
 
 async def setup(bot: ShopBot) -> None:
     await bot.add_cog(AnnounceCog(bot))

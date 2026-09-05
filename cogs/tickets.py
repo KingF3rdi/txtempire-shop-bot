@@ -226,12 +226,12 @@ async def create_order_ticket(
             "gutgeschrieben."
         )
     elif order_kind == "scan_premium":
-        import config as _cfg
+        from utils.scan_prices import premium_scan_label
 
         days = int(float(credits_amount or 14))
         credits_hint = (
             f"\n⭐ **Scan Premium ({days} Tage)** — nach Bestätigung "
-            f"**{_cfg.SCAN_PREMIUM_DAILY} Scans/Tag**."
+            f"**{premium_scan_label(days=days)}**."
         )
     elif show_fast_buy:
         from utils.credits import credits_needed_for_total, format_credits
@@ -560,6 +560,126 @@ class TicketsCog(commands.Cog):
             embed=success_embed(
                 "Partner-Panel",
                 f"Panel in {target.mention}: {msg.jump_url}",
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="texturepackpanel",
+        description="Texturepack Ankauf/Tausch-Panel posten oder aktualisieren",
+    )
+    @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def texturepackpanel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
+            from utils.embeds import error_embed
+
+            await interaction.response.send_message(
+                embed=error_embed("Kein Channel"), ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        from views.service_ticket_panel import post_or_refresh_service_panel
+
+        msg = await post_or_refresh_service_panel(
+            self.bot, interaction.guild, target, "texturepack"
+        )
+        settings = await self.bot.db.ensure_guild(interaction.guild.id)
+        role_id = settings.get("texturepack_role_id")
+        role = (
+            interaction.guild.get_role(int(role_id)) if role_id else None
+        )
+        role_note = (
+            f"\nExklusiv-Rolle: {role.mention}"
+            if role
+            else "\n⚠️ Noch keine Exklusiv-Rolle — setze mit `/texturepackrole`."
+        )
+        await interaction.followup.send(
+            embed=success_embed(
+                "Texturepack-Panel",
+                f"Panel in {target.mention}: {msg.jump_url}{role_note}",
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="texturepackrole",
+        description="Exklusiv-Rolle für Texturepack Ankauf/Tausch setzen",
+    )
+    @app_commands.describe(
+        role="Nur diese Rolle darf Ankauf/Tausch öffnen (leer = anzeigen)",
+        clear="Rolle entfernen (Feature gesperrt bis neu gesetzt)",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def texturepackrole(
+        self,
+        interaction: discord.Interaction,
+        role: discord.Role | None = None,
+        clear: bool = False,
+    ) -> None:
+        assert interaction.guild is not None
+        if clear:
+            await self.bot.db.update_guild_settings(
+                interaction.guild.id, texturepack_role_id=None
+            )
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Texturepack-Rolle",
+                    "Exklusiv-Rolle entfernt. Ankauf/Tausch ist gesperrt, "
+                    "bis wieder eine Rolle gesetzt wird.",
+                ),
+                ephemeral=True,
+            )
+            return
+        if role is None:
+            settings = await self.bot.db.ensure_guild(interaction.guild.id)
+            rid = settings.get("texturepack_role_id")
+            current = interaction.guild.get_role(int(rid)) if rid else None
+            body = (
+                f"Aktuell: {current.mention}"
+                if current
+                else "Aktuell: **nicht gesetzt**"
+            )
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Texturepack-Rolle",
+                    f"{body}\n\nSetzen: `/texturepackrole role:@…`",
+                ),
+                ephemeral=True,
+            )
+            return
+        await self.bot.db.update_guild_settings(
+            interaction.guild.id, texturepack_role_id=role.id
+        )
+        # Panel-Text aktualisieren falls vorhanden
+        from views.service_ticket_panel import post_or_refresh_service_panel
+
+        row = await self.bot.db.get_service_panel(
+            interaction.guild.id, "texturepack"
+        )
+        panel_note = ""
+        if row and row.get("channel_id") and row.get("message_id"):
+            ch = interaction.guild.get_channel(int(row["channel_id"]))
+            if isinstance(ch, discord.TextChannel):
+                try:
+                    await post_or_refresh_service_panel(
+                        self.bot, interaction.guild, ch, "texturepack"
+                    )
+                    panel_note = f"\nPanel in {ch.mention} aktualisiert."
+                except Exception:
+                    panel_note = "\nPanel konnte nicht auto-aktualisiert werden."
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Texturepack-Rolle",
+                f"Nur {role.mention} darf Ankauf/Tausch öffnen.{panel_note}",
             ),
             ephemeral=True,
         )

@@ -47,3 +47,11 @@ SCAN_PREMIUM_30_CREDITS = (
 BOOST_PACKS_TIER1 = int(os.getenv("BOOST_PACKS_TIER1", "5") or "5")
 BOOST_PACKS_TIER2 = int(os.getenv("BOOST_PACKS_TIER2", "15") or "15")
 
+# Payback / Daily XP
+PAYBACK_DAILY_XP = int(os.getenv("PAYBACK_DAILY_XP", "10") or "10")
+PAYBACK_REWARD_XP = int(os.getenv("PAYBACK_REWARD_XP", "100") or "100")
+# 500k Shop-Guthaben = 5 Credits (1 Credit = 100k)
+PAYBACK_REWARD_CURRENCY = float(
+    os.getenv("PAYBACK_REWARD_CURRENCY", "500000") or "500000"
+)
+

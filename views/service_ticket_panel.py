@@ -11,18 +11,32 @@ from views.ticket_views import is_staff
 if TYPE_CHECKING:
     from bot import ShopBot
 
-PanelType = Literal["support", "application", "partner"]
+PanelType = Literal["support", "application", "partner", "texturepack"]
+TicketType = Literal[
+    "support",
+    "application",
+    "partner",
+    "texture_ankauf",
+    "texture_tausch",
+]
+
+_SERVICE_PANEL_TYPES = frozenset({"support", "application", "partner", "texturepack"})
 
 
-def _panel_title(panel_type: PanelType) -> str:
+def _panel_title(panel_type: str) -> str:
     return {
         "support": "Support",
         "application": "Media-Creator",
         "partner": "Partner",
+        "texturepack": "Texturepack",
+        "texture_ankauf": "Texturepack Ankauf",
+        "texture_tausch": "Texturepack Tausch",
     }.get(panel_type, panel_type)
 
 
-def build_service_panel_embed(panel_type: PanelType) -> discord.Embed:
+def build_service_panel_embed(
+    panel_type: PanelType, *, role_mention: str | None = None
+) -> discord.Embed:
     if panel_type == "support":
         return base_embed(
             "🛟 Support",
@@ -38,6 +52,20 @@ def build_service_panel_embed(panel_type: PanelType) -> discord.Embed:
             "und euer Angebot an.\n"
             "Wir melden uns im Ticket.",
         )
+    if panel_type == "texturepack":
+        role_line = (
+            f"\n**Nur mit Rolle {role_mention}** zugänglich.\n"
+            if role_mention
+            else "\n⚠️ Exklusiv-Rolle noch nicht gesetzt (`/texturepackrole`).\n"
+        )
+        return base_embed(
+            "📦 Texturepack Ankauf & Tausch",
+            "Du willst Texturepacks **an den Server verkaufen** oder **tauschen**?\n\n"
+            "• **Ankauf** — Verkauf an den Server (Preis-Vorschlag)\n"
+            "• **Tausch** — Gegen Texturepacks / Guthaben / anderes\n"
+            f"{role_line}\n"
+            "Im Formular: Pack-Namen, Anzahl, vorgestellter Preis/Tausch.",
+        )
     return base_embed(
         "🎬 Media / Creator Bewerbung",
         "Du erstellst Content und möchtest **Media / Creator** bei uns werden?\n\n"
@@ -46,6 +74,44 @@ def build_service_panel_embed(panel_type: PanelType) -> discord.Embed:
         "Wir melden uns im Ticket.",
     )
 
+
+async def _texturepack_role_gate(
+    bot: ShopBot, interaction: discord.Interaction
+) -> bool:
+    """True = darf fortfahren. Antwortet ephemeral bei Ablehnung."""
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            embed=error_embed("Nur auf dem Server"), ephemeral=True
+        )
+        return False
+    if await is_staff(bot, interaction):
+        return True
+    settings = await bot.db.ensure_guild(interaction.guild.id)
+    role_id = settings.get("texturepack_role_id")
+    if not role_id:
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Nicht konfiguriert",
+                "Die Exklusiv-Rolle für Texturepack ist noch nicht gesetzt. "
+                "Staff: `/texturepackrole`.",
+            ),
+            ephemeral=True,
+        )
+        return False
+    role = interaction.guild.get_role(int(role_id))
+    member = interaction.user
+    if not isinstance(member, discord.Member) or role is None or role not in member.roles:
+        mention = role.mention if role else f"`{role_id}`"
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Keine Berechtigung",
+                f"Nur Mitglieder mit der Rolle {mention} können "
+                "Texturepack Ankauf/Tausch öffnen.",
+            ),
+            ephemeral=True,
+        )
+        return False
+    return True
 
 
 class ServiceCloseView(discord.ui.View):
@@ -275,11 +341,108 @@ class PartnerPanelView(discord.ui.View):
         await interaction.response.send_modal(PartnerModal(self.bot))
 
 
+class TexturepackModal(discord.ui.Modal):
+    pack_names = discord.ui.TextInput(
+        label="Name der Packs",
+        style=discord.TextStyle.paragraph,
+        placeholder="z.B. Faithful 32x, PvP Pack XYZ…",
+        max_length=500,
+        required=True,
+    )
+    quantity = discord.ui.TextInput(
+        label="Anzahl",
+        placeholder="z.B. 3",
+        max_length=40,
+        required=True,
+    )
+    offer = discord.ui.TextInput(
+        label="Vorgestellter Preis / Tausch",
+        style=discord.TextStyle.paragraph,
+        placeholder="z.B. 800k Guthaben · oder Tausch gegen …",
+        max_length=500,
+        required=True,
+    )
+
+    def __init__(self, bot: ShopBot, *, kind: Literal["ankauf", "tausch"]) -> None:
+        title = (
+            "Texturepack Ankauf"
+            if kind == "ankauf"
+            else "Texturepack Tausch"
+        )
+        super().__init__(title=title)
+        self.bot = bot
+        self.kind = kind
+        if kind == "ankauf":
+            self.offer.label = "Vorgestellter Ankaufspreis"
+            self.offer.placeholder = "z.B. 500k Guthaben / 5 Credits"
+        else:
+            self.offer.label = "Vorgestellter Tausch"
+            self.offer.placeholder = "z.B. gegen Pack X · oder 300k + Pack Y"
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _texturepack_role_gate(self.bot, interaction):
+            return
+        kind_label = "Ankauf (Verkauf an Server)" if self.kind == "ankauf" else "Tausch"
+        body = (
+            f"**Art:** {kind_label}\n"
+            f"**Pack-Namen:**\n{self.pack_names.value}\n\n"
+            f"**Anzahl:** {self.quantity.value}\n\n"
+            f"**Vorschlag:**\n{self.offer.value}"
+        )
+        ticket_type: TicketType = (
+            "texture_ankauf" if self.kind == "ankauf" else "texture_tausch"
+        )
+        await create_service_ticket_channel(
+            self.bot,
+            interaction,
+            ticket_type=ticket_type,
+            subject=body,
+        )
+
+
+class TexturepackPanelView(discord.ui.View):
+    def __init__(self, bot: ShopBot) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(
+        label="Ankauf",
+        style=discord.ButtonStyle.success,
+        custom_id="servicepanel:texture_ankauf",
+        emoji="💰",
+        row=0,
+    )
+    async def open_ankauf(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if not await _texturepack_role_gate(self.bot, interaction):
+            return
+        await interaction.response.send_modal(
+            TexturepackModal(self.bot, kind="ankauf")
+        )
+
+    @discord.ui.button(
+        label="Tausch",
+        style=discord.ButtonStyle.primary,
+        custom_id="servicepanel:texture_tausch",
+        emoji="🔄",
+        row=0,
+    )
+    async def open_tausch(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if not await _texturepack_role_gate(self.bot, interaction):
+            return
+        await interaction.response.send_modal(
+            TexturepackModal(self.bot, kind="tausch")
+        )
+
+
 async def create_service_ticket_channel(
     bot: ShopBot,
     interaction: discord.Interaction,
     *,
-    ticket_type: PanelType,
+    ticket_type: str,
     subject: str = "",
 ) -> None:
     if interaction.guild is None:
@@ -365,6 +528,8 @@ async def create_service_ticket_channel(
         "support": "support",
         "application": "creator",
         "partner": "partner",
+        "texture_ankauf": "tp-ankauf",
+        "texture_tausch": "tp-tausch",
     }.get(ticket_type, "ticket")
     safe = "".join(
         c if c.isalnum() or c in "-_" else "-"
@@ -394,6 +559,8 @@ async def create_service_ticket_channel(
         "support": "Beschreibe dein Anliegen — Staff meldet sich.",
         "application": "Media-/Creator-Bewerbung unten. Staff prüft sie.",
         "partner": "Partnerschafts-Anfrage unten. Staff meldet sich.",
+        "texture_ankauf": "Ankauf-Anfrage unten. Staff prüft Preis & Packs.",
+        "texture_tausch": "Tausch-Anfrage unten. Staff prüft den Vorschlag.",
     }.get(ticket_type, "Staff meldet sich.")
     embed = success_embed(
         f"{title}-Ticket #{ticket_id}",
@@ -406,6 +573,8 @@ async def create_service_ticket_channel(
         label = {
             "application": "Media/Creator Angaben",
             "partner": "Partner-Angaben",
+            "texture_ankauf": "Ankauf-Angaben",
+            "texture_tausch": "Tausch-Angaben",
         }.get(ticket_type, "Angaben")
         await channel.send(embed=base_embed(label, subject[:3900]))
 
@@ -423,7 +592,20 @@ def _view_for(bot: ShopBot, panel_type: PanelType) -> discord.ui.View:
         return SupportPanelView(bot)
     if panel_type == "partner":
         return PartnerPanelView(bot)
+    if panel_type == "texturepack":
+        return TexturepackPanelView(bot)
     return ApplicationPanelView(bot)
+
+
+async def _role_mention_for_texturepack(
+    bot: ShopBot, guild: discord.Guild
+) -> str | None:
+    settings = await bot.db.ensure_guild(guild.id)
+    role_id = settings.get("texturepack_role_id")
+    if not role_id:
+        return None
+    role = guild.get_role(int(role_id))
+    return role.mention if role else f"`{role_id}`"
 
 
 async def post_or_refresh_service_panel(
@@ -434,7 +616,10 @@ async def post_or_refresh_service_panel(
     *,
     force_new: bool = False,
 ) -> discord.Message:
-    embed = build_service_panel_embed(panel_type)
+    role_mention = None
+    if panel_type == "texturepack":
+        role_mention = await _role_mention_for_texturepack(bot, guild)
+    embed = build_service_panel_embed(panel_type, role_mention=role_mention)
     view = _view_for(bot, panel_type)
     row = await bot.db.get_service_panel(guild.id, panel_type)
     if (
@@ -464,15 +649,20 @@ async def refresh_service_panels_on_ready(bot: ShopBot) -> list[str]:
         if guild is None:
             continue
         panel_type = str(row["panel_type"])
-        if panel_type not in ("support", "application", "partner"):
+        if panel_type not in _SERVICE_PANEL_TYPES:
             continue
         channel = guild.get_channel(int(row["channel_id"]))
         if not isinstance(channel, discord.TextChannel):
             continue
         try:
             msg = await channel.fetch_message(int(row["message_id"]))
+            role_mention = None
+            if panel_type == "texturepack":
+                role_mention = await _role_mention_for_texturepack(bot, guild)
             await msg.edit(
-                embed=build_service_panel_embed(panel_type),  # type: ignore[arg-type]
+                embed=build_service_panel_embed(
+                    panel_type, role_mention=role_mention  # type: ignore[arg-type]
+                ),
                 view=_view_for(bot, panel_type),  # type: ignore[arg-type]
             )
             lines.append(f"{panel_type}-Panel aktualisiert in {channel.mention}")

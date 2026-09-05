@@ -13,7 +13,7 @@ async def get_scan_quota(
 ) -> dict:
     """
     Returns:
-      limit, used, remaining, premium, expires_at
+      limit, used, remaining, premium, unlimited, expires_at
     """
     if is_staff:
         used = await bot.db.get_scan_usage_today(guild_id, user_id)
@@ -22,20 +22,32 @@ async def get_scan_quota(
             "used": used,
             "remaining": 999_999,
             "premium": True,
+            "unlimited": True,
             "expires_at": None,
             "staff": True,
         }
 
     premium = await bot.db.is_scan_premium(guild_id, user_id)
     expires = await bot.db.get_scan_premium_expires(guild_id, user_id) if premium else None
-    limit = config.SCAN_PREMIUM_DAILY if premium else config.SCAN_FREE_DAILY
+    unlimited = False
+    if premium:
+        unlimited = await bot.db.is_scan_premium_unlimited(guild_id, user_id)
+
+    if unlimited:
+        limit = 999_999
+    elif premium:
+        limit = config.SCAN_PREMIUM_DAILY
+    else:
+        limit = config.SCAN_FREE_DAILY
+
     used = await bot.db.get_scan_usage_today(guild_id, user_id)
-    remaining = max(0, limit - used)
+    remaining = max(0, limit - used) if not unlimited else 999_999
     return {
         "limit": limit,
         "used": used,
         "remaining": remaining,
         "premium": premium,
+        "unlimited": unlimited,
         "expires_at": expires,
         "staff": False,
     }
@@ -46,14 +58,21 @@ async def consume_scan_quota(
 ) -> dict:
     """Prüft Limit und zählt einen Scan. Wirft ValueError wenn aufgebraucht."""
     quota = await get_scan_quota(bot, guild_id, user_id, is_staff=is_staff)
-    if not is_staff and quota["remaining"] <= 0:
-        tier = "Premium (15/Tag)" if quota["premium"] else "Free (1/Tag)"
+    if not is_staff and not quota.get("unlimited") and quota["remaining"] <= 0:
+        if quota["premium"]:
+            tier = f"Premium ({config.SCAN_PREMIUM_DAILY}/Tag)"
+        else:
+            tier = f"Free ({config.SCAN_FREE_DAILY}/Tag)"
         raise ValueError(
             f"Tageslimit erreicht ({tier}). "
             f"Heute: **{quota['used']}/{quota['limit']}**.\n"
-            "Hol dir **Scan Premium** mit `/scanpremium` (14 oder 30 Tage)."
+            "30-Tage Premium = **unbegrenzte** Scans. "
+            "Sonst: `/scanpremium`."
         )
     used = await bot.db.increment_scan_usage(guild_id, user_id)
     quota["used"] = used
-    quota["remaining"] = max(0, quota["limit"] - used) if not is_staff else 999_999
+    if quota.get("unlimited") or is_staff:
+        quota["remaining"] = 999_999
+    else:
+        quota["remaining"] = max(0, quota["limit"] - used)
     return quota

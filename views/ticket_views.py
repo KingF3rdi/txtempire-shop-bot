@@ -311,7 +311,13 @@ async def action_confirm_order(
     delivery_info: dict = {}
     non_product = order_kind in ("credits", "scan_premium")
     if member and not non_product:
-        role_result = await grant_purchase_roles(member, settings, order_items)
+        role_result = await grant_purchase_roles(
+            member,
+            settings,
+            order_items,
+            pack_qty=int(order.get("pack_qty") or 0)
+            or sum(int(i.get("qty") or 1) for i in order_items),
+        )
         channel = interaction.channel
         if isinstance(channel, discord.TextChannel):
             delivery_info = await deliver_packs(
@@ -341,12 +347,12 @@ async def action_confirm_order(
             f"(Guthaben jetzt: **{format_credits(credits_balance or 0)}**)."
         )
     if scan_premium_until is not None:
-        import config as _cfg
+        from utils.scan_prices import premium_scan_label
 
         days = int(float(order.get("credits_amount") or 14))
         extra_parts.append(
             f"⭐ **Scan Premium** aktiv bis `{scan_premium_until}` "
-            f"({days} Tage · {_cfg.SCAN_PREMIUM_DAILY} Scans/Tag)."
+            f"({days} Tage · {premium_scan_label(days=days)})."
         )
     if paid_with_credits and charged is not None:
         bal = await bot.db.get_credits(int(order["guild_id"]), int(order["user_id"]))
@@ -764,12 +770,19 @@ class DiscountCodeModal(discord.ui.Modal, title="Rabatt / Creator Code"):
             )
             return
 
-        base_total = float(order["total"])
-        if order.get("discount_code_id") and order.get("original_total") is not None:
-            try:
-                base_total = float(order["original_total"])
-            except (TypeError, ValueError):
-                base_total = float(order["total"])
+        # Basis = Preis nach Mengenrabatt, vor Creator-Code
+        vol = float(order.get("volume_discount_amount") or 0)
+        if order.get("original_total") is not None:
+            merch = float(order["original_total"])
+            base_total = round(merch - vol, 2) if vol > 0 else merch
+        else:
+            base_total = float(order["total"])
+            if order.get("discount_code_id"):
+                # Fallback: Code schon drauf, ohne original_total
+                base_total = round(
+                    float(order["total"]) + float(order.get("discount_amount") or 0),
+                    2,
+                )
         try:
             new_total, savings = compute_code_discount(
                 base_total,

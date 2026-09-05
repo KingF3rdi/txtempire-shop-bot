@@ -7,20 +7,16 @@ async def grant_purchase_roles(
     member: discord.Member,
     settings: dict,
     order_items: list[dict],
+    *,
+    pack_qty: int | None = None,
 ) -> dict[str, list[str]]:
     """
-    Vergibt Customer-, Kategorie- und Item-Autoroles nach erfolgreichem Kauf.
-
-    Returns:
-        granted: vergebene Rollennamen
-        skipped: bereits vorhanden
-        failed: Fehlergründe
+    Vergibt Customer-, Kategorie-, Item- und Mengen-Autoroles nach Kauf.
     """
     granted: list[str] = []
     skipped: list[str] = []
     failed: list[str] = []
 
-    # role_id -> label for messages
     to_grant: dict[int, str] = {}
 
     customer_id = settings.get("customer_role_id")
@@ -35,6 +31,14 @@ async def grant_purchase_roles(
         if item.get("item_role_id"):
             rid = int(item["item_role_id"])
             to_grant[rid] = f"Item-Autorole ({name})"
+
+    if pack_qty is None:
+        pack_qty = sum(int(i.get("qty") or 1) for i in order_items)
+    if pack_qty > 0:
+        from utils.volume_discount import volume_role_ids_for_qty
+
+        for rid, label in volume_role_ids_for_qty(settings, pack_qty):
+            to_grant[rid] = label
 
     me = member.guild.me
     bot_top = me.top_role if me else None
@@ -70,6 +74,7 @@ async def grant_purchase_roles(
             failed.append(f"{label}: Fehler ({e.status})")
 
     return {"granted": granted, "skipped": skipped, "failed": failed}
+
 
 
 def collect_autorole_mentions(

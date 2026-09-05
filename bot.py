@@ -30,11 +30,12 @@ class ShopBot(commands.Bot):
             "cogs.credits",
             "cogs.discount_codes",
             "cogs.scanner",
+            "cogs.payback",
             "cogs.vouch",
             "cogs.announce",
             "cogs.boost",
             "cogs.giveaways",
-        ):
+            ):
             await self.load_extension(ext)
 
         # Persistent views
@@ -57,6 +58,7 @@ class ShopBot(commands.Bot):
             PartnerPanelView,
             ServiceCloseView,
             SupportPanelView,
+            TexturepackPanelView,
         )
         from views.boost_packs import BoostThanksView
 
@@ -64,6 +66,7 @@ class ShopBot(commands.Bot):
         self.add_view(SupportPanelView(self))
         self.add_view(ApplicationPanelView(self))
         self.add_view(PartnerPanelView(self))
+        self.add_view(TexturepackPanelView(self))
         self.add_view(ServiceCloseView(self))
         self.add_view(BoostThanksView(self))
         from views.giveaway_views import GiveawayEnterView

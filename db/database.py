@@ -55,7 +55,10 @@ class Database:
                 scan_premium_role_id INTEGER,
                 scan_log_channel_id INTEGER,
                 changelog_channel_id INTEGER,
-                msg_channel_id INTEGER
+                msg_channel_id INTEGER,
+                volume_role_10_id INTEGER,
+                volume_role_15_id INTEGER,
+                volume_role_20_id INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS categories (
@@ -173,6 +176,7 @@ class Database:
                 guild_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
                 expires_at TEXT NOT NULL,
+                unlimited INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (guild_id, user_id)
             );
 
@@ -279,6 +283,18 @@ class Database:
             ("guild_settings", "vouch_stats_message_id", "INTEGER"),
             ("orders", "vouch_rating", "INTEGER"),
             ("discount_codes", "kind", "TEXT NOT NULL DEFAULT 'rabatt'"),
+            ("orders", "volume_discount_pct", "REAL NOT NULL DEFAULT 0"),
+            ("orders", "volume_discount_amount", "REAL NOT NULL DEFAULT 0"),
+            ("orders", "pack_qty", "INTEGER NOT NULL DEFAULT 0"),
+            ("guild_settings", "volume_role_10_id", "INTEGER"),
+            ("guild_settings", "volume_role_15_id", "INTEGER"),
+            ("guild_settings", "volume_role_20_id", "INTEGER"),
+            ("scan_premium", "unlimited", "INTEGER NOT NULL DEFAULT 0"),
+            ("guild_settings", "scan_price_14", "REAL"),
+            ("guild_settings", "scan_price_30", "REAL"),
+            ("guild_settings", "scan_credits_14", "REAL"),
+            ("guild_settings", "scan_credits_30", "REAL"),
+            ("guild_settings", "texturepack_role_id", "INTEGER"),
         ):
             try:
                 await self.db.execute(
@@ -331,6 +347,7 @@ class Database:
                     guild_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
                     expires_at TEXT NOT NULL,
+                    unlimited INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (guild_id, user_id)
                 )
                 """
@@ -429,6 +446,22 @@ class Database:
                     claimed_item_ids TEXT NOT NULL DEFAULT '[]',
                     last_thanks_at TEXT,
                     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (guild_id, user_id)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS payback_xp (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    xp INTEGER NOT NULL DEFAULT 0,
+                    last_daily TEXT,
+                    rewards_claimed INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (guild_id, user_id)
                 )
                 """
@@ -1029,7 +1062,20 @@ class Database:
         credits_amount: float | None = None,
         source_panel_slot: int | None = None,
     ) -> int:
-        total = sum(float(r["price"]) * int(r["qty"]) for r in cart_rows)
+        kind = order_kind if order_kind in ("shop", "credits", "scan_premium") else "shop"
+        subtotal = sum(float(r["price"]) * int(r["qty"]) for r in cart_rows)
+        pack_qty = sum(int(r.get("qty") or 1) for r in cart_rows)
+        volume_pct = 0.0
+        volume_amt = 0.0
+        total = round(float(subtotal), 2)
+        original_total = None
+        if kind == "shop":
+            from utils.volume_discount import apply_volume_discount
+
+            total, volume_amt, volume_pct = apply_volume_discount(subtotal, pack_qty)
+            if volume_amt > 0:
+                original_total = round(float(subtotal), 2)
+
         mx = await self.fetchone(
             """
             SELECT COALESCE(MAX(order_number), 0) AS mx
@@ -1038,13 +1084,13 @@ class Database:
             (guild_id,),
         )
         order_number = int(mx["mx"]) + 1 if mx else 1
-        kind = order_kind if order_kind in ("shop", "credits", "scan_premium") else "shop"
         cur = await self.db.execute(
             """
             INSERT INTO orders
               (guild_id, user_id, ticket_channel_id, status, total, half_a, half_b,
-               order_number, credits_enabled, order_kind, credits_amount, source_panel_slot)
-            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+               order_number, credits_enabled, order_kind, credits_amount, source_panel_slot,
+               original_total, volume_discount_pct, volume_discount_amount, pack_qty)
+            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
@@ -1058,6 +1104,10 @@ class Database:
                 kind,
                 credits_amount,
                 source_panel_slot,
+                original_total,
+                float(volume_pct),
+                float(volume_amt),
+                int(pack_qty) if kind == "shop" else 0,
             ),
         )
         order_id = cur.lastrowid
@@ -1276,6 +1326,20 @@ class Database:
         new_total: float,
         discount_amount: float,
     ) -> None:
+        order = await self.get_order(order_id)
+        # original_total = Warenwert vor Rabatten (Mengenrabatt-Basis behalten)
+        keep_orig = None
+        if order and order.get("original_total") is not None:
+            keep_orig = float(order["original_total"])
+        elif order and float(order.get("volume_discount_amount") or 0) > 0:
+            keep_orig = round(
+                float(order["total"])
+                + float(order.get("volume_discount_amount") or 0)
+                + float(order.get("discount_amount") or 0),
+                2,
+            )
+        else:
+            keep_orig = float(original_total)
         await self.db.execute(
             """
             UPDATE orders SET
@@ -1290,7 +1354,7 @@ class Database:
             (
                 code.strip().upper(),
                 code_id,
-                float(original_total),
+                keep_orig,
                 float(new_total),
                 float(new_total),
                 float(discount_amount),
@@ -1303,20 +1367,37 @@ class Database:
         order = await self.get_order(order_id)
         if not order:
             return
-        restore = float(order.get("original_total") or order["total"])
-        await self.db.execute(
-            """
-            UPDATE orders SET
-              discount_code = NULL,
-              discount_code_id = NULL,
-              original_total = NULL,
-              total = ?,
-              half_a = ?,
-              discount_amount = 0
-            WHERE id = ?
-            """,
-            (restore, restore, order_id),
-        )
+        merch = float(order.get("original_total") or order["total"])
+        vol = float(order.get("volume_discount_amount") or 0)
+        restore = round(merch - vol, 2) if vol > 0 else merch
+        # original_total / volume_* behalten wenn Mengenrabatt aktiv
+        if vol > 0 and order.get("original_total") is not None:
+            await self.db.execute(
+                """
+                UPDATE orders SET
+                  discount_code = NULL,
+                  discount_code_id = NULL,
+                  total = ?,
+                  half_a = ?,
+                  discount_amount = 0
+                WHERE id = ?
+                """,
+                (restore, restore, order_id),
+            )
+        else:
+            await self.db.execute(
+                """
+                UPDATE orders SET
+                  discount_code = NULL,
+                  discount_code_id = NULL,
+                  original_total = NULL,
+                  total = ?,
+                  half_a = ?,
+                  discount_amount = 0
+                WHERE id = ?
+                """,
+                (restore, restore, order_id),
+            )
         await self.db.commit()
 
     # ── Scan premium & daily usage ──────────────────────────────────
@@ -1360,7 +1441,7 @@ class Database:
     async def extend_scan_premium(
         self, guild_id: int, user_id: int, days: int
     ) -> str:
-        """Verlängert Premium ab max(jetzt, aktuelles Ende)."""
+        """Verlängert Premium. 30-Tage-Käufe → unlimited Scans."""
         from datetime import datetime, timedelta, timezone
 
         now = datetime.now(timezone.utc)
@@ -1377,16 +1458,51 @@ class Database:
                 pass
         new_exp = start + timedelta(days=max(1, int(days)))
         stamp = new_exp.strftime("%Y-%m-%d %H:%M:%S")
+        # 30+ Tage = unlimited; sonst unlimited behalten wenn schon aktiv unlimited
+        want_unlimited = int(days) >= 30
+        existing = await self.fetchone(
+            """
+            SELECT unlimited FROM scan_premium
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        keep_unlim = False
+        if existing and int(existing["unlimited"] or 0) and current:
+            try:
+                exp = datetime.strptime(str(current), "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=timezone.utc
+                )
+                keep_unlim = exp > now
+            except ValueError:
+                pass
+        unlimited = 1 if (want_unlimited or keep_unlim) else 0
         await self.db.execute(
             """
-            INSERT INTO scan_premium (guild_id, user_id, expires_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(guild_id, user_id) DO UPDATE SET expires_at = excluded.expires_at
+            INSERT INTO scan_premium (guild_id, user_id, expires_at, unlimited)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+              expires_at = excluded.expires_at,
+              unlimited = excluded.unlimited
             """,
-            (guild_id, user_id, stamp),
+            (guild_id, user_id, stamp, unlimited),
         )
         await self.db.commit()
         return stamp
+
+    async def is_scan_premium_unlimited(
+        self, guild_id: int, user_id: int
+    ) -> bool:
+        if not await self.is_scan_premium(guild_id, user_id):
+            return False
+        row = await self.fetchone(
+            """
+            SELECT unlimited FROM scan_premium
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        return bool(row and int(row["unlimited"] or 0))
 
     async def get_scan_usage_today(self, guild_id: int, user_id: int) -> int:
         row = await self.fetchone(
@@ -1902,6 +2018,81 @@ class Database:
             (giveaway_id, user_id),
         )
         await self.db.commit()
+
+    # ── Payback XP ──────────────────────────────────────────────────
+
+    async def get_payback(
+        self, guild_id: int, user_id: int
+    ) -> dict[str, Any]:
+        row = await self.fetchone(
+            """
+            SELECT * FROM payback_xp
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        if row:
+            return dict(row)
+        return {
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "xp": 0,
+            "last_daily": None,
+            "rewards_claimed": 0,
+        }
+
+    async def claim_daily_xp(
+        self, guild_id: int, user_id: int, *, xp_gain: int
+    ) -> dict[str, Any]:
+        """Claim daily XP once per UTC day. Raises ValueError if already claimed."""
+        import config as _cfg
+        from utils.credits import currency_to_credits
+
+        day = self._utc_day()
+        row = await self.get_payback(guild_id, user_id)
+        if row.get("last_daily") == day:
+            raise ValueError(
+                f"Daily schon abgeholt (UTC-Tag `{day}`). Komm morgen wieder."
+            )
+        xp = int(row.get("xp") or 0) + int(xp_gain)
+        rewards = 0
+        credits_granted = 0.0
+        threshold = int(_cfg.PAYBACK_REWARD_XP)
+        reward_currency = float(_cfg.PAYBACK_REWARD_CURRENCY)
+        reward_credits = currency_to_credits(reward_currency)
+        while xp >= threshold:
+            xp -= threshold
+            rewards += 1
+            credits_granted += reward_credits
+        claimed = int(row.get("rewards_claimed") or 0) + rewards
+        await self.db.execute(
+            """
+            INSERT INTO payback_xp
+              (guild_id, user_id, xp, last_daily, rewards_claimed)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+              xp = excluded.xp,
+              last_daily = excluded.last_daily,
+              rewards_claimed = excluded.rewards_claimed
+            """,
+            (guild_id, user_id, xp, day, claimed),
+        )
+        await self.db.commit()
+        balance = None
+        if credits_granted > 0:
+            balance = await self.add_credits(
+                guild_id, user_id, credits_granted
+            )
+        return {
+            "xp": xp,
+            "gained": int(xp_gain),
+            "rewards": rewards,
+            "credits_granted": credits_granted,
+            "currency_granted": rewards * reward_currency,
+            "balance": balance,
+            "rewards_claimed": claimed,
+            "day": day,
+        }
 
     async def get_order(self, order_id: int) -> dict[str, Any] | None:
         row = await self.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
