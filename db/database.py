@@ -473,6 +473,39 @@ class Database:
         try:
             await self.db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS invite_joins (
+                    guild_id INTEGER NOT NULL,
+                    invitee_id INTEGER NOT NULL,
+                    inviter_id INTEGER NOT NULL,
+                    invite_code TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (guild_id, invitee_id)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS invite_reward_claims (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    milestone INTEGER NOT NULL,
+                    currency_amount REAL NOT NULL,
+                    credits_amount REAL NOT NULL,
+                    claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (guild_id, user_id, milestone)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS giveaways (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id INTEGER NOT NULL,
@@ -2157,6 +2190,79 @@ class Database:
             "rewards_claimed": claimed,
             "day": day,
         }
+
+    # ── Invite rewards ──────────────────────────────────────────────
+
+    async def record_invite_join(
+        self,
+        guild_id: int,
+        invitee_id: int,
+        inviter_id: int,
+        invite_code: str = "",
+    ) -> bool:
+        """True wenn neu gezählt (Invitee noch nicht erfasst)."""
+        cur = await self.db.execute(
+            """
+            INSERT OR IGNORE INTO invite_joins
+              (guild_id, invitee_id, inviter_id, invite_code)
+            VALUES (?, ?, ?, ?)
+            """,
+            (guild_id, invitee_id, inviter_id, (invite_code or "")[:64]),
+        )
+        await self.db.commit()
+        return (cur.rowcount or 0) > 0
+
+    async def count_invites(self, guild_id: int, inviter_id: int) -> int:
+        row = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt FROM invite_joins
+            WHERE guild_id = ? AND inviter_id = ?
+            """,
+            (guild_id, inviter_id),
+        )
+        return int(row["cnt"]) if row else 0
+
+    async def list_claimed_invite_milestones(
+        self, guild_id: int, user_id: int
+    ) -> set[int]:
+        rows = await self.fetchall(
+            """
+            SELECT milestone FROM invite_reward_claims
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        return {int(r["milestone"]) for r in rows}
+
+    async def claim_invite_milestone(
+        self,
+        guild_id: int,
+        user_id: int,
+        milestone: int,
+        *,
+        currency_amount: float,
+        credits_amount: float,
+    ) -> bool:
+        """True wenn neu beansprucht. Schreibt Claim + Credits."""
+        cur = await self.db.execute(
+            """
+            INSERT OR IGNORE INTO invite_reward_claims
+              (guild_id, user_id, milestone, currency_amount, credits_amount)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                user_id,
+                int(milestone),
+                float(currency_amount),
+                float(credits_amount),
+            ),
+        )
+        await self.db.commit()
+        if (cur.rowcount or 0) <= 0:
+            return False
+        await self.add_credits(guild_id, user_id, float(credits_amount))
+        return True
 
     async def get_order(self, order_id: int) -> dict[str, Any] | None:
         row = await self.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))

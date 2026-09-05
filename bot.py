@@ -35,6 +35,7 @@ class ShopBot(commands.Bot):
             "cogs.announce",
             "cogs.boost",
             "cogs.giveaways",
+            "cogs.invites",
             ):
             await self.load_extension(ext)
 

@@ -64,3 +64,12 @@ CREATOR_COMMISSION_PCT = float(
     os.getenv("CREATOR_COMMISSION_PCT", "10") or "10"
 )
 
+# Invite-Rewards: Meilenstein → Shop-Währung (→ Credits / 100k)
+# 5→500k, 10→1.5m, 25→5m, 100→25m
+INVITE_REWARDS: tuple[tuple[int, float], ...] = (
+    (5, 500_000.0),
+    (10, 1_500_000.0),
+    (25, 5_000_000.0),
+    (100, 25_000_000.0),
+)
+
