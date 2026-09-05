@@ -1,5 +1,5 @@
 {
-  "apiUrl": "http://127.0.0.1:8765",
+  "apiUrl": "http://DEINE-SERVER-IP:8765",
   "apiKey": "CHANGE_ME",
   "guildId": "DEINE_DISCORD_GUILD_ID",
   "enabled": true,

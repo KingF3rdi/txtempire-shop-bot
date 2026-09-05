@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Optional
 
 import discord
@@ -42,26 +43,35 @@ class McLinkCog(commands.Cog):
             return
         await self.api.start()
         if self.api.listening:
+            public = (
+                os.getenv("SERVER_IP")
+                or os.getenv("PUBLIC_IP")
+                or "DEINE-SERVER-IP"
+            )
             print(
-                "[MC-API] Bereit für Fabric-Watcher — "
-                f"teste im Browser: http://127.0.0.1:{int(config.MC_API_PORT)}/mc/v1/health"
+                "[MC-API] Bereit für Fabric-Watcher.\n"
+                f"  Intern: http://{config.MC_API_HOST}:{int(config.MC_API_PORT)}\n"
+                f"  In der Mod-Config apiUrl setzen auf:\n"
+                f"  http://{public}:{int(config.MC_API_PORT)}"
             )
         else:
             print(
                 "[MC-API] NICHT aktiv — setze MC_API_KEY in .env, "
                 "sonst keine Link-/Payment-Bestätigung."
             )
-    bot_group = app_commands.Group(
+
+    # Attribute darf nicht mit bot_/cog_ beginnen (discord.py)
+    status_group = app_commands.Group(
         name="bot",
         description="Bot-Status & Linking",
     )
 
-    @bot_group.command(
+    @status_group.command(
         name="status",
         description="Bot-/Watcher-Status aufs Minecraft-Link-Panel schreiben",
     )
     @app_commands.default_permissions(manage_guild=True)
-    async def bot_status(self, interaction: discord.Interaction) -> None:
+    async def show_link_status(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
         await interaction.response.defer(ephemeral=True)
         status = await collect_bot_link_status(self.bot, interaction.guild.id)

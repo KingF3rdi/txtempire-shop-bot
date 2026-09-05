@@ -1,44 +1,53 @@
 # TxTEmpire MC Watcher (Fabric)
 
-Client-Mod für den **Shop-Bot-Account**: liest Chat (Messages + Payments) und meldet
-Link-Codes sowie Geld-Transfers an die Discord-Bot API.
+Client-Mod für den **Shop-Geld-Account (TxTEmpire)**: liest Chat (Messages + Payments)
+und meldet Link-Codes sowie Geld-Transfers an die Discord-Bot-API.
 
-## Setup
+Typisches Setup: **Discord-Bot auf einem externen Server**, Minecraft-Client lokal
+(oder auf einem anderen PC). Die Mod verbindet sich per HTTP zur Bot-API.
 
-1. Discord-Bot `.env`:
-   ```env
-   MC_API_KEY=dein-secret
-   MC_API_PORT=8765
-   GUILD_ID=deine-server-id
-   ```
-2. Bot starten (API lauscht auf Port 8765).
-3. Mod bauen:
-   ```bash
-   cd minecraft-mod
-   ./gradlew.bat build
-   ```
-   JAR liegt unter `build/libs/txtempire-mc-watcher-1.0.0.jar`.
-4. JAR in `mods/` des **Bot-Minecraft-Clients** legen (Fabric 1.21.11 + Fabric API).
-5. Config nach `.minecraft/config/txtempire-mc-watcher.json` kopieren
-   (Vorlage: `minecraft-mod/txtempire-mc-watcher.json` im Repo-Ordner — lokal mit API-Key).
-   ```json
-   {
-     "apiUrl": "http://127.0.0.1:8765",
-     "apiKey": "gleicher-key-wie-MC_API_KEY",
-     "guildId": "DEINE_DISCORD_GUILD_ID",
-     "enabled": true,
-     "debug": false
-   }
-   ```
-6. Mit dem Shop-Geld-Account (**TxTEmpire**) einloggen und online bleiben.
+## Server (Discord-Bot)
+
+In der Bot-`.env` auf dem **externen Server**:
+
+```env
+MC_API_HOST=0.0.0.0
+MC_API_PORT=8765
+MC_API_KEY=dein-langes-geheimnis
+GUILD_ID=deine-discord-server-id
+MC_LINK_IGN=TxTEmpire
+```
+
+- Firewall/Security-Group: **TCP 8765** von außen erlauben (oder nur deine IP)
+- Bot starten — Log: `[MC-API] Listening on http://0.0.0.0:8765`
+- Test vom Heim-PC: `http://DEINE-SERVER-IP:8765/mc/v1/health` → `{"ok":true…}`
+
+## Minecraft-Client (Watcher-Mod)
+
+1. Mod bauen: `cd minecraft-mod` → `gradlew.bat build`  
+   JAR: `build/libs/txtempire-mc-watcher-*.jar`
+2. JAR in `mods/` des **TxTEmpire**-Fabric-Profils (1.21.11 + Fabric API)
+3. Config: `config/txtempire-mc-watcher.json`
+
+```json
+{
+  "apiUrl": "http://DEINE-SERVER-IP:8765",
+  "apiKey": "gleicher-key-wie-MC_API_KEY-auf-dem-Server",
+  "guildId": "DEINE_DISCORD_GUILD_ID",
+  "enabled": true,
+  "debug": true
+}
+```
+
+**Wichtig:** `apiUrl` = öffentliche Adresse des Bot-Servers, **nicht** `127.0.0.1`
+(außer Bot und Minecraft laufen wirklich auf demselben Rechner).
 
 ## Ablauf
 
 | Event | Chat | API |
 |-------|------|-----|
 | Account-Link | `/msg TxTEmpire !link TXTE-XXXXXX` | `POST /mc/v1/link` |
-| Zahlung | `Steve hat dir 500000$ gegeben.` | `POST /mc/v1/payment` |
+| Zahlung | z.B. `Spieler » TxTEmpire - $500,000` | `POST /mc/v1/payment` |
 
-Discord: `/mclinkpanel` → User verlinkt IGN → Code → Ingame
-`/msg TxTEmpire !link …` → verknüpft.
-Passende Zahlung auf offenes Ticket → **Auto-Confirm**.
+Discord: `/mclinkpanel` → Code → Ingame `/msg TxTEmpire !link …` → Bestätigung.
+Passende Zahlung auf offenes Ticket → Auto-Confirm.

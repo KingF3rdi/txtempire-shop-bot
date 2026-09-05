@@ -80,7 +80,9 @@ python bot.py
 5. Discord ↔ IGN verknüpft · **Unverifizieren** löst die Bindung
 6. Bei passender Zahlung zum offenen Ticket → Auto-Confirm
 
-Voraussetzungen: `MC_API_KEY` in `.env`, Fabric-Mod auf dem Bot-Account (siehe `minecraft-mod/README.md`).
+Voraussetzungen: Discord-Bot mit `MC_API_KEY` (meist auf **externem Server**),
+Fabric-Mod auf dem TxTEmpire-Client mit `apiUrl` = `http://SERVER-IP:8765`
+(siehe `minecraft-mod/README.md`). Firewall-Port **8765** muss erreichbar sein.
 `MC_LINK_IGN` steuert den Empfänger (Standard: `TxTEmpire`).
 
 ## Website-Anbindung
