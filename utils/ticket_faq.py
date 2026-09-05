@@ -195,7 +195,7 @@ FAQ: tuple[FaqEntry, ...] = (
         ),
         "**Account verlinken:** Panel **Minecraft Account** → "
         "**Account verlinken** → IGN → Code bekommen → Ingame "
-        "`!link CODE` schreiben.\n"
+        "`/msg TxTEmpire !link CODE` (privat).\n"
         "Danach wird dein Ticket nach korrekter Zahlung **automatisch bestätigt**.\n"
         "**Unverifizieren:** gleicher Panel-Button oder `/unlink`.",
     ),

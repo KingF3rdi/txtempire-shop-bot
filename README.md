@@ -73,12 +73,13 @@ python bot.py
 
 1. `/mclinkpanel` posten
 2. User: **Account verlinken** → IGN → Code `TXTE-…`
-3. Ingame (sichtbar für den Shop-Bot-Client): `!link TXTE-…`
+3. Ingame: `/msg TxTEmpire !link TXTE-…` (privat)
 4. Fabric-Mod `minecraft-mod/` meldet den Code an die Bot-API
 5. Discord ↔ IGN verknüpft · **Unverifizieren** löst die Bindung
 6. Bei passender Zahlung zum offenen Ticket → Auto-Confirm
 
 Voraussetzungen: `MC_API_KEY` in `.env`, Fabric-Mod auf dem Bot-Account (siehe `minecraft-mod/README.md`).
+`MC_LINK_IGN` steuert den Empfänger (Standard: `TxTEmpire`).
 
 ## Website-Anbindung
 

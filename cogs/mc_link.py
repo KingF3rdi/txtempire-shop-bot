@@ -132,7 +132,7 @@ class McLinkCog(commands.Cog):
         if pending:
             text += (
                 f"\nOffener Code für **{pending['ign']}**: `{pending['code']}` "
-                f"— Ingame: `!link {pending['code']}`"
+                f"— Ingame: `{config.mc_link_command(str(pending['code']))}`"
             )
         await interaction.response.send_message(
             embed=success_embed("MC-Status", text)

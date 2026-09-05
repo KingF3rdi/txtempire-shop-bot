@@ -3,3 +3,6 @@ data/
 __pycache__/
 *.pyc
 .venv/
+# lokale Mod-Config mit Secrets (nicht committen)
+txtempire-mc-watcher.json
+minecraft-mod/txtempire-mc-watcher.json

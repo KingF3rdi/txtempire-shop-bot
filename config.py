@@ -78,5 +78,12 @@ MC_API_HOST = os.getenv("MC_API_HOST", "0.0.0.0")
 MC_API_PORT = int(os.getenv("MC_API_PORT", "8765") or "8765")
 MC_API_KEY = os.getenv("MC_API_KEY", "").strip()
 MC_LINK_CODE_TTL_MINUTES = int(os.getenv("MC_LINK_CODE_TTL_MINUTES", "10") or "10")
+# Ingame-Account, dem User den Link-Code per /msg schicken
+MC_LINK_IGN = (os.getenv("MC_LINK_IGN", "TxTEmpire") or "TxTEmpire").strip()
+
+
+def mc_link_command(code: str) -> str:
+    """Ingame-Befehl zum Verlinken (Private Message)."""
+    return f"/msg {MC_LINK_IGN} !link {code.strip().upper()}"
 
 

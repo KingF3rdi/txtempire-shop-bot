@@ -15,6 +15,7 @@ public final class WatcherConfig {
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
 	public String apiUrl = "http://127.0.0.1:8765";
+	/** Gleicher Wert wie MC_API_KEY in der Bot-.env (siehe txtempire-mc-watcher.json) */
 	public String apiKey = "CHANGE_ME";
 	public String guildId = "0";
 	public boolean enabled = true;

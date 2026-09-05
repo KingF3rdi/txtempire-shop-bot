@@ -9,6 +9,38 @@ from typing import Any
 _STRIP_CODES = re.compile(r"§[0-9A-FK-OR]|&#[0-9A-Fa-f]{6}")
 _WS = re.compile(r"\s+")
 
+# Whisper /msg Formate → Absender + Nachrichtentext
+WHISPER_PREFIXES: tuple[re.Pattern[str], ...] = (
+    # "Steve whispers to you: hello" / "Steve whispered to you: …"
+    re.compile(
+        r"^(?P<ign>[A-Za-z0-9_]{3,16})\s+whispers?(?:\s+to\s+you)?\s*:\s*(?P<body>.+)$",
+        re.I,
+    ),
+    # "Steve flüstert dir: …" / "Steve flüsterte dir zu: …"
+    re.compile(
+        r"^(?P<ign>[A-Za-z0-9_]{3,16})\s+fl[uü]ster(?:t|te)(?:\s+dir)?(?:\s+zu)?\s*:\s*(?P<body>.+)$",
+        re.I,
+    ),
+    # "[MSG] Steve: …" / "[Whisper] Steve: …"
+    re.compile(
+        r"^\[(?:msg|whisper|pn|pm|nachricht)\]\s*(?P<ign>[A-Za-z0-9_]{3,16})\s*:\s*(?P<body>.+)$",
+        re.I,
+    ),
+    # "Steve -> Dir: …" / "Steve → you: …"
+    re.compile(
+        r"^(?P<ign>[A-Za-z0-9_]{3,16})\s*(?:->|→|»)\s*(?:dir|you|dich)?\s*:\s*(?P<body>.+)$",
+        re.I,
+    ),
+    # "Von Steve: …"
+    re.compile(
+        r"^[Vv]on\s+(?P<ign>[A-Za-z0-9_]{3,16})\s*:\s*(?P<body>.+)$",
+    ),
+    # "<Steve> !link …" / "[Steve] !link …"
+    re.compile(
+        r"^[<\[]\s*(?P<ign>[A-Za-z0-9_]{3,16})\s*[>\]]\s*(?P<body>.+)$",
+    ),
+)
+
 # !link CODE  /  !verify CODE  /  link CODE
 LINK_CMD = re.compile(
     r"(?:^|[\s\[\]<>:])(?P<cmd>!?link|!?verify|!verknüpf|!verknuepf)\s+"
@@ -85,6 +117,15 @@ def parse_amount(raw: str) -> float | None:
         return None
 
 
+def _split_whisper(clean: str) -> tuple[str | None, str]:
+    """Extrahiert Absender aus Whisper-/Chat-Präfixen."""
+    for pat in WHISPER_PREFIXES:
+        m = pat.match(clean)
+        if m:
+            return m.group("ign").strip(), m.group("body").strip()
+    return None, clean
+
+
 def parse_chat_event(
     text: str, *, sender: str | None = None
 ) -> dict[str, Any] | None:
@@ -93,23 +134,23 @@ def parse_chat_event(
     if not clean:
         return None
 
-    m = LINK_CMD.search(clean)
-    if m:
-        ign = (sender or "").strip()
-        if not ign:
-            return None
+    whisper_ign, body = _split_whisper(clean)
+    ign = (sender or whisper_ign or "").strip()
+
+    m = LINK_CMD.search(body) or LINK_CMD.search(clean)
+    if m and ign:
         return {
             "type": "link",
             "code": m.group("code").upper(),
             "ign": ign,
         }
 
-    m2 = LINK_CODE_ONLY.match(clean)
-    if m2 and sender:
+    m2 = LINK_CODE_ONLY.match(body) or LINK_CODE_ONLY.match(clean)
+    if m2 and ign:
         return {
             "type": "link",
             "code": m2.group("code").upper(),
-            "ign": sender.strip(),
+            "ign": ign,
         }
 
     for pat in PAYMENT_PATTERNS:
@@ -117,12 +158,12 @@ def parse_chat_event(
         if not pm:
             continue
         amount = parse_amount(pm.group("amount"))
-        ign = pm.group("ign").strip()
-        if amount is None or amount <= 0 or not ign:
+        pay_ign = pm.group("ign").strip()
+        if amount is None or amount <= 0 or not pay_ign:
             continue
         return {
             "type": "payment",
-            "ign": ign,
+            "ign": pay_ign,
             "amount": amount,
         }
 

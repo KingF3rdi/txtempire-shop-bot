@@ -31,6 +31,7 @@ def _make_code() -> str:
 
 async def build_mc_link_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embed:
     ttl = int(config.MC_LINK_CODE_TTL_MINUTES)
+    target = config.MC_LINK_IGN
     return base_embed(
         "Minecraft Account verknüpfen",
         "Verlinke deinen **Minecraft-IGN** mit Discord.\n"
@@ -38,8 +39,8 @@ async def build_mc_link_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embe
         "**automatisch bestätigt** — ohne Screenshot.\n\n"
         f"1. **Account verlinken** → IGN eingeben\n"
         f"2. Code erhalten (gültig **{ttl} Min.**)\n"
-        f"3. Ingame in den Chat (sichtbar für den Shop-Bot):\n"
-        f"   `!link DEIN-CODE`\n"
+        f"3. Ingame **privat** an **{target}** senden:\n"
+        f"   `/msg {target} !link DEIN-CODE`\n"
         f"4. Fertig — Status siehst du hier oder per DM\n\n"
         "Mit **Unverifizieren** kannst du die Verknüpfung jederzeit lösen.",
     ).set_footer(text="Nur dein eigener Account · Ein IGN = ein Discord")
@@ -108,13 +109,15 @@ class LinkIgnModal(discord.ui.Modal, title="Minecraft IGN eingeben"):
             expires_at=expires_at,
         )
 
+        cmd = config.mc_link_command(code)
         embed = success_embed(
             "Link-Code erstellt",
             f"IGN: **{ign}**\n"
             f"Code: `{code}`\n"
             f"Gültig bis: `{expires_at}` UTC\n\n"
-            f"**Ingame schreiben:**\n```\n!link {code}\n```\n"
-            "Der Shop-Bot erkennt den Code und verknüpft deinen Discord.\n"
+            f"**Ingame schreiben:**\n```\n{cmd}\n```\n"
+            f"Schicke den Code per **`/msg {config.MC_LINK_IGN}`** — "
+            "nicht in den öffentlichen Chat.\n"
             "Danach werden passende Zahlungen **auto-bestätigt**.",
         )
         if my_link:
@@ -186,12 +189,13 @@ class McLinkPanelView(discord.ui.View):
                 "Klicke **Account verlinken**.",
             )
         if pending:
+            cmd = config.mc_link_command(str(pending["code"]))
             embed.add_field(
                 name="Offener Code",
                 value=(
                     f"IGN **{pending['ign']}** · Code `{pending['code']}`\n"
                     f"Gültig bis `{pending['expires_at']}`\n"
-                    f"Ingame: `!link {pending['code']}`"
+                    f"Ingame: `{cmd}`"
                 ),
                 inline=False,
             )

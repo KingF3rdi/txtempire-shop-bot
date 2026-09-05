@@ -4,12 +4,31 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Erkennt !link CODE und Money-Transfers im Klartext-Chat. */
+/** Erkennt !link CODE (inkl. /msg Whisper) und Money-Transfers. */
 public final class ChatParser {
 	private static final Pattern STRIP = Pattern.compile("§[0-9A-FK-OR]|&#[0-9A-Fa-f]{6}");
-	private static final Pattern SENDER_PREFIX = Pattern.compile(
-		"^(?:[<\\[]\\s*)?([A-Za-z0-9_]{3,16})(?:\\s*[>\\]])\\s*(?:»|:)?\\s*(.+)$"
-	);
+
+	private static final Pattern[] WHISPERS = new Pattern[] {
+		Pattern.compile(
+			"(?i)^([A-Za-z0-9_]{3,16})\\s+whispers?(?:\\s+to\\s+you)?\\s*:\\s*(.+)$"
+		),
+		Pattern.compile(
+			"(?i)^([A-Za-z0-9_]{3,16})\\s+fl[uü]ster(?:t|te)(?:\\s+dir)?(?:\\s+zu)?\\s*:\\s*(.+)$"
+		),
+		Pattern.compile(
+			"(?i)^\\[(?:msg|whisper|pn|pm|nachricht)\\]\\s*([A-Za-z0-9_]{3,16})\\s*:\\s*(.+)$"
+		),
+		Pattern.compile(
+			"(?i)^([A-Za-z0-9_]{3,16})\\s*(?:->|→|»)\\s*(?:dir|you|dich)?\\s*:\\s*(.+)$"
+		),
+		Pattern.compile(
+			"(?i)^von\\s+([A-Za-z0-9_]{3,16})\\s*:\\s*(.+)$"
+		),
+		Pattern.compile(
+			"^[<\\[]\\s*([A-Za-z0-9_]{3,16})\\s*[>\\]]\\s*(.+)$"
+		),
+	};
+
 	private static final Pattern LINK_CMD = Pattern.compile(
 		"(?i)(?:^|[\\s\\[\\]<>:])(!?link|!?verify|!verknüpf|!verknuepf)\\s+([A-Za-z0-9\\-]{4,24})\\b"
 	);
@@ -52,12 +71,15 @@ public final class ChatParser {
 
 		String sender = senderHint;
 		String body = clean;
-		Matcher sm = SENDER_PREFIX.matcher(clean);
-		if (sm.matches()) {
-			if (sender == null || sender.isBlank()) {
-				sender = sm.group(1);
+		for (Pattern wp : WHISPERS) {
+			Matcher wm = wp.matcher(clean);
+			if (wm.matches()) {
+				if (sender == null || sender.isBlank()) {
+					sender = wm.group(1);
+				}
+				body = wm.group(2).trim();
+				break;
 			}
-			body = sm.group(2).trim();
 		}
 
 		Matcher lm = LINK_CMD.matcher(body);

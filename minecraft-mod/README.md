@@ -19,25 +19,26 @@ Link-Codes sowie Geld-Transfers an die Discord-Bot API.
    ```
    JAR liegt unter `build/libs/txtempire-mc-watcher-1.0.0.jar`.
 4. JAR in `mods/` des **Bot-Minecraft-Clients** legen (Fabric 1.21.11 + Fabric API).
-5. Einmal starten → Config erstellen unter:
-   `.minecraft/config/txtempire-mc-watcher.json`
+5. Config nach `.minecraft/config/txtempire-mc-watcher.json` kopieren
+   (Vorlage: `minecraft-mod/txtempire-mc-watcher.json` im Repo-Ordner — lokal mit API-Key).
    ```json
    {
      "apiUrl": "http://127.0.0.1:8765",
-     "apiKey": "dein-secret",
+     "apiKey": "gleicher-key-wie-MC_API_KEY",
      "guildId": "DEINE_DISCORD_GUILD_ID",
      "enabled": true,
      "debug": false
    }
    ```
-6. Mit dem Shop-Geld-Account einloggen und online bleiben.
+6. Mit dem Shop-Geld-Account (**TxTEmpire**) einloggen und online bleiben.
 
 ## Ablauf
 
 | Event | Chat | API |
 |-------|------|-----|
-| Account-Link | `!link TXTE-XXXXXX` | `POST /mc/v1/link` |
+| Account-Link | `/msg TxTEmpire !link TXTE-XXXXXX` | `POST /mc/v1/link` |
 | Zahlung | `Steve hat dir 500000$ gegeben.` | `POST /mc/v1/payment` |
 
-Discord: `/mclinkpanel` → User verlinkt IGN → Code → Ingame `!link …` → verknüpft.
+Discord: `/mclinkpanel` → User verlinkt IGN → Code → Ingame
+`/msg TxTEmpire !link …` → verknüpft.
 Passende Zahlung auf offenes Ticket → **Auto-Confirm**.
