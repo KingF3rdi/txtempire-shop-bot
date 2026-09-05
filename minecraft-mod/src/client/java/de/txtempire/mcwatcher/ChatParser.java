@@ -64,15 +64,21 @@ public final class ChatParser {
 	);
 
 	private static final Pattern[] PAYMENTS = new Pattern[] {
-		// HugoSMP / ähnlich: "[HugoSMP] Du hast $400000 von 0Moos erhalten."
+		// HugoSMP: "[HugoSMP] Du hast $400000 von 0Moos erhalten."
 		Pattern.compile(
 			"(?i)du\\s+hast\\s+\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)\\s*(?:\\$|€|euro)?\\s+"
 				+ "von\\s+([A-Za-z0-9_]{3,16})\\s+erhalten"
 		),
-		// "Steve hat dir 1.000.000$ gegeben" / "Steve hat dir $500k gegeben"
+		// "Du hast von 0Moos $400000 erhalten."
+		Pattern.compile(
+			"(?i)du\\s+hast\\s+von\\s+([A-Za-z0-9_]{3,16})\\s+"
+				+ "\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)\\s*(?:\\$|€|euro)?\\s*erhalten"
+		),
+		// "Steve hat dir 1.000.000$ gegeben/geschickt/überwiesen"
 		Pattern.compile(
 			"(?i)([A-Za-z0-9_]{3,16})\\s+hat\\s+dir\\s+\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)\\s*"
-				+ "(?:\\$|€|euro|geld|coins?)?\\s+gegeben"
+				+ "(?:\\$|€|euro|geld|coins?)?\\s+"
+				+ "(?:gegeben|geschickt|gesendet|überwiesen|ueberwiesen|gezahlt|bezahlt)"
 		),
 		// "Gamerleo15 » TxTEmpire - $450,000"
 		Pattern.compile(
@@ -85,12 +91,16 @@ public final class ChatParser {
 				+ "\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)"
 		),
 		Pattern.compile(
+			"(?i)([A-Za-z0-9_]{3,16})\\s+has\\s+paid\\s+you\\s+"
+				+ "\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)"
+		),
+		Pattern.compile(
 			"(?i)(?:zahlung|payment|überweisung|ueberweisung)\\s+(?:von\\s+)?"
 				+ "([A-Za-z0-9_]{3,16})\\s*:?\\s*\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)"
 		),
 	};
 
-	/** Patterns bei denen group1=amount, group2=ign */
+	/** Patterns bei denen group1=amount, group2=ign (nur Index 0) */
 	private static final int AMOUNT_FIRST_COUNT = 1;
 
 	private ChatParser() {}

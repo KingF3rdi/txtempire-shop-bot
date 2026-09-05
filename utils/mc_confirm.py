@@ -9,7 +9,14 @@ from typing import TYPE_CHECKING, Any
 import discord
 
 from utils.delivery import deliver_packs
-from utils.embeds import order_ref, purchase_success_embed, success_embed
+from utils.embeds import (
+    error_embed,
+    format_price,
+    order_ref,
+    purchase_success_embed,
+    success_embed,
+    warn_embed,
+)
 from utils.roles import grant_purchase_roles
 from views.ticket_views import enrich_order_item_roles, _delete_channel_later
 
@@ -17,6 +24,73 @@ if TYPE_CHECKING:
     from bot import ShopBot
 
 _confirm_locks: dict[int, asyncio.Lock] = {}
+
+_PAYMENT_REASON_LABELS: dict[str, str] = {
+    "ok": "Auto-bestätigt",
+    "auto_confirmed": "Auto-bestätigt",
+    "ign_not_linked": "IGN nicht verknüpft",
+    "auto_confirm_disabled": "Auto-Confirm aus",
+    "no_matching_order": "Kein passendes Ticket (Betrag)",
+    "already_completed": "Order schon bestätigt",
+    "cancelled": "Order storniert",
+    "order_not_found": "Order nicht gefunden",
+    "guild_unavailable": "Guild nicht erreichbar",
+    "confirm_failed": "Bestätigung fehlgeschlagen",
+}
+
+
+async def _post_mc_payment_log(
+    bot: ShopBot,
+    *,
+    guild_id: int,
+    ign: str,
+    amount: float,
+    raw_text: str,
+    reason: str,
+    auto_confirmed: bool,
+    user_id: int | None = None,
+    order: dict | None = None,
+    event_id: int | None = None,
+) -> None:
+    """Jede erkannte Zahlung in den konfigurierten Log-Channel posten."""
+    settings = await bot.db.ensure_guild(guild_id)
+    log_ch_id = settings.get("mc_payment_log_channel_id")
+    if not log_ch_id:
+        return
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return
+    log_ch = guild.get_channel(int(log_ch_id))
+    if not isinstance(log_ch, discord.TextChannel):
+        return
+
+    label = _PAYMENT_REASON_LABELS.get(reason or "", reason or "—")
+    lines = [
+        f"**IGN:** `{ign}`",
+        f"**Betrag:** {format_price(amount)}",
+    ]
+    if user_id:
+        lines.append(f"**Discord:** <@{user_id}>")
+    if order:
+        lines.append(f"**Order:** {order_ref(order)}")
+    lines.append(f"**Status:** {label}")
+    if event_id:
+        lines.append(f"**Event-ID:** `{event_id}`")
+    if raw_text:
+        lines.append(f"**Chat:** `{raw_text[:200]}`")
+
+    title = "MC-Zahlung · Auto-Confirm" if auto_confirmed else "MC-Zahlung erkannt"
+    if auto_confirmed:
+        embed = success_embed(title, "\n".join(lines))
+    elif reason in ("no_matching_order", "ign_not_linked", "auto_confirm_disabled"):
+        embed = warn_embed(title, "\n".join(lines))
+    else:
+        embed = error_embed(title, "\n".join(lines))
+
+    try:
+        await log_ch.send(embed=embed)
+    except discord.HTTPException:
+        pass
 
 
 def _lock_for(order_id: int) -> asyncio.Lock:
@@ -219,22 +293,24 @@ async def confirm_order_by_id(
                     )
                 )
 
-        log_ch_id = settings.get("mc_payment_log_channel_id")
-        if log_ch_id:
-            log_ch = guild.get_channel(int(log_ch_id))
-            if isinstance(log_ch, discord.TextChannel):
-                try:
-                    await log_ch.send(
-                        embed=success_embed(
-                            "MC Auto-Confirm",
-                            f"Order **{order_ref(order)}** · "
-                            f"<@{order['user_id']}> · "
-                            f"`{source}`\n"
-                            + (f"`{raw_payment[:200]}`" if raw_payment else ""),
+        # Discord-Log für MC-Zahlungen läuft über handle_mc_payment (_post_mc_payment_log)
+        if source != "mc_payment":
+            log_ch_id = settings.get("mc_payment_log_channel_id")
+            if log_ch_id:
+                log_ch = guild.get_channel(int(log_ch_id))
+                if isinstance(log_ch, discord.TextChannel):
+                    try:
+                        await log_ch.send(
+                            embed=success_embed(
+                                "MC Auto-Confirm",
+                                f"Order **{order_ref(order)}** · "
+                                f"<@{order['user_id']}> · "
+                                f"`{source}`\n"
+                                + (f"`{raw_payment[:200]}`" if raw_payment else ""),
+                            )
                         )
-                    )
-                except discord.HTTPException:
-                    pass
+                    except discord.HTTPException:
+                        pass
 
         return {
             "ok": True,
@@ -251,55 +327,98 @@ async def handle_mc_payment(
     amount: float,
     raw_text: str = "",
 ) -> dict[str, Any]:
-    """Verarbeitet eine erkannte Ingame-Zahlung."""
+    """Verarbeitet eine erkannte Ingame-Zahlung (DB + Discord-Log)."""
     settings = await bot.db.ensure_guild(guild_id)
     link = await bot.db.get_mc_link_by_ign(guild_id, ign)
+    user_id: int | None = int(link["user_id"]) if link else None
+    order: dict | None = None
+    auto_confirmed = False
+    reason = "ign_not_linked"
+    open_orders = 0
+
     if not link:
         event_id = await bot.db.log_mc_payment(
             guild_id, ign=ign, amount=amount, raw_text=raw_text
         )
-        return {
-            "ok": True,
-            "auto_confirmed": False,
-            "reason": "ign_not_linked",
-            "event_id": event_id,
-        }
-
-    user_id = int(link["user_id"])
-    auto = int(settings.get("mc_auto_confirm") if settings.get("mc_auto_confirm") is not None else 1)
-    if not auto:
-        event_id = await bot.db.log_mc_payment(
-            guild_id, ign=ign, amount=amount, raw_text=raw_text
+        await _post_mc_payment_log(
+            bot,
+            guild_id=guild_id,
+            ign=ign,
+            amount=amount,
+            raw_text=raw_text,
+            reason=reason,
+            auto_confirmed=False,
+            event_id=event_id,
         )
         return {
             "ok": True,
             "auto_confirmed": False,
-            "reason": "auto_confirm_disabled",
+            "reason": reason,
+            "event_id": event_id,
+        }
+
+    assert user_id is not None
+    auto = int(
+        settings.get("mc_auto_confirm")
+        if settings.get("mc_auto_confirm") is not None
+        else 1
+    )
+    if not auto:
+        reason = "auto_confirm_disabled"
+        event_id = await bot.db.log_mc_payment(
+            guild_id, ign=ign, amount=amount, raw_text=raw_text
+        )
+        await _post_mc_payment_log(
+            bot,
+            guild_id=guild_id,
+            ign=ign,
+            amount=amount,
+            raw_text=raw_text,
+            reason=reason,
+            auto_confirmed=False,
+            user_id=user_id,
+            event_id=event_id,
+        )
+        return {
+            "ok": True,
+            "auto_confirmed": False,
+            "reason": reason,
             "event_id": event_id,
             "user_id": user_id,
         }
 
     order = await bot.db.find_open_order_by_amount(guild_id, user_id, amount)
     if not order:
+        reason = "no_matching_order"
         event_id = await bot.db.log_mc_payment(
             guild_id, ign=ign, amount=amount, raw_text=raw_text
         )
-        # Ticket informieren falls offene Orders existieren
         opens = await bot.db.list_open_orders_for_user(guild_id, user_id)
+        open_orders = len(opens)
         if opens:
             await _notify_payment_mismatch(
                 bot, opens[0], ign=ign, amount=amount, raw_text=raw_text
             )
+        await _post_mc_payment_log(
+            bot,
+            guild_id=guild_id,
+            ign=ign,
+            amount=amount,
+            raw_text=raw_text,
+            reason=reason,
+            auto_confirmed=False,
+            user_id=user_id,
+            event_id=event_id,
+        )
         return {
             "ok": True,
             "auto_confirmed": False,
-            "reason": "no_matching_order",
+            "reason": reason,
             "event_id": event_id,
             "user_id": user_id,
-            "open_orders": len(opens),
+            "open_orders": open_orders,
         }
 
-    # IGN auf Order setzen
     await bot.db.update_order(int(order["id"]), ign=ign.strip()[:32])
 
     result = await confirm_order_by_id(
@@ -308,18 +427,34 @@ async def handle_mc_payment(
         source="mc_payment",
         raw_payment=raw_text,
     )
+    auto_confirmed = bool(result.get("ok"))
+    reason = str(result.get("reason") or ("ok" if auto_confirmed else "confirm_failed"))
+    if auto_confirmed:
+        reason = "ok"
     event_id = await bot.db.log_mc_payment(
         guild_id,
         ign=ign,
         amount=amount,
         raw_text=raw_text,
         order_id=int(order["id"]),
-        auto_confirmed=bool(result.get("ok")),
+        auto_confirmed=auto_confirmed,
+    )
+    await _post_mc_payment_log(
+        bot,
+        guild_id=guild_id,
+        ign=ign,
+        amount=amount,
+        raw_text=raw_text,
+        reason=reason if not auto_confirmed else "auto_confirmed",
+        auto_confirmed=auto_confirmed,
+        user_id=user_id,
+        order=order,
+        event_id=event_id,
     )
     return {
         "ok": True,
-        "auto_confirmed": bool(result.get("ok")),
-        "reason": result.get("reason"),
+        "auto_confirmed": auto_confirmed,
+        "reason": reason if not auto_confirmed else "ok",
         "order_id": int(order["id"]),
         "order_number": order.get("order_number"),
         "user_id": user_id,
@@ -335,8 +470,6 @@ async def _notify_payment_mismatch(
     amount: float,
     raw_text: str,
 ) -> None:
-    from utils.embeds import format_price, warn_embed
-
     ch_id = order.get("ticket_channel_id")
     if not ch_id:
         return

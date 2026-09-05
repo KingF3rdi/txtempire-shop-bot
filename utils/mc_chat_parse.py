@@ -90,10 +90,16 @@ PAYMENT_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"[Dd]u\s+hast\s+\$?\s*(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)\s*(?:\$|€|euro)?\s+"
         r"von\s+(?P<ign>[A-Za-z0-9_]{3,16})\s+erhalten",
     ),
-    # "Steve hat dir $500k gegeben"
+    # "Du hast von 0Moos $400000 erhalten."
+    re.compile(
+        r"[Dd]u\s+hast\s+von\s+(?P<ign>[A-Za-z0-9_]{3,16})\s+"
+        r"\$?\s*(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)\s*(?:\$|€|euro)?\s*erhalten",
+    ),
+    # "0Moos hat dir $400,000 geschickt/überwiesen"
     re.compile(
         r"(?P<ign>[A-Za-z0-9_]{3,16})\s+hat\s+dir\s+\$?\s*"
-        r"(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)\s*(?:\$|€|euro|geld|coins?)?\s+gegeben",
+        r"(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)\s*(?:\$|€|euro|geld|coins?)?\s+"
+        r"(?:gegeben|geschickt|gesendet|überwiesen|ueberwiesen|gezahlt|bezahlt)",
         re.I,
     ),
     # "Gamerleo15 » TxTEmpire - $450,000"
@@ -105,6 +111,11 @@ PAYMENT_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     re.compile(
         r"(?P<ign>[A-Za-z0-9_]{3,16})\s+(?:paid|sent|gave)\s+(?:you\s+)?"
+        r"\$?\s*(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)",
+        re.I,
+    ),
+    re.compile(
+        r"(?P<ign>[A-Za-z0-9_]{3,16})\s+has\s+paid\s+you\s+"
         r"\$?\s*(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)",
         re.I,
     ),
