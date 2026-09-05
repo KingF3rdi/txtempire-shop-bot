@@ -43,7 +43,8 @@ python bot.py
 | `/adminpanel` | Interaktives Admin-Panel |
 | `/category add/list/delete` | Kategorien |
 | `/item add/list/delete` | Items (Preis, Pack-DM, Pack-Link, Autorole) |
-| `/new item` | Item anlegen + Buy-Panel posten (+ optional Rabattcode, **5 Uses**) |
+| `/new item` | Item anlegen + **Item-Buy-Panel** (Direkt-Kauf) + optional Code (5 Uses) |
+| `/new panel` | Buy-Panel für ein **bestehendes** Item posten |
 | `/ticketlimit` | Max. offene Kauf-Tickets |
 | `/shoppanel` | Shop-Panel posten |
 | `/buypanel` | Buy Panel 1 oder 2 posten (**slot Pflicht**) |

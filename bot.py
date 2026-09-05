@@ -165,6 +165,26 @@ class ShopBot(commands.Bot):
                 traceback.print_exc()
             return
 
+        if custom_id.startswith("item:buy:"):
+            component_type = data.get("component_type")
+            key = (component_type, custom_id)
+            store = self._connection._view_store
+            message_id = interaction.message.id if interaction.message else None
+            if message_id is not None and store._views.get(message_id, {}).get(key):
+                return
+            if store._views.get(None, {}).get(key):
+                return
+            from views.item_buy_views import handle_item_buy_interaction
+
+            try:
+                await handle_item_buy_interaction(self, interaction)
+            except Exception as exc:
+                import traceback
+
+                print(f"[ItemBuy] Fallback fehlgeschlagen ({custom_id}): {exc!r}")
+                traceback.print_exc()
+            return
+
         if not custom_id.startswith("buy:"):
             return
 

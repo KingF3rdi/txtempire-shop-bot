@@ -652,41 +652,21 @@ class SetupCog(commands.Cog):
             except ValueError as e:
                 pack_note = f"\nPack-Upload fehlgeschlagen: {e}"
 
-        # Buy-Panel für die Kategorie des neuen Items
-        from utils.panels import build_buy_panel_embed, ensure_buy_panel_view
-        from views.shop_views import BuyPanelView
+        # Buy-Panel verknüpft mit diesem Item (Direkt-Kauf)
+        from utils.discount_codes import format_code_discount
+        from views.item_buy_views import (
+            ItemBuyView,
+            build_item_buy_embed,
+            ensure_item_buy_view,
+        )
 
-        settings = await self.bot.db.ensure_guild(interaction.guild.id)
-        cats = await self.bot.db.list_categories(interaction.guild.id)
-        await ensure_buy_panel_view(self.bot, category)
-        panel_embed = build_buy_panel_embed(
-            categories=cats,
-            settings=settings,
-            category=cat,
-            title=f"Neu: {name[:80]}",
-        )
-        panel_embed.insert_field_at(
-            0,
-            name="Neues Item",
-            value=(
-                f"**{name[:100]}** — {format_price(price_val)}\n"
-                + (
-                    f"_{(description[:120])}…_"
-                    if len(description) > 120
-                    else (f"_{description}_" if description.strip() else "")
-                )
-            ).strip(),
-            inline=False,
-        )
-        panel_msg = await target.send(
-            embed=panel_embed,
-            view=BuyPanelView(self.bot, category_id=category),
-        )
+        item_row = await self.bot.db.get_item(iid)
+        assert item_row is not None
 
         code_note = ""
+        discount_code: str | None = None
+        discount_label: str | None = None
         if want_code and dtype is not None and dval is not None:
-            from utils.discount_codes import format_code_discount
-
             code_id = await self.bot.db.create_discount_code(
                 interaction.guild.id,
                 code_raw,
@@ -698,11 +678,24 @@ class SetupCog(commands.Cog):
                 created_by=interaction.user.id,
                 kind="rabatt",
             )
+            discount_code = code_raw.upper()
+            discount_label = format_code_discount(dtype, dval)
             code_note = (
-                f"\n\n**Rabattcode** `{code_raw.upper()}` — "
-                f"{format_code_discount(dtype, dval)}\n"
+                f"\n\n**Rabattcode** `{discount_code}` — {discount_label}\n"
                 f"Limit: **5** Uses · max. **1**/User · ID `{code_id}`"
             )
+
+        ensure_item_buy_view(self.bot, iid)
+        panel_embed = build_item_buy_embed(
+            item=item_row,
+            category_name=str(cat["name"]),
+            discount_code=discount_code,
+            discount_label=discount_label,
+        )
+        panel_msg = await target.send(
+            embed=panel_embed,
+            view=ItemBuyView(self.bot, iid),
+        )
 
         role_note = f"\nAutorole: {role.mention}" if role else ""
         await interaction.followup.send(
@@ -710,7 +703,8 @@ class SetupCog(commands.Cog):
                 "Neues Item live",
                 f"ID `{iid}` — **{name}** · {format_price(price_val)} in **{cat['name']}**"
                 f"{pack_note}{role_note}\n\n"
-                f"**Buy-Panel** → {panel_msg.jump_url} ({target.mention})"
+                f"**Item-Buy-Panel** (verknüpft mit Item `{iid}`) → "
+                f"{panel_msg.jump_url} ({target.mention})"
                 f"{code_note}",
             ),
             ephemeral=True,
@@ -721,6 +715,104 @@ class SetupCog(commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[int]]:
         return await self._cat_ac(interaction, current)
+
+    @new.command(
+        name="panel",
+        description="Buy-Panel für ein bestehendes Item posten (Direkt-Kauf)",
+    )
+    @app_commands.describe(
+        item="Item (tippen zum Suchen)",
+        channel="Ziel-Channel (Standard: hier)",
+        code="Optional: bestehenden Rabattcode auf dem Panel anzeigen",
+    )
+    async def new_panel(
+        self,
+        interaction: discord.Interaction,
+        item: int,
+        channel: Optional[discord.TextChannel] = None,
+        code: Optional[str] = None,
+    ) -> None:
+        assert interaction.guild is not None
+        row = await self.bot.db.get_item(item)
+        if not row or int(row["guild_id"]) != interaction.guild.id:
+            await interaction.response.send_message(
+                embed=error_embed("Item nicht gefunden"), ephemeral=True
+            )
+            return
+        if not int(row.get("active") or 0):
+            await interaction.response.send_message(
+                embed=error_embed("Item ist deaktiviert"), ephemeral=True
+            )
+            return
+
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Kein Channel",
+                    "Bitte `channel` setzen oder den Befehl in einem Text-Channel ausführen.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        discount_code = None
+        discount_label = None
+        code_raw = (code or "").strip()
+        if code_raw:
+            from utils.discount_codes import format_code_discount
+
+            crow = await self.bot.db.get_discount_code(
+                interaction.guild.id, code_raw
+            )
+            if not crow:
+                await interaction.response.send_message(
+                    embed=error_embed(
+                        "Code nicht gefunden",
+                        f"`{code_raw.upper()}` existiert nicht.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+            discount_code = str(crow["code"])
+            discount_label = format_code_discount(
+                str(crow["discount_type"]), float(crow["discount_value"])
+            )
+
+        cat = await self.bot.db.get_category(int(row["category_id"]))
+        from views.item_buy_views import (
+            ItemBuyView,
+            build_item_buy_embed,
+            ensure_item_buy_view,
+        )
+
+        await interaction.response.defer(ephemeral=True)
+        ensure_item_buy_view(self.bot, int(row["id"]))
+        embed = build_item_buy_embed(
+            item=row,
+            category_name=(cat["name"] if cat else None),
+            discount_code=discount_code,
+            discount_label=discount_label,
+        )
+        msg = await target.send(
+            embed=embed,
+            view=ItemBuyView(self.bot, int(row["id"])),
+        )
+        await interaction.followup.send(
+            embed=success_embed(
+                "Item-Panel gepostet",
+                f"**{row['name']}** (ID `{row['id']}`) → {msg.jump_url}",
+            ),
+            ephemeral=True,
+        )
+
+    @new_panel.autocomplete("item")
+    async def new_panel_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[int]]:
+        return await self.item_setpack_ac(interaction, current)
 
 
 async def setup(bot: ShopBot) -> None:
