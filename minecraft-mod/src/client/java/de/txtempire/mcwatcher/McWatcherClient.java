@@ -43,7 +43,7 @@ public class McWatcherClient implements ClientModInitializer {
 		ClientReceiveMessageEvents.CHAT.register(this::onChat);
 		ClientReceiveMessageEvents.GAME.register(this::onGame);
 
-		// Alle 60s Ping → Discord `/bot status` zeigt Watcher online
+		# Alle 15s Heartbeat + Retry (Link/Payment wenn Bot kurz offline war)
 		api.postHeartbeat();
 		HEARTBEAT.scheduleAtFixedRate(
 			() -> {
@@ -54,8 +54,8 @@ public class McWatcherClient implements ClientModInitializer {
 					McWatcher.LOGGER.debug("Heartbeat failed: {}", e.toString());
 				}
 			},
-			60L,
-			60L,
+			15L,
+			15L,
 			TimeUnit.SECONDS
 		);
 	}

@@ -29,11 +29,28 @@ class McLinkCog(commands.Cog):
         self.api = McApiServer(bot)
 
     async def cog_load(self) -> None:
-        await self.api.start()
+        # API erst nach Discord-Login starten (on_ready) — sonst wirkt
+        # „Listening“ als wäre der Bot online, obwohl Login noch scheitert.
+        pass
 
     async def cog_unload(self) -> None:
         await self.api.stop()
 
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        if self.api.listening:
+            return
+        await self.api.start()
+        if self.api.listening:
+            print(
+                "[MC-API] Bereit für Fabric-Watcher — "
+                f"teste im Browser: http://127.0.0.1:{int(config.MC_API_PORT)}/mc/v1/health"
+            )
+        else:
+            print(
+                "[MC-API] NICHT aktiv — setze MC_API_KEY in .env, "
+                "sonst keine Link-/Payment-Bestätigung."
+            )
     bot_group = app_commands.Group(
         name="bot",
         description="Bot-Status & Linking",
