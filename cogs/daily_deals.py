@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from utils.embeds import error_embed, format_price, success_embed
 from utils.price import parse_price
@@ -13,6 +13,8 @@ from views.daily_deal_views import (
     DailyDealView,
     build_daily_deal_embed,
     deal_is_expired,
+    delete_daily_deal_message,
+    sweep_expired_daily_deals,
 )
 
 if TYPE_CHECKING:
@@ -41,6 +43,23 @@ def compute_deal_price(
 class DailyDealsCog(commands.Cog):
     def __init__(self, bot: ShopBot) -> None:
         self.bot = bot
+        self.expire_loop.start()
+
+    def cog_unload(self) -> None:
+        self.expire_loop.cancel()
+
+    @tasks.loop(minutes=1)
+    async def expire_loop(self) -> None:
+        try:
+            n = await sweep_expired_daily_deals(self.bot)
+            if n:
+                print(f"[DailyDeal] {n} abgelaufene Deal-Nachricht(en) entfernt")
+        except Exception as e:
+            print(f"[DailyDeal] Expire-Sweep fehlgeschlagen: {e!r}")
+
+    @expire_loop.before_loop
+    async def before_expire_loop(self) -> None:
+        await self.bot.wait_until_ready()
 
     dailydeal = app_commands.Group(
         name="dailydeal",
@@ -249,25 +268,13 @@ class DailyDealsCog(commands.Cog):
 
         await self.bot.db.deactivate_daily_deal(deal)
 
-        channel_id = row.get("channel_id")
-        message_id = row.get("message_id")
-        if channel_id and message_id:
-            ch = interaction.guild.get_channel(int(channel_id))
-            if isinstance(ch, discord.TextChannel):
-                try:
-                    msg = await ch.fetch_message(int(message_id))
-                    embed = msg.embeds[0] if msg.embeds else None
-                    if embed:
-                        embed.title = f"⛔ Beendet — {embed.title or 'Daily Deal'}"
-                        embed.color = discord.Color.dark_grey()
-                    await msg.edit(embed=embed, view=None)
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    pass
+        deleted = await delete_daily_deal_message(self.bot, row)
+        note = " Nachricht gelöscht." if deleted else ""
 
         await interaction.response.send_message(
             embed=success_embed(
                 "Daily Deal beendet",
-                f"Deal `{deal}` ist nicht mehr kaufbar.",
+                f"Deal `{deal}` ist nicht mehr kaufbar.{note}",
             ),
             ephemeral=True,
         )

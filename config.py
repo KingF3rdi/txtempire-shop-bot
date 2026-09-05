@@ -50,8 +50,17 @@ BOOST_PACKS_TIER2 = int(os.getenv("BOOST_PACKS_TIER2", "15") or "15")
 # Payback / Daily XP
 PAYBACK_DAILY_XP = int(os.getenv("PAYBACK_DAILY_XP", "10") or "10")
 PAYBACK_REWARD_XP = int(os.getenv("PAYBACK_REWARD_XP", "100") or "100")
+# Kunden (Customer-Rolle) bekommen X% mehr Daily-XP
+PAYBACK_CUSTOMER_BONUS_PCT = int(
+    os.getenv("PAYBACK_CUSTOMER_BONUS_PCT", "20") or "20"
+)
 # 500k Shop-Guthaben = 5 Credits (1 Credit = 100k)
 PAYBACK_REWARD_CURRENCY = float(
     os.getenv("PAYBACK_REWARD_CURRENCY", "500000") or "500000"
+)
+
+# Creator-Code Provision (% vom Bestellpreis vor Code-Rabatt), Stats resetten monatlich
+CREATOR_COMMISSION_PCT = float(
+    os.getenv("CREATOR_COMMISSION_PCT", "10") or "10"
 )
 

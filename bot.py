@@ -268,6 +268,11 @@ class ShopBot(commands.Bot):
         removed = await sweep_expired_scan_premium_roles(self)
         if removed:
             print(f"[ScanPremium] {removed} abgelaufene Premium-Rolle(n) entfernt")
+        from views.daily_deal_views import sweep_expired_daily_deals
+
+        deals_gone = await sweep_expired_daily_deals(self)
+        if deals_gone:
+            print(f"[DailyDeal] {deals_gone} abgelaufene Deal-Nachricht(en) entfernt")
         print("Bot ist bereit.")
 
 

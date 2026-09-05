@@ -14,6 +14,26 @@ if TYPE_CHECKING:
     from bot import ShopBot
 
 
+async def _is_customer(bot: ShopBot, interaction: discord.Interaction) -> bool:
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        return False
+    settings = await bot.db.ensure_guild(interaction.guild.id)
+    role_id = settings.get("customer_role_id")
+    if not role_id:
+        return False
+    role = interaction.guild.get_role(int(role_id))
+    return bool(role and role in interaction.user.roles)
+
+
+def _daily_xp_for(*, is_customer: bool) -> tuple[int, bool]:
+    """Returns (xp_gain, customer_bonus_applied)."""
+    base = int(config.PAYBACK_DAILY_XP)
+    if not is_customer or config.PAYBACK_CUSTOMER_BONUS_PCT <= 0:
+        return base, False
+    bonus = int(round(base * (config.PAYBACK_CUSTOMER_BONUS_PCT / 100.0)))
+    return base + max(0, bonus), True
+
+
 class PaybackCog(commands.Cog):
     """Daily Payback-XP → Guthaben ab 100 XP."""
 
@@ -30,11 +50,13 @@ class PaybackCog(commands.Cog):
                 embed=error_embed("Nur auf dem Server"), ephemeral=True
             )
             return
+        customer = await _is_customer(self.bot, interaction)
+        xp_gain, bonus_on = _daily_xp_for(is_customer=customer)
         try:
             result = await self.bot.db.claim_daily_xp(
                 interaction.guild.id,
                 interaction.user.id,
-                xp_gain=config.PAYBACK_DAILY_XP,
+                xp_gain=xp_gain,
             )
         except ValueError as e:
             row = await self.bot.db.get_payback(
@@ -51,8 +73,13 @@ class PaybackCog(commands.Cog):
             )
             return
 
+        bonus_note = (
+            f" (Kunde +{config.PAYBACK_CUSTOMER_BONUS_PCT}%)"
+            if bonus_on
+            else ""
+        )
         body = (
-            f"+**{result['gained']} XP** · Stand: **{result['xp']} XP**\n"
+            f"+**{result['gained']} XP**{bonus_note} · Stand: **{result['xp']} XP**\n"
             f"Nächste Belohnung bei **{config.PAYBACK_REWARD_XP} XP** → "
             f"**{format_price(config.PAYBACK_REWARD_CURRENCY)}** Guthaben "
             f"({format_credits(currency_to_credits(config.PAYBACK_REWARD_CURRENCY))} Credits)."
@@ -91,6 +118,19 @@ class PaybackCog(commands.Cog):
         )
         xp = int(row.get("xp") or 0)
         need = max(0, config.PAYBACK_REWARD_XP - xp)
+        customer = await _is_customer(self.bot, interaction)
+        xp_gain, bonus_on = _daily_xp_for(is_customer=customer)
+        daily_line = f"**Daily:** +{xp_gain} XP (`/daily`)"
+        if bonus_on:
+            daily_line += (
+                f" — Kunde +{config.PAYBACK_CUSTOMER_BONUS_PCT}% "
+                f"(Basis {config.PAYBACK_DAILY_XP})"
+            )
+        elif config.PAYBACK_CUSTOMER_BONUS_PCT > 0:
+            daily_line += (
+                f"\n**Kunde-Bonus:** +{config.PAYBACK_CUSTOMER_BONUS_PCT}% XP "
+                f"mit Customer-Rolle"
+            )
         await interaction.response.send_message(
             embed=success_embed(
                 "Payback",
@@ -98,7 +138,7 @@ class PaybackCog(commands.Cog):
                 f"**Noch bis Belohnung:** {need} XP\n"
                 f"**Belohnung:** {format_price(config.PAYBACK_REWARD_CURRENCY)} "
                 f"Guthaben ({format_credits(currency_to_credits(config.PAYBACK_REWARD_CURRENCY))} Credits)\n"
-                f"**Daily:** +{config.PAYBACK_DAILY_XP} XP (`/daily`)\n"
+                f"{daily_line}\n"
                 f"**Bisher eingelöst:** {int(row.get('rewards_claimed') or 0)}×\n"
                 f"Letztes Daily: `{row.get('last_daily') or '—'}`",
             ),

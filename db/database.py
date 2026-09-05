@@ -295,6 +295,7 @@ class Database:
             ("guild_settings", "scan_credits_14", "REAL"),
             ("guild_settings", "scan_credits_30", "REAL"),
             ("guild_settings", "texturepack_role_id", "INTEGER"),
+            ("discount_codes", "owner_user_id", "INTEGER"),
         ):
             try:
                 await self.db.execute(
@@ -1203,6 +1204,7 @@ class Database:
         label: str = "",
         created_by: int | None = None,
         kind: str = "rabatt",
+        owner_user_id: int | None = None,
     ) -> int:
         normalized = code.strip().upper()
         if not normalized:
@@ -1214,8 +1216,8 @@ class Database:
             """
             INSERT INTO discount_codes
               (guild_id, code, discount_type, discount_value, max_uses,
-               max_per_user, label, created_by, kind)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               max_per_user, label, created_by, kind, owner_user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
@@ -1227,6 +1229,7 @@ class Database:
                 (label or "").strip()[:100],
                 created_by,
                 kind_n,
+                owner_user_id,
             ),
         )
         await self.db.commit()
@@ -1315,6 +1318,67 @@ class Database:
             (code_id,),
         )
         await self.db.commit()
+
+    async def get_creator_commission_stats(
+        self,
+        guild_id: int,
+        *,
+        code_id: int | None = None,
+        owner_user_id: int | None = None,
+        month_key: str | None = None,
+        commission_pct: float = 10.0,
+    ) -> list[dict[str, Any]]:
+        """
+        Creator-Verdienst je Code für einen Kalendermonat (UTC).
+        Provision = commission_pct % vom Preis vor Code-Rabatt
+        (total + discount_amount).
+        """
+        from datetime import datetime, timezone
+
+        month = month_key or datetime.now(timezone.utc).strftime("%Y-%m")
+        rate = float(commission_pct) / 100.0
+        q = """
+            SELECT
+              c.id AS code_id,
+              c.code,
+              c.label,
+              c.owner_user_id,
+              c.uses AS code_uses,
+              COUNT(o.id) AS orders_month,
+              COALESCE(SUM(
+                CAST(o.total AS REAL) + CAST(COALESCE(o.discount_amount, 0) AS REAL)
+              ), 0) AS sales_base,
+              COALESCE(SUM(
+                (CAST(o.total AS REAL) + CAST(COALESCE(o.discount_amount, 0) AS REAL))
+                * ?
+              ), 0) AS earnings
+            FROM discount_codes c
+            LEFT JOIN orders o ON o.discount_code_id = c.id
+              AND o.guild_id = c.guild_id
+              AND o.status = 'completed'
+              AND strftime('%Y-%m', COALESCE(o.completed_at, o.created_at)) = ?
+            WHERE c.guild_id = ?
+              AND COALESCE(c.kind, 'rabatt') = 'creator'
+        """
+        params: list[Any] = [rate, month, guild_id]
+        if code_id is not None:
+            q += " AND c.id = ?"
+            params.append(int(code_id))
+        if owner_user_id is not None:
+            q += " AND c.owner_user_id = ?"
+            params.append(int(owner_user_id))
+        q += " GROUP BY c.id ORDER BY earnings DESC, c.code ASC"
+        rows = await self.fetchall(q, tuple(params))
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            d["month"] = month
+            d["commission_pct"] = float(commission_pct)
+            d["sales_base"] = round(float(d.get("sales_base") or 0), 2)
+            d["earnings"] = round(float(d.get("earnings") or 0), 2)
+            d["orders_month"] = int(d.get("orders_month") or 0)
+            out.append(d)
+        return out
 
     async def apply_discount_to_order(
         self,

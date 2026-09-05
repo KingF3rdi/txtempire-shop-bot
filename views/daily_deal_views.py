@@ -28,6 +28,56 @@ def deal_is_expired(deal: dict) -> bool:
         return False
 
 
+async def delete_daily_deal_message(bot: ShopBot, deal: dict) -> bool:
+    """Löscht die Deal-Nachricht. True wenn gelöscht oder schon weg."""
+    channel_id = deal.get("channel_id")
+    message_id = deal.get("message_id")
+    if not channel_id or not message_id:
+        return False
+    guild = bot.get_guild(int(deal["guild_id"]))
+    if guild is None:
+        return False
+    channel = guild.get_channel(int(channel_id))
+    if not isinstance(channel, discord.TextChannel):
+        try:
+            channel = await bot.fetch_channel(int(channel_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return False
+    if not isinstance(channel, discord.TextChannel):
+        return False
+    try:
+        msg = await channel.fetch_message(int(message_id))
+        await msg.delete()
+        return True
+    except discord.NotFound:
+        return True
+    except (discord.Forbidden, discord.HTTPException):
+        return False
+
+
+async def expire_and_remove_deal(bot: ShopBot, deal: dict) -> bool:
+    """Deaktiviert Deal und entfernt die Channel-Nachricht."""
+    deal_id = int(deal["id"])
+    if int(deal.get("active") or 0):
+        await bot.db.deactivate_daily_deal(deal_id)
+    return await delete_daily_deal_message(bot, deal)
+
+
+async def sweep_expired_daily_deals(bot: ShopBot) -> int:
+    """Deaktiviert abgelaufene Deals und löscht deren Nachrichten."""
+    removed = 0
+    deals = await bot.db.list_active_daily_deals()
+    for deal in deals:
+        if not deal_is_expired(deal):
+            continue
+        if await expire_and_remove_deal(bot, deal):
+            removed += 1
+        else:
+            # trotzdem deaktivieren, auch wenn Delete fehlschlägt
+            await bot.db.deactivate_daily_deal(int(deal["id"]))
+    return removed
+
+
 def build_daily_deal_embed(
     *,
     item: dict,
@@ -119,8 +169,8 @@ async def handle_daily_deal_buy(
         return
 
     if not int(deal.get("active") or 0) or deal_is_expired(deal):
-        if int(deal.get("active") or 0):
-            await bot.db.deactivate_daily_deal(deal_id)
+        if int(deal.get("active") or 0) or deal_is_expired(deal):
+            await expire_and_remove_deal(bot, deal)
         await interaction.followup.send(
             embed=error_embed(
                 "Deal abgelaufen",

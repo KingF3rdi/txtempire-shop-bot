@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+import config
 from utils.discount_codes import format_code_discount
 from utils.embeds import error_embed, format_price, success_embed
 from utils.price import parse_price
@@ -38,6 +40,28 @@ def _format_code_line(r: dict) -> str:
         f" {format_code_discount(r['discount_type'], float(r['discount_value']))} "
         f"· {lim} · ≤{int(r.get('max_per_user') or 1)}/User"
     )
+
+
+def _month_label(month_key: str) -> str:
+    try:
+        dt = datetime.strptime(month_key, "%Y-%m")
+        months_de = (
+            "Januar",
+            "Februar",
+            "März",
+            "April",
+            "Mai",
+            "Juni",
+            "Juli",
+            "August",
+            "September",
+            "Oktober",
+            "November",
+            "Dezember",
+        )
+        return f"{months_de[dt.month - 1]} {dt.year}"
+    except ValueError:
+        return month_key
 
 
 class DiscountCodesCog(commands.Cog):
@@ -389,9 +413,144 @@ class DiscountCodesCog(commands.Cog):
             "\n".join(lines)[:3900],
         )
         embed.set_footer(
-            text="Im Kauf-Ticket: Button „Rabatt / Creator Code“ → Rabatt wird übernommen"
+            text="Stats & Verdienst: /cc stats · Im Ticket: Rabatt / Creator Code"
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @cc.command(
+        name="stats",
+        description="Creator-Verdienst diesen Monat (10% vom Bestellpreis)",
+    )
+    @app_commands.describe(
+        code="Optional: einzelner Creator-Code",
+        month="Monat YYYY-MM (Standard: aktueller UTC-Monat)",
+    )
+    async def cc_stats(
+        self,
+        interaction: discord.Interaction,
+        code: str | None = None,
+        month: str | None = None,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Nur auf dem Server"), ephemeral=True
+            )
+            return
+
+        month_key = (month or "").strip() or datetime.now(timezone.utc).strftime(
+            "%Y-%m"
+        )
+        try:
+            datetime.strptime(month_key, "%Y-%m")
+        except ValueError:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Ungültiger Monat", "Format: `YYYY-MM` (z.B. `2026-09`)."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        staff = await is_staff(self.bot, interaction)
+        code_id: int | None = None
+        owner_filter: int | None = None
+
+        if code:
+            row = await self.bot.db.get_discount_code(interaction.guild.id, code)
+            if not row or str(row.get("kind") or "") != "creator":
+                await interaction.response.send_message(
+                    embed=error_embed(
+                        "Nicht gefunden",
+                        f"`{(code or '').upper()}` ist kein Creator-Code.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+            owner_id = row.get("owner_user_id")
+            if not staff and (
+                not owner_id or int(owner_id) != interaction.user.id
+            ):
+                await interaction.response.send_message(
+                    embed=error_embed(
+                        "Keine Berechtigung",
+                        "Nur Staff oder der zugewiesene Creator.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+            code_id = int(row["id"])
+        elif not staff:
+            owner_filter = interaction.user.id
+
+        pct = float(config.CREATOR_COMMISSION_PCT)
+        stats = await self.bot.db.get_creator_commission_stats(
+            interaction.guild.id,
+            code_id=code_id,
+            owner_user_id=owner_filter,
+            month_key=month_key,
+            commission_pct=pct,
+        )
+
+        if not staff and not stats:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Keine Creator-Codes",
+                    "Dir ist kein Creator-Code zugewiesen "
+                    "(`/cc add owner:@du`). Staff sieht alle Stats.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        if not stats:
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Creator Stats",
+                    f"Keine Creator-Codes · Monat **{_month_label(month_key)}**.\n"
+                    f"Provision: **{pct:g}%** vom Bestellpreis (vor Code-Rabatt).",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        lines: list[str] = []
+        total_earn = 0.0
+        total_sales = 0.0
+        total_orders = 0
+        for s in stats:
+            total_earn += float(s["earnings"])
+            total_sales += float(s["sales_base"])
+            total_orders += int(s["orders_month"])
+            label = f" — {s['label']}" if s.get("label") else ""
+            owner = ""
+            oid = s.get("owner_user_id")
+            if oid:
+                owner = f" · <@{int(oid)}>"
+            lines.append(
+                f"`{s['code']}`{label}{owner}\n"
+                f" Bestellungen: **{int(s['orders_month'])}** · "
+                f"Umsatz: **{format_price(float(s['sales_base']))}** · "
+                f"**Verdienst: {format_price(float(s['earnings']))}** "
+                f"({pct:g}%)"
+            )
+
+        body = (
+            f"**Monat:** {_month_label(month_key)} (UTC) · "
+            f"Reset am 1. jedes Monats\n"
+            f"**Provision:** {pct:g}% vom Preis (vor Code-Rabatt)\n\n"
+            + "\n".join(lines[:30])
+        )
+        if len(stats) > 1:
+            body += (
+                f"\n\n**Summe:** {total_orders} Bestellungen · "
+                f"Umsatz {format_price(total_sales)} · "
+                f"Verdienst **{format_price(total_earn)}**"
+            )
+
+        await interaction.response.send_message(
+            embed=success_embed("🎬 Creator Stats", body[:3900]),
+            ephemeral=True,
+        )
 
     @cc.command(name="add", description="Creator-Code anlegen (Staff)")
     @app_commands.describe(
@@ -399,6 +558,7 @@ class DiscountCodesCog(commands.Cog):
         discount_type="Rabattart",
         value="Wert — z.B. 10 (%) oder 50k",
         creator="Creator-Name / Label",
+        owner="Discord-User des Creators (für /cc stats)",
         max_uses="Max. Gesamtnutzungen (leer = unbegrenzt)",
         max_per_user="Max. pro User",
     )
@@ -416,6 +576,7 @@ class DiscountCodesCog(commands.Cog):
         discount_type: app_commands.Choice[str],
         value: str,
         creator: str | None = None,
+        owner: discord.Member | None = None,
         max_uses: app_commands.Range[int, 1, 1_000_000] | None = None,
         max_per_user: app_commands.Range[int, 1, 100] = 1,
     ) -> None:
@@ -451,14 +612,18 @@ class DiscountCodesCog(commands.Cog):
             label=creator or "",
             created_by=interaction.user.id,
             kind="creator",
+            owner_user_id=owner.id if owner else None,
         )
+        owner_line = f"Owner: {owner.mention}\n" if owner else ""
         await interaction.response.send_message(
             embed=success_embed(
                 "Creator-Code erstellt",
                 f"`{code.strip().upper()}` — "
                 f"{format_code_discount(discount_type.value, dval)}\n"
                 + (f"Creator: **{creator}**\n" if creator else "")
-                + f"ID `{code_id}` · Übersicht: `/cc info`",
+                + owner_line
+                + f"Provision: **{config.CREATOR_COMMISSION_PCT:g}%** · "
+                f"`/cc stats`\nID `{code_id}`",
             ),
             ephemeral=True,
         )
@@ -469,6 +634,7 @@ class DiscountCodesCog(commands.Cog):
         discount_type="Rabattart",
         value="Neuer Rabattwert",
         creator="Optional neues Label",
+        owner="Optional: Discord-User des Creators",
     )
     @app_commands.choices(
         discount_type=[
@@ -484,6 +650,7 @@ class DiscountCodesCog(commands.Cog):
         discount_type: app_commands.Choice[str],
         value: str,
         creator: str | None = None,
+        owner: discord.Member | None = None,
     ) -> None:
         assert interaction.guild is not None
         if not await is_staff(self.bot, interaction):
@@ -511,12 +678,16 @@ class DiscountCodesCog(commands.Cog):
         }
         if creator is not None:
             fields["label"] = creator.strip()[:100]
+        if owner is not None:
+            fields["owner_user_id"] = owner.id
         await self.bot.db.update_discount_code(int(row["id"]), **fields)
+        owner_note = f"\nOwner: {owner.mention}" if owner else ""
         await interaction.response.send_message(
             embed=success_embed(
                 "Creator-Code aktualisiert",
                 f"`{row['code']}` → "
-                f"{format_code_discount(discount_type.value, dval)}\n"
+                f"{format_code_discount(discount_type.value, dval)}"
+                f"{owner_note}\n"
                 "Beim Einlösen im Ticket wird der neue Rabatt übernommen.",
             ),
             ephemeral=True,
