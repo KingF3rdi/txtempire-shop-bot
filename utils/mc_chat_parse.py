@@ -33,6 +33,19 @@ RESERVED_IGNS = frozenset(
         "sell",
         "auktionshaus",
         "hugosmp",
+        "has",
+        "paid",
+        "sent",
+        "gave",
+        "from",
+        "von",
+        "the",
+        "and",
+        "hat",
+        "hast",
+        "erhalten",
+        "gegeben",
+        "an",
     }
 )
 
@@ -110,12 +123,12 @@ PAYMENT_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.I,
     ),
     re.compile(
-        r"(?P<ign>[A-Za-z0-9_]{3,16})\s+(?:paid|sent|gave)\s+(?:you\s+)?"
+        r"(?P<ign>[A-Za-z0-9_]{3,16})\s+has\s+paid\s+you\s+"
         r"\$?\s*(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)",
         re.I,
     ),
     re.compile(
-        r"(?P<ign>[A-Za-z0-9_]{3,16})\s+has\s+paid\s+you\s+"
+        r"(?P<ign>[A-Za-z0-9_]{3,16})\s+(?:paid|sent|gave)\s+(?:you\s+)?"
         r"\$?\s*(?P<amount>[\d][\d.,]*\s*[kKmMbB]?)",
         re.I,
     ),

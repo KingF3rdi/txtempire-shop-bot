@@ -13,7 +13,9 @@ public final class ChatParser {
 	private static final Set<String> RESERVED = Set.of(
 		"nachricht", "msg", "whisper", "pn", "pm", "message", "system",
 		"money", "geld", "zahlung", "payment", "link", "verify", "code",
-		"txtempire", "dir", "you", "dich", "du", "sell", "auktionshaus", "hugosmp"
+		"txtempire", "dir", "you", "dich", "du", "sell", "auktionshaus", "hugosmp",
+		"has", "paid", "sent", "gave", "from", "von", "the", "and", "hat", "hast",
+		"erhalten", "gegeben", "an"
 	);
 
 	private static final Pattern[] WHISPERS = new Pattern[] {
@@ -87,11 +89,11 @@ public final class ChatParser {
 				+ "\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)"
 		),
 		Pattern.compile(
-			"(?i)([A-Za-z0-9_]{3,16})\\s+(?:paid|sent|gave)\\s+(?:you\\s+)?"
+			"(?i)([A-Za-z0-9_]{3,16})\\s+has\\s+paid\\s+you\\s+"
 				+ "\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)"
 		),
 		Pattern.compile(
-			"(?i)([A-Za-z0-9_]{3,16})\\s+has\\s+paid\\s+you\\s+"
+			"(?i)([A-Za-z0-9_]{3,16})\\s+(?:paid|sent|gave)\\s+(?:you\\s+)?"
 				+ "\\$?\\s*([\\d][\\d.,]*\\s*[kmb]?)"
 		),
 		Pattern.compile(
