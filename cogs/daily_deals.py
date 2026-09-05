@@ -113,7 +113,7 @@ class DailyDealsCog(commands.Cog):
         discount_type: Literal["percent", "amount"],
         discount: str,
         channel: Optional[discord.TextChannel] = None,
-        hours: Optional[app_commands.Range[float, 0.5, 720]] = None,
+        hours: Optional[app_commands.Range[float, 0.5, 720.0]] = None,
     ) -> None:
         assert interaction.guild is not None
 
