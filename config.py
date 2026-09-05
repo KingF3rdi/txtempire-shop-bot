@@ -74,13 +74,13 @@ INVITE_REWARDS: tuple[tuple[int, float], ...] = (
 )
 
 # Minecraft Account-Link + Chat-Watcher Mod API
-# Auf Bot-Hosting: Port freigeben; SERVER_PORT wird automatisch gesetzt.
+# Bot-Hosting/Pterodactyl setzt SERVER_PORT (= freigegebener Port, z.B. 26026).
+# Der Prozess MUSS genau auf SERVER_PORT lauschen, sonst ist er von außen unerreichbar.
 MC_API_HOST = os.getenv("MC_API_HOST", "0.0.0.0")
-MC_API_PORT = int(
-    os.getenv("MC_API_PORT")
-    or os.getenv("SERVER_PORT")
-    or "8765"
-)
+if os.getenv("SERVER_PORT"):
+    MC_API_PORT = int(os.getenv("SERVER_PORT") or "8765")
+else:
+    MC_API_PORT = int(os.getenv("MC_API_PORT") or "8765")
 MC_API_KEY = os.getenv("MC_API_KEY", "").strip()
 MC_LINK_CODE_TTL_MINUTES = int(os.getenv("MC_LINK_CODE_TTL_MINUTES", "10") or "10")
 # Ingame-Account, dem User den Link-Code per /msg schicken

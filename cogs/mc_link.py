@@ -46,13 +46,14 @@ class McLinkCog(commands.Cog):
             public = (
                 os.getenv("SERVER_IP")
                 or os.getenv("PUBLIC_IP")
-                or "DEINE-SERVER-IP"
+                or "95.216.12.48"
             )
             print(
                 "[MC-API] Bereit für Fabric-Watcher.\n"
-                f"  Intern: http://{config.MC_API_HOST}:{int(config.MC_API_PORT)}\n"
-                f"  In der Mod-Config apiUrl setzen auf:\n"
-                f"  http://{public}:{int(config.MC_API_PORT)}"
+                f"  Lauscht auf Port {int(config.MC_API_PORT)} "
+                f"(SERVER_PORT={os.getenv('SERVER_PORT')!r})\n"
+                f"  Test: http://{public}:{int(config.MC_API_PORT)}/mc/v1/health\n"
+                f"  Mod apiUrl: http://{public}:{int(config.MC_API_PORT)}"
             )
         else:
             print(
