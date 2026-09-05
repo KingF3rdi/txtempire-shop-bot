@@ -384,7 +384,6 @@ class InvitesCog(commands.Cog):
                 f"Invites — {getattr(target, 'display_name', target.name)}",
                 "\n".join(lines),
             ),
-            ephemeral=True,
         )
 
     @app_commands.command(
@@ -400,7 +399,6 @@ class InvitesCog(commands.Cog):
                 + _reward_table_text()
                 + "\n\n`/invites` · `/invite leaderboard`",
             ),
-            ephemeral=True,
         )
 
     # ── /invite … ───────────────────────────────────────────────────
@@ -479,7 +477,6 @@ class InvitesCog(commands.Cog):
 
         await interaction.response.send_message(
             embed=base_embed(title, body[:3900]),
-            ephemeral=True,
         )
 
     @invite.command(
@@ -677,7 +674,6 @@ class InvitesCog(commands.Cog):
                 + _format_leaderboard_lines(rows, interaction.guild)
                 + "\n\nNach Ende: Competition-Invites → normaler Stand.",
             ),
-            ephemeral=True,
         )
 
 
