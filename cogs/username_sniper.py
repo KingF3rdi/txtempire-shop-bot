@@ -202,6 +202,7 @@ class UsernameSniperCog(commands.Cog):
         count="Wie viele freie Names finden",
         prefix="Optionaler Prefix",
         suffix="Optionaler Suffix",
+        clean="Nur Buchstaben (kein Zahlen-/Unterstrich-Mix) — clean Username",
         details="Auch vergebene/unklare Treffer anzeigen",
     )
     @app_commands.choices(platform=_platform_choices())
@@ -213,6 +214,7 @@ class UsernameSniperCog(commands.Cog):
         count: app_commands.Range[int, 1, 50] = 10,
         prefix: str = "",
         suffix: str = "",
+        clean: bool = False,
         details: bool = False,
     ) -> None:
         if int(count) > MAX_LENGTH_NAMES:
@@ -243,6 +245,7 @@ class UsernameSniperCog(commands.Cog):
             count=int(count),
             prefix=(prefix or "").strip(),
             suffix=(suffix or "").strip(),
+            clean=clean,
             details=details,
         )
 

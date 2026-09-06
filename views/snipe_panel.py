@@ -124,6 +124,12 @@ class SnipeLengthModal(discord.ui.Modal, title="Nach Länge snipen"):
         required=False,
         max_length=16,
     )
+    clean = discord.ui.TextInput(
+        label="Nur Buchstaben? (ja/nein)",
+        placeholder="ja = clean Username, ohne Zahlen/_ (Standard: nein)",
+        required=False,
+        max_length=4,
+    )
 
     def __init__(self, bot: ShopBot, platform: str) -> None:
         super().__init__()
@@ -149,6 +155,14 @@ class SnipeLengthModal(discord.ui.Modal, title="Nach Länge snipen"):
         count = max(1, min(count, MAX_LENGTH_NAMES))
         prefix = str(self.prefix.value or "").strip()
         suffix = str(self.suffix.value or "").strip()
+        clean = str(self.clean.value or "").strip().lower() in (
+            "ja",
+            "j",
+            "yes",
+            "y",
+            "true",
+            "1",
+        )
         await run_snipe_length(
             self.bot,
             interaction,
@@ -157,6 +171,7 @@ class SnipeLengthModal(discord.ui.Modal, title="Nach Länge snipen"):
             count=count,
             prefix=prefix,
             suffix=suffix,
+            clean=clean,
         )
 
 
@@ -241,6 +256,7 @@ async def run_snipe_length(
     count: int,
     prefix: str = "",
     suffix: str = "",
+    clean: bool = False,
     details: bool = False,
 ) -> None:
     if interaction.guild is None:
@@ -271,6 +287,7 @@ async def run_snipe_length(
             count=1,
             prefix=prefix,
             suffix=suffix,
+            clean=clean,
         )
     except ValueError as e:
         send = (
@@ -315,10 +332,11 @@ async def run_snipe_length(
 
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True)
+    clean_note = " · ✨ clean (nur Buchstaben)" if clean else ""
     status = await interaction.followup.send(
         embed=warn_embed(
             "🎯 Length-Sniper läuft…",
-            f"{spec.emoji} **{spec.label}** · len **{length}** · "
+            f"{spec.emoji} **{spec.label}** · len **{length}**{clean_note} · "
             f"sucht **{allowed}** freie Names…\n"
             f"{format_snipe_quota_line(quota)}",
         ),
@@ -331,6 +349,7 @@ async def run_snipe_length(
             allowed,
             prefix=prefix,
             suffix=suffix,
+            clean=clean,
         )
     except ValueError as e:
         await status.edit(embed=error_embed("Ungültig", str(e)))
@@ -352,14 +371,15 @@ async def run_snipe_length(
             f"\n_Nur **{len(free)}** von {allowed} freien Names gefunden._"
         )
     body = f"{body}{found_note}\n{format_snipe_quota_line(quota)}"
+    title_suffix = f"(len {length}{', clean' if clean else ''})"
     embed = (
         success_embed(
-            f"✅ {len(free)} verfügbar — {spec.label} (len {length})",
+            f"✅ {len(free)} verfügbar — {spec.label} {title_suffix}",
             body,
         )
         if free
         else warn_embed(
-            f"Keine freien Treffer — {spec.label} (len {length})",
+            f"Keine freien Treffer — {spec.label} {title_suffix}",
             body,
         )
     )

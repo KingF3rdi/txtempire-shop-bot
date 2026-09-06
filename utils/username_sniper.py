@@ -40,6 +40,7 @@ class PlatformSpec:
     min_len: int
     max_len: int
     charset: str
+    clean_charset: str = "abcdefghijklmnopqrstuvwxyz"
 
 
 _MC_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
@@ -95,7 +96,12 @@ def generate_candidates(
     suffix: str = "",
     exclude: set[str] | None = None,
     hard_cap: int | None = None,
+    clean: bool = False,
 ) -> list[str]:
+    """
+    clean=True: nur reine Buchstaben-Kerne (keine Ziffern/Unterstriche/Punkte) —
+    "clean" Usernames statt zufälligem Zeichen-Mix.
+    """
     spec = PLATFORMS[platform]
     cap = hard_cap if hard_cap is not None else MAX_LENGTH_NAMES
     count = max(1, min(count, cap))
@@ -104,6 +110,7 @@ def generate_candidates(
     core_len = length - len(prefix) - len(suffix)
     if core_len < 0:
         raise ValueError("Prefix+Suffix länger als gewünschte Länge")
+    charset = spec.clean_charset if clean else spec.charset
     if core_len == 0:
         name = f"{prefix}{suffix}"
         if platform == "discord":
@@ -116,7 +123,7 @@ def generate_candidates(
     seen: set[str] = set(exclude or ())
     # Roblox: Prefix/Suffix dürfen die _-Regeln nicht brechen — Validate filtert später
     while len(out) < count:
-        core = "".join(random.choice(spec.charset) for _ in range(core_len))
+        core = "".join(random.choice(charset) for _ in range(core_len))
         name = f"{prefix}{core}{suffix}"
         if platform == "discord":
             name = name.lower()
@@ -296,6 +303,7 @@ async def find_available_names(
     suffix: str = "",
     delay: float = DEFAULT_DELAY,
     max_checks: int | None = None,
+    clean: bool = False,
 ) -> tuple[list[CheckResult], int]:
     """
     Sucht so lange, bis `want` bestätigte freie Names gefunden sind
@@ -328,6 +336,7 @@ async def find_available_names(
                 suffix=suffix,
                 exclude=tried,
                 hard_cap=FIND_MAX_CHECKS,
+                clean=clean,
             )
             if not batch:
                 break

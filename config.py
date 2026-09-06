@@ -44,7 +44,7 @@ SCAN_PREMIUM_30_CREDITS = (
 )
 
 # Username-Sniper Limits
-SNIPE_FREE_DAILY = int(os.getenv("SNIPE_FREE_DAILY", "10") or "10")
+SNIPE_FREE_DAILY = int(os.getenv("SNIPE_FREE_DAILY", "5") or "5")
 SNIPE_PREMIUM_14_DAILY = int(os.getenv("SNIPE_PREMIUM_14_DAILY", "30") or "30")
 # Preise für Snipe-Premium (Shop-Währung, 1 Credit = 100k)
 SNIPE_PREMIUM_14_PRICE = float(os.getenv("SNIPE_PREMIUM_14_PRICE", "500000") or "500000")
