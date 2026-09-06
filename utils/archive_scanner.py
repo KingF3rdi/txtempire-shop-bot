@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ENGINE_NAME = "TxtEmpire AV"
-ENGINE_VERSION = "2.1"
+ENGINE_VERSION = "3.0"
 
 # ---------------------------------------------------------------------------
 # Name / Path Heuristics (klassische RAT-/Stealer-Namen)
@@ -148,6 +148,49 @@ _CONTENT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     )
 )
 
+# ---------------------------------------------------------------------------
+# Erweitert (v3.0): IP-Logger/Exfil-Domains, Discord-Token-Diebstahl,
+# Java-Agent-Injection — typisch bei Minecraft-/Discord-gezielter Malware,
+# die klassische Signatur-Scanner oft übersehen.
+# ---------------------------------------------------------------------------
+_IP_LOGGER_DOMAINS_RE = re.compile(
+    r"(grabify\.link|iplogger\.(org|com|ru)|2no\.co|blasze\.(com|io)|"
+    r"yip\.su|whatstheirip\.com|ps3cfw\.com|stopmodreposts\.org|"
+    r"ipgrabber\.ru|canarytokens\.com|dnslog\.cn)",
+    re.IGNORECASE,
+)
+
+_ONION_RE = re.compile(r"\b[a-z2-7]{16,56}\.onion\b", re.IGNORECASE)
+
+# Rohe IP:Port-Literale (typisches C2-Callback-Muster in Configs/Scripts)
+_RAW_IP_PORT_RE = re.compile(
+    r"\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b"
+)
+
+# Discord-Account-Token-Muster (Bot- und User-Token-Formate)
+_DISCORD_TOKEN_RE = re.compile(
+    r"\b[MNO][A-Za-z\d_-]{23,27}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,40}\b|"
+    r"\bmfa\.[A-Za-z\d_-]{80,}\b"
+)
+
+_DISCORD_STEALER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(p, re.IGNORECASE), threat)
+    for p, threat in (
+        (r"leveldb.*discord|discord.*leveldb", "Trojan.Win32.DiscordTokenGrabber"),
+        (r"local storage.*discord|discord.*local storage",
+         "Trojan.Win32.DiscordTokenGrabber"),
+        (r"\\discord\\local storage\\leveldb", "Trojan.Win32.DiscordTokenGrabber"),
+        (r"injection\.js|betterdiscord.*inject", "Heur.Discord.ClientInjection"),
+        (r"discord_desktop_core", "Heur.Discord.ClientPatch"),
+    )
+)
+
+# JAR/Java-Agent-Injection — legitime Mods nutzen selten Premain/Agent-Classes
+_JAVA_AGENT_MANIFEST_RE = re.compile(
+    r"^(Premain-Class|Agent-Class|Launcher-Agent-Class)\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 # Binär-Signaturen (ASCII/UTF-16LE Marker in PE/Scripts)
 _BINARY_SIGNATURES: tuple[tuple[bytes, str, str], ...] = (
     (b"AsyncRAT", "critical", "Trojan.Win32.AsyncRAT"),
@@ -248,7 +291,9 @@ TEXTISH_EXTS = {
 
 SCAN_DISCLAIMER = (
     "⚠️ **Keine 100 %-Garantie:** Multi-Engine-Heuristik "
-    f"({ENGINE_NAME} {ENGINE_VERSION}: Namen, Hashes, Signaturen, Inhalt). "
+    f"({ENGINE_NAME} {ENGINE_VERSION}: Namen, Hashes, Signaturen, Inhalt, "
+    "Discord-Token-Grabber, IP-Logger/C2-Muster, Java-Agent-Injection, "
+    "Kompressions-/Entropie-Analyse, Kombinations-Scoring). "
     "Kann Threats übersehen oder Fehlalarme erzeugen — "
     "**kein Ersatz** für Windows Defender / ClamAV / VirusTotal."
 )
@@ -331,6 +376,57 @@ def explain_finding(finding: Finding) -> str:
     elif "elf-header" in r or "mach-o" in r:
         detail = (
             "Unerwartetes natives Binary (ELF/Mach-O) in einem Client-Pack."
+        )
+    elif "discord-token-diebstahl" in r:
+        detail = (
+            "Die Datei greift gezielt auf den **Discord-Client-Speicher** "
+            "(LevelDB/Local Storage) zu — klassisches Muster für "
+            "**Discord-Token-Grabber**, die dein Konto übernehmen können."
+        )
+    elif "ip-logger" in r or "exfil-domain" in r:
+        detail = (
+            "Der Inhalt verweist auf einen bekannten **IP-Logger-Dienst** — "
+            "wird genutzt, um beim Öffnen der Datei heimlich deine IP-Adresse "
+            "und ggf. Standortdaten zu erfassen."
+        )
+    elif "onion-adresse" in r:
+        detail = (
+            "Eine **Tor-.onion-Adresse** im Inhalt kann auf einen versteckten "
+            "Command-&-Control-Server (C2) hindeuten, mit dem Malware "
+            "kommuniziert."
+        )
+    elif "c2-callback" in r or "ip:port-adresse" in r:
+        detail = (
+            "Eine rohe **IP:Port-Kombination** im Code/Inhalt ist ein "
+            "typisches Muster für hartkodierte **C2-Server-Adressen** "
+            "in RATs/Backdoors."
+        )
+    elif "discord-token-format" in r:
+        detail = (
+            "Im Inhalt steht ein Text, der wie ein **echter Discord-Token** "
+            "aussieht — entweder ein geleakter Token oder ein Hinweis, dass "
+            "die Datei Tokens sammelt/exfiltriert."
+        )
+    elif "java-agent-injection" in r:
+        detail = (
+            "Das JAR deklariert eine **Java-Agent-Klasse** (Premain/Agent-Class) "
+            "im Manifest — eine Technik, mit der Code **in andere laufende "
+            "Java-Prozesse eingeschleust** wird. In normalen Mods/Texture-"
+            "packs unüblich."
+        )
+    elif "kompressionsrate" in r:
+        detail = (
+            "Der Eintrag entpackt sich auf ein Vielfaches seiner komprimierten "
+            "Größe — typisches Muster für eine **Zip-Bomb** (Denial-of-Service "
+            "beim Entpacken/Scannen)."
+        )
+    elif "kombination mehrerer verdachtsmomente" in r:
+        detail = (
+            "**Mehrere unabhängige Warnsignale** treffen auf dieselbe Datei zu "
+            "(z.B. Verschleierung + verdächtiger Inhalt + Netzwerk-Hinweise). "
+            "Einzeln wäre keins davon eindeutig — in Kombination ist das "
+            "ein starkes Indiz für **bisher unbekannte/neue Malware**, die "
+            "keine klassische Signatur hat."
         )
     else:
         detail = (
@@ -469,6 +565,50 @@ def _add_finding(
             threat_name=threat_name,
         )
     )
+
+
+def _escalate_combined_findings(
+    findings: list[Finding],
+    *,
+    seen: set[tuple[str, str]] | None = None,
+) -> list[Finding]:
+    """
+    Kombiniert mehrere schwache Indikatoren pro Datei zu einem starken Befund.
+
+    Ein klassischer Signatur-Scanner bewertet jeden Treffer isoliert.
+    Hier gilt: 3 unabhängige "medium/high"-Heuristiken auf **derselben Datei**
+    (z.B. hohe Entropie + rohe IP:Port-Adresse + langer Obfuscation-Pfad)
+    sind zusammen ein deutlich stärkeres Signal als jede für sich — das
+    erkennt auch neue/unbekannte Malware-Varianten ohne bekannte Signatur.
+    """
+    weight = {"critical": 3, "high": 2, "medium": 1}
+    by_path: dict[str, list[Finding]] = {}
+    for f in findings:
+        by_path.setdefault(f.path, []).append(f)
+
+    extra: list[Finding] = []
+    for path, items in by_path.items():
+        if any(f.severity == "critical" for f in items):
+            continue  # schon eindeutig — keine Eskalation nötig
+        distinct_threats = {f.threat_name or f.reason for f in items}
+        if len(distinct_threats) < 3:
+            continue
+        score = sum(weight.get(f.severity, 0) for f in items)
+        if score < 4:
+            continue
+        names = ", ".join(sorted(t for t in distinct_threats if t)[:5])
+        _add_finding(
+            extra,
+            severity="critical",
+            path=path,
+            reason=(
+                f"Kombination mehrerer Verdachtsmomente ({len(distinct_threats)} "
+                f"unabhängige Indikatoren, Score {score})"
+            ),
+            threat_name=f"Heur.Combined.MultipleIndicators[{names}]",
+            seen=seen,
+        )
+    return findings + extra
 
 
 def _check_entry_name(
@@ -693,6 +833,77 @@ def _check_text_content(
             )
             break
 
+    for pat, threat in _DISCORD_STEALER_PATTERNS:
+        if pat.search(text):
+            _add_finding(
+                findings,
+                severity="critical",
+                path=path,
+                reason="Discord-Token-Diebstahl-Muster erkannt",
+                threat_name=threat,
+                seen=seen,
+            )
+            break
+
+    if _IP_LOGGER_DOMAINS_RE.search(text):
+        _add_finding(
+            findings,
+            severity="high",
+            path=path,
+            reason="IP-Logger/Exfil-Domain im Inhalt gefunden",
+            threat_name="Heur.Exfil.IPLogger",
+            seen=seen,
+        )
+
+    if _ONION_RE.search(text):
+        _add_finding(
+            findings,
+            severity="medium",
+            path=path,
+            reason="Tor-.onion-Adresse im Inhalt (mögliche C2)",
+            threat_name="Heur.Exfil.OnionAddress",
+            seen=seen,
+        )
+
+    # Nur in Skript-/Code-Dateien prüfen — vermeidet False Positives bei
+    # legitimen Server-IP-Erwähnungen in pack.mcmeta/README/Configs.
+    _script_exts = {
+        ".js", ".jse", ".ps1", ".bat", ".cmd", ".vbs", ".wsf",
+        ".py", ".cs", ".java", ".php", ".sh",
+    }
+    if Path(path.lower()).suffix in _script_exts and _RAW_IP_PORT_RE.search(text):
+        _add_finding(
+            findings,
+            severity="medium",
+            path=path,
+            reason="Rohe IP:Port-Adresse im Inhalt (mögliches C2-Callback)",
+            threat_name="Heur.C2.RawIPPort",
+            seen=seen,
+        )
+
+    if _DISCORD_TOKEN_RE.search(text):
+        _add_finding(
+            findings,
+            severity="high",
+            path=path,
+            reason="Discord-Token-Format im Klartext gefunden",
+            threat_name="Heur.Credential.DiscordToken",
+            seen=seen,
+        )
+
+    if Path(path.lower()).name in ("manifest.mf",) or path.lower().endswith(
+        "/manifest.mf"
+    ):
+        if _JAVA_AGENT_MANIFEST_RE.search(text):
+            _add_finding(
+                findings,
+                severity="high",
+                path=path,
+                reason="Java-Agent-Injection im MANIFEST.MF (Premain/Agent-Class)",
+                threat_name="Heur.Java.AgentInjection",
+                seen=seen,
+            )
+
 
 def _scan_stream(
     path: str,
@@ -870,6 +1081,21 @@ def _scan_zip_bytes(
                 size = int(info.file_size or 0)
                 if size <= 0 and info.compress_size:
                     size = int(info.compress_size)
+                comp = int(info.compress_size or 0)
+                if comp > 4096 and size > 0:
+                    ratio = size / comp
+                    if ratio > 300:
+                        _add_finding(
+                            result.findings,
+                            severity="high",
+                            path=display,
+                            reason=(
+                                f"Extreme Kompressionsrate (1:{ratio:.0f}) "
+                                "im Archiv-Eintrag"
+                            ),
+                            threat_name="Heur.Archive.CompressionBomb",
+                            seen=seen,
+                        )
                 try:
                     with zf.open(info, "r") as entry:
                         files, nbytes = _scan_stream(
@@ -1012,6 +1238,8 @@ def scan_archive_bytes(data: bytes, filename: str) -> ScanResult:
         existing = {(x.path, x.threat_name or x.reason) for x in result.findings}
         if key not in existing:
             result.findings.append(f)
+
+    result.findings = _escalate_combined_findings(result.findings)
 
     result.duration_ms = int((time.perf_counter() - started) * 1000)
     result.engine = f"{ENGINE_NAME}/{ENGINE_VERSION}"
