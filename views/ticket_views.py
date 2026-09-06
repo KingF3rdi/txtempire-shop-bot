@@ -48,18 +48,24 @@ async def enrich_order_item_roles(bot: ShopBot, order_items: list[dict]) -> list
     return enriched
 
 
-async def is_staff(bot: ShopBot, interaction: discord.Interaction) -> bool:
-    assert interaction.guild is not None
-    if interaction.user.guild_permissions.administrator:  # type: ignore[union-attr]
+async def is_staff_member(
+    bot: ShopBot, guild: discord.Guild, member: discord.abc.User
+) -> bool:
+    """Wie is_staff, aber ohne Interaction — für Listener/Events (z.B. Auto-Scan)."""
+    if isinstance(member, discord.Member) and member.guild_permissions.administrator:
         return True
-    settings = await bot.db.ensure_guild(interaction.guild.id)
+    settings = await bot.db.ensure_guild(guild.id)
     staff_id = settings.get("staff_role_id")
     if not staff_id:
         return False
-    member = interaction.user
     if isinstance(member, discord.Member):
         return any(r.id == int(staff_id) for r in member.roles)
     return False
+
+
+async def is_staff(bot: ShopBot, interaction: discord.Interaction) -> bool:
+    assert interaction.guild is not None
+    return await is_staff_member(bot, interaction.guild, interaction.user)
 
 
 async def is_buyer_or_staff(

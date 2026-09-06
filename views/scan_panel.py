@@ -7,6 +7,8 @@ import discord
 
 import config
 from utils.archive_scanner import (
+    ARCHIVE_EXTS,
+    SINGLE_FILE_SCAN_EXTS,
     is_scannable_filename,
     scan_archive_bytes_async,
 )
@@ -15,27 +17,55 @@ from utils.embeds import base_embed, error_embed, format_price, success_embed, w
 from utils.scan_limits import consume_scan_quota, get_scan_quota
 from utils.scan_premium_role import post_scan_log, sync_scan_premium_role
 from utils.scan_prices import get_scan_prices, premium_scan_label
-from views.ticket_views import is_staff
+from views.ticket_views import is_staff, is_staff_member
 
 if TYPE_CHECKING:
     from bot import ShopBot
+
+
+# In-Memory-Cache: guild_id -> Panel-Channel-ID. Vermeidet einen DB-Query pro
+# Nachricht in jedem Channel — nur Nachrichten im gecachten Panel-Channel
+# lösen den Auto-Scan aus. Wird beim Posten/Refresh des Panels aktualisiert.
+_PANEL_CHANNELS: dict[int, int] = {}
+
+# (channel_id, user_id) Paare, für die gerade ein Button-Flow
+# (scan_channel / scan_dm) auf genau diese Datei wartet — verhindert,
+# dass der Auto-Scan-Listener dieselbe Nachricht ein zweites Mal verarbeitet.
+_PENDING_CHANNEL_WAITS: set[tuple[int, int]] = set()
+
+
+def get_panel_channel_id(guild_id: int) -> int | None:
+    return _PANEL_CHANNELS.get(guild_id)
+
+
+def is_pending_wait(channel_id: int, user_id: int) -> bool:
+    return (channel_id, user_id) in _PENDING_CHANNEL_WAITS
+
+
+def supported_types_line() -> str:
+    """Einheitliche, immer aktuelle Liste — direkt aus dem Scanner-Modul."""
+    exts = sorted(ARCHIVE_EXTS | SINGLE_FILE_SCAN_EXTS)
+    return " ".join(f"`{e}`" for e in exts)
 
 
 async def build_scan_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embed:
     prices = await get_scan_prices(bot, guild_id)
     embed = base_embed(
         "🛡 File Scanner (Deep Scan)",
-        "Scannt **ZIP / RAR / JAR / 7Z** sowie einzelne **.exe/.dll/...** "
-        "antivirus-mäßig — **jede Datei** wird gestreamt:\n"
-        "SHA-256 · Signaturen über den gesamten Inhalt · PE/MZ · Nested-Archive.\n\n"
+        f"**Unterstützte Dateitypen:** {supported_types_line()}\n\n"
+        "Scannt Archive **und** einzelne Dateien antivirus-mäßig — **jede "
+        "Datei** wird gestreamt: SHA-256 · Signaturen über den gesamten "
+        "Inhalt · PE/MZ · Nested-Archive.\n\n"
         f"• Free: **{config.SCAN_FREE_DAILY} Scan/Tag**\n"
         f"• 14 Tage Premium: **{config.SCAN_PREMIUM_DAILY} Scans/Tag**\n"
         f"• 30 Tage Premium: **unbegrenzte Scans**\n\n"
-        "**Datei hier droppen** — ohne DM, direkt im Channel\n"
+        "📎 **Datei direkt hier in den Channel droppen** — kein Button, "
+        "kein Command nötig. Ergebnis kommt **per DM**, im Channel siehst "
+        "du nur eine Reaction (✅/⚠️/⛔).\n"
+        "**Datei hier droppen** (Button) — geführter Ablauf mit Antwort im Chat\n"
         "**URL scannen** — Download-Link (Discord-CDN, Dropbox `dl=1`, Drive)\n"
-        "Auch: `/scan url` · `/scan file`\n"
-        "Du siehst **„Deep Scan läuft…“** bis Hash/Signatur-Scan fertig ist.\n\n"
-        "⚠️ **Keine 100 %-Garantie** — Multi-Engine, kein Windows Defender.",
+        "Auch: `/scan url` · `/scan file`\n\n"
+        "⚠️ **Keine 100 %-Garantie** — Multi-Engine, kein Windows Defender.",
     )
     embed.add_field(
         name="Premium",
@@ -314,6 +344,8 @@ class ScanPanelView(discord.ui.View):
                 and bool(message.attachments)
             )
 
+        pending_key = (channel.id, user_id)
+        _PENDING_CHANNEL_WAITS.add(pending_key)
         try:
             msg = await self.bot.wait_for("message", check=check, timeout=120.0)
         except asyncio.TimeoutError:
@@ -325,6 +357,8 @@ class ScanPanelView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        finally:
+            _PENDING_CHANNEL_WAITS.discard(pending_key)
 
         att = msg.attachments[0]
         if not is_scannable_filename(att.filename):
@@ -713,6 +747,7 @@ async def post_or_refresh_scan_panel(
         try:
             msg = await channel.fetch_message(int(row["message_id"]))
             await msg.edit(embed=embed, view=view)
+            _PANEL_CHANNELS[guild.id] = channel.id
             return msg
         except (discord.NotFound, discord.HTTPException):
             pass
@@ -720,6 +755,7 @@ async def post_or_refresh_scan_panel(
     await bot.db.set_scan_panel(
         guild.id, channel_id=channel.id, message_id=msg.id
     )
+    _PANEL_CHANNELS[guild.id] = channel.id
     return msg
 
 
@@ -737,10 +773,12 @@ async def refresh_scan_panel_on_ready(bot: ShopBot) -> list[str]:
         if not isinstance(channel, discord.TextChannel):
             lines.append(f"Scan-Panel guild {gid}: Channel fehlt")
             continue
+        _PANEL_CHANNELS[gid] = channel.id
         try:
             msg = await channel.fetch_message(int(row["message_id"]))
         except discord.NotFound:
             await bot.db.clear_scan_panel_message(gid)
+            _PANEL_CHANNELS.pop(gid, None)
             lines.append(
                 f"Scan-Panel {guild.name}: Nachricht fehlt — kein Auto-Post"
             )
@@ -754,3 +792,97 @@ async def refresh_scan_panel_on_ready(bot: ShopBot) -> list[str]:
         except discord.HTTPException as e:
             lines.append(f"Scan-Panel Edit fehlgeschlagen: {e}")
     return lines
+
+
+async def auto_scan_dropped_file(
+    bot: ShopBot, message: discord.Message, attachment: discord.Attachment
+) -> None:
+    """
+    Auto-Scan: Datei wurde direkt im Scan-Panel-Channel gepostet — ganz ohne
+    Button/Command. Quota gilt weiterhin. Ergebnis geht ausschließlich per DM
+    raus; im Channel gibt's nur eine Reaction als Rückmeldung, damit der
+    Channel nicht mit Scan-Reports vollläuft.
+    """
+    guild = message.guild
+    assert guild is not None
+
+    staff = await is_staff_member(bot, guild, message.author)
+
+    try:
+        quota = await consume_scan_quota(
+            bot, guild.id, message.author.id, is_staff=staff
+        )
+    except ValueError as e:
+        try:
+            await message.add_reaction("⛔")
+        except discord.HTTPException:
+            pass
+        dm = await _dm_user(message.author)
+        if dm is not None:
+            try:
+                await dm.send(embed=error_embed("Scan-Limit", str(e)))
+            except discord.HTTPException:
+                pass
+        return
+
+    try:
+        await message.add_reaction("🔍")
+    except discord.HTTPException:
+        pass
+
+    try:
+        data = await attachment.read()
+    except discord.HTTPException:
+        try:
+            await message.add_reaction("❌")
+        except discord.HTTPException:
+            pass
+        return
+
+    filename = attachment.filename or "file"
+    result = await scan_archive_bytes_async(data, filename)
+
+    from utils.scan_stats import log_scan_result
+
+    await log_scan_result(bot, guild.id, message.author.id, result)
+
+    footer = (
+        f"Scans heute: {quota['used']}/{quota['limit']}"
+        if not staff
+        else "Staff — kein Limit"
+    )
+
+    sent = await _send_scan_result_dm(
+        message.author,
+        filename=filename,
+        result_summary=result.summary(),
+        is_clean=result.is_clean,
+        is_blocked=result.is_blocked,
+        quota_footer=footer,
+    )
+
+    try:
+        await message.remove_reaction("🔍", bot.user)
+    except (discord.HTTPException, discord.Forbidden):
+        pass
+    try:
+        if result.is_clean:
+            await message.add_reaction("✅")
+        elif result.is_blocked:
+            await message.add_reaction("⛔")
+        else:
+            await message.add_reaction("⚠️")
+        if not sent:
+            await message.add_reaction("🔒")  # DMs geschlossen
+    except discord.HTTPException:
+        pass
+
+    await post_scan_log(
+        bot,
+        guild,
+        user=message.author,
+        filename=filename,
+        summary=result.summary(),
+        is_clean=result.is_clean,
+        is_blocked=result.is_blocked,
+    )

@@ -120,6 +120,37 @@ class ScannerCog(commands.Cog):
     def __init__(self, bot: ShopBot) -> None:
         self.bot = bot
 
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """
+        Auto-Scan: Datei wird OHNE Button/Command direkt in den Scan-Panel-
+        Channel gedroppt. Läuft parallel zum geführten Button-Flow, ohne
+        dieselbe Datei doppelt zu scannen (siehe _PENDING_CHANNEL_WAITS).
+        """
+        if message.author.bot or message.guild is None or not message.attachments:
+            return
+
+        from views.scan_panel import (
+            auto_scan_dropped_file,
+            get_panel_channel_id,
+            is_pending_wait,
+        )
+
+        panel_channel_id = get_panel_channel_id(message.guild.id)
+        if panel_channel_id is None or message.channel.id != panel_channel_id:
+            return
+        if is_pending_wait(message.channel.id, message.author.id):
+            return
+
+        attachment = next(
+            (a for a in message.attachments if is_scannable_filename(a.filename)),
+            None,
+        )
+        if attachment is None:
+            return
+
+        await auto_scan_dropped_file(self.bot, message, attachment)
+
     scan = app_commands.Group(
         name="scan",
         description="Antivirus File Scanner (ZIP/RAR/JAR/7Z/.exe)",
