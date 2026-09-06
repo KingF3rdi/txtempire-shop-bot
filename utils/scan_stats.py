@@ -14,7 +14,9 @@ def classify_findings(findings: list[Finding]) -> str:
     """Haupt-Kategorie für Treffer (eine pro Scan)."""
     if not findings:
         return "clean"
-    blob = " ".join(f"{f.reason} {f.path}" for f in findings).lower()
+    blob = " ".join(
+        f"{f.reason} {f.path} {f.threat_name}" for f in findings
+    ).lower()
     if any(
         x in blob
         for x in (
@@ -23,18 +25,23 @@ def classify_findings(findings: list[Finding]) -> str:
             "grabber",
             "keylogger",
             "malware",
+            "trojan",
             "verdächtiger name",
+            "binärsignatur",
+            "bekannter malware-hash",
         )
     ):
         return "malware"
     if "gefährliche dateiendung" in blob or "doppelte dateiendung" in blob:
         return "dangerous_ext"
-    if "mz" in blob or "executable" in blob:
+    if "mz" in blob or "executable" in blob or "peheader" in blob:
         return "disguised_exe"
     if "traversal" in blob or "pfad" in blob:
         return "path_issue"
-    if "obfuscation" in blob or "langer pfad" in blob:
+    if "obfuscation" in blob or "langer pfad" in blob or "entropie" in blob:
         return "obfuscation"
+    if "exfil" in blob or "webhook" in blob or "downloader" in blob:
+        return "exfil_download"
     return "other_suspicious"
 
 

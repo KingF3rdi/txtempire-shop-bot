@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
-from utils.archive_scanner import is_scannable_filename, scan_archive_bytes
+from utils.archive_scanner import is_scannable_filename, scan_archive_bytes_async
 from utils.credits import format_credits
 from utils.embeds import error_embed, format_price, success_embed, warn_embed
 from utils.scan_limits import consume_scan_quota, get_scan_quota
@@ -115,12 +115,15 @@ async def open_scan_premium_ticket(
 
 
 class ScannerCog(commands.Cog):
-    """ZIP/RAR-Scanner auf RATs, Stealer und verdächtige Dateien."""
+    """Antivirus-ähnlicher ZIP/RAR/JAR-Scanner (RATs, Stealer, Signaturen)."""
 
     def __init__(self, bot: ShopBot) -> None:
         self.bot = bot
 
-    scan = app_commands.Group(name="scan", description="File Scanner")
+    scan = app_commands.Group(
+        name="scan",
+        description="Antivirus File Scanner (ZIP/RAR/JAR)",
+    )
 
     @app_commands.command(
         name="scanpanel",
@@ -161,7 +164,7 @@ class ScannerCog(commands.Cog):
 
     @scan.command(
         name="file",
-        description="ZIP/RAR/JAR auf RATs, Stealer und verdächtige Dateien scannen",
+        description="ZIP/RAR/JAR antivirus-ähnlich scannen (Signaturen + Heuristik)",
     )
     @app_commands.describe(file="Archiv-Datei (.zip / .rar / .jar)")
     async def scan_file(
@@ -231,7 +234,20 @@ class ScannerCog(commands.Cog):
             )
             return
 
-        result = scan_archive_bytes(data, file.filename or "archive")
+        size_mb = len(data) / (1024 * 1024)
+        status = await interaction.followup.send(
+            embed=warn_embed(
+                "🔍 Deep Scan läuft…",
+                f"**`{file.filename or 'archive'}`** ({size_mb:.2f} MB)\n"
+                "Hash + Signaturen für jede Datei im Archiv.\n"
+                "_Bitte warten…_",
+            ),
+            ephemeral=True,
+        )
+
+        result = await scan_archive_bytes_async(
+            data, file.filename or "archive"
+        )
         from utils.scan_premium_role import post_scan_log
         from utils.scan_stats import log_scan_result
 
@@ -255,20 +271,23 @@ class ScannerCog(commands.Cog):
         if result.error and not result.findings:
             embed = warn_embed("Scan", result.summary())
             embed.set_footer(text=footer)
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await status.edit(embed=embed)
             return
         if result.is_clean:
-            embed = success_embed("Scan sauber", result.summary())
+            embed = success_embed(
+                f"✅ CLEAN — {file.filename or 'archive'}", result.summary()
+            )
             embed.set_footer(text=footer)
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await status.edit(embed=embed)
             return
 
-        embed = warn_embed("Verdächtige Datei", result.summary())
+        verdict = result.verdict
+        embed = warn_embed(f"⚠️ {verdict} — Scan-Report", result.summary())
         if result.is_blocked:
-            embed.title = "⛔ Kritische Treffer (RAT / Malware-Indikatoren)"
+            embed.title = f"⛔ {verdict} — Malware / kritische Treffer"
             embed.color = discord.Color.dark_red()
         embed.set_footer(text=footer)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await status.edit(embed=embed)
 
     @scan.command(
         name="url",
@@ -498,25 +517,32 @@ class ScannerCog(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
-        from utils.archive_scanner import scan_archive_path
+        from utils.archive_scanner import scan_archive_bytes_async
         from utils.scan_stats import log_scan_result
 
-        result = scan_archive_path(path)
+        status = await interaction.followup.send(
+            embed=warn_embed(
+                "🔍 Deep Scan läuft…",
+                f"Pack von Item `{item}` wird dateiweise gescannt…",
+            ),
+            ephemeral=True,
+        )
+        data = path.read_bytes()
+        result = await scan_archive_bytes_async(data, path.name)
         await log_scan_result(
             self.bot, interaction.guild.id, interaction.user.id, result
         )
         if result.is_clean:
-            await interaction.followup.send(
+            await status.edit(
                 embed=success_embed(
-                    f"Pack Item `{item}` sauber", result.summary()
-                ),
-                ephemeral=True,
+                    f"✅ CLEAN — Pack Item `{item}`", result.summary()
+                )
             )
             return
-        embed = warn_embed(f"Pack Item `{item}`", result.summary())
+        embed = warn_embed(f"Pack Item `{item}` — {result.verdict}", result.summary())
         if result.is_blocked:
             embed.color = discord.Color.dark_red()
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await status.edit(embed=embed)
 
     @app_commands.command(
         name="scangrant",

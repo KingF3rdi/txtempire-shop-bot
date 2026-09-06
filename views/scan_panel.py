@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING
 import discord
 
 import config
-from utils.archive_scanner import is_scannable_filename, scan_archive_bytes
+from utils.archive_scanner import (
+    is_scannable_filename,
+    scan_archive_bytes_async,
+)
 from utils.credits import format_credits
 from utils.embeds import base_embed, error_embed, format_price, success_embed, warn_embed
 from utils.scan_limits import consume_scan_quota, get_scan_quota
@@ -21,16 +24,17 @@ if TYPE_CHECKING:
 async def build_scan_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embed:
     prices = await get_scan_prices(bot, guild_id)
     embed = base_embed(
-        "File Scanner",
-        "Scanne **ZIP / RAR / JAR** auf RATs, Stealer und verdächtige Dateien.\n\n"
+        "🛡 File Scanner (Deep Scan)",
+        "Scannt **ZIP / RAR / JAR** antivirus-mäßig — **jede Datei** wird gestreamt:\n"
+        "SHA-256 · Signaturen über den gesamten Inhalt · PE/MZ · Nested-Archive.\n\n"
         f"• Free: **{config.SCAN_FREE_DAILY} Scan/Tag**\n"
         f"• 14 Tage Premium: **{config.SCAN_PREMIUM_DAILY} Scans/Tag**\n"
         f"• 30 Tage Premium: **unbegrenzte Scans**\n\n"
         "**Datei hier droppen** — ohne DM, direkt im Channel\n"
         "**URL scannen** — Download-Link (Discord-CDN, Dropbox `dl=1`, Drive)\n"
         "Auch: `/scan url` · `/scan file`\n"
-        "Ergebnis privat (ephemeral / DM). Erfolgreiche Scans landen im Log-Channel.\n\n"
-        "⚠️ **Keine 100 %-Garantie** — Heuristik, kein vollständiger Virenscan.",
+        "Du siehst **„Deep Scan läuft…“** bis Hash/Signatur-Scan fertig ist.\n\n"
+        "⚠️ **Keine 100 %-Garantie** — Multi-Engine, kein Windows Defender.",
     )
     embed.add_field(
         name="Premium",
@@ -44,7 +48,9 @@ async def build_scan_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embed:
         ),
         inline=False,
     )
-    embed.set_footer(text="Auch möglich: /scan file · Keine 100%-Garantie auf „safe“")
+    embed.set_footer(
+        text="TxtEmpire AV 2.1 · Deep Scan · Keine 100%-Garantie auf CLEAN"
+    )
     return embed
 
 
@@ -68,12 +74,12 @@ async def _send_scan_result_dm(
     if dm is None:
         return False
     if is_clean:
-        embed = success_embed(f"Scan: {filename}", result_summary)
+        embed = success_embed(f"✅ CLEAN — {filename}", result_summary)
     elif is_blocked:
-        embed = warn_embed(f"⛔ Kritisch: {filename}", result_summary)
+        embed = warn_embed(f"⛔ INFECTED/THREAT — {filename}", result_summary)
         embed.color = discord.Color.dark_red()
     else:
-        embed = warn_embed(f"Scan: {filename}", result_summary)
+        embed = warn_embed(f"⚠️ SUSPICIOUS — {filename}", result_summary)
     embed.set_footer(text=quota_footer)
     try:
         await dm.send(embed=embed)
@@ -117,7 +123,19 @@ async def deliver_scan_result(
             )
         return
 
-    result = scan_archive_bytes(data, filename)
+    size_mb = len(data) / (1024 * 1024)
+    progress = base_embed(
+        "🔍 Deep Scan läuft…",
+        f"**`{filename}`** ({size_mb:.2f} MB)\n"
+        "Jede Datei wird gehasht und auf Signaturen geprüft.\n"
+        "_Bitte warten — bei großen Packs kann das einige Sekunden dauern._",
+    )
+    if reply_via_dm:
+        status_msg = await reply_via_dm.send(embed=progress)
+    else:
+        status_msg = await interaction.followup.send(embed=progress, ephemeral=True)
+
+    result = await scan_archive_bytes_async(data, filename)
     footer = (
         f"Scans heute: {quota['used']}/{quota['limit']}"
         if not staff
@@ -129,18 +147,25 @@ async def deliver_scan_result(
     await log_scan_result(bot, gid, interaction.user.id, result)
 
     if result.is_clean:
-        embed = success_embed(f"Scan: {filename}", result.summary())
+        embed = success_embed(f"✅ CLEAN — {filename}", result.summary())
     elif result.is_blocked:
-        embed = warn_embed(f"⛔ Kritisch: {filename}", result.summary())
+        embed = warn_embed(f"⛔ {result.verdict} — {filename}", result.summary())
         embed.color = discord.Color.dark_red()
     else:
-        embed = warn_embed(f"Scan: {filename}", result.summary())
+        embed = warn_embed(f"⚠️ {result.verdict} — {filename}", result.summary())
     embed.set_footer(text=footer)
 
-    if reply_via_dm:
-        await reply_via_dm.send(embed=embed)
-    else:
-        sent = await _send_scan_result_dm(
+    try:
+        await status_msg.edit(embed=embed)
+    except discord.HTTPException:
+        if reply_via_dm:
+            await reply_via_dm.send(embed=embed)
+        else:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+    if not reply_via_dm:
+        # Zusätzlich per DM, wenn möglich
+        await _send_scan_result_dm(
             interaction.user,
             filename=filename,
             result_summary=result.summary(),
@@ -148,37 +173,16 @@ async def deliver_scan_result(
             is_blocked=result.is_blocked,
             quota_footer=footer,
         )
-        if sent:
-            await interaction.followup.send(
-                embed=success_embed(
-                    "Scan fertig",
-                    f"**{filename}** — Ergebnis per **DM**.\n_{footer}_",
-                ),
-                ephemeral=True,
-            )
-        else:
-            await interaction.followup.send(embed=embed, ephemeral=True)
 
     guild = bot.get_guild(gid)
-    if guild is not None and result.is_clean:
+    if guild is not None:
         await post_scan_log(
             bot,
             guild,
             user=interaction.user,
             filename=filename,
             summary=result.summary(),
-            is_clean=True,
-            is_blocked=False,
-        )
-    elif guild is not None and (result.is_blocked or not result.is_clean):
-        # kritische / verdächtige Scans ebenfalls loggen
-        await post_scan_log(
-            bot,
-            guild,
-            user=interaction.user,
-            filename=filename,
-            summary=result.summary(),
-            is_clean=False,
+            is_clean=result.is_clean,
             is_blocked=result.is_blocked,
         )
 
