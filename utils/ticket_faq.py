@@ -6,6 +6,10 @@ import re
 import time
 from dataclasses import dataclass
 
+from utils.volume_discount import format_volume_tiers_help
+
+FILE_SCAN_CHANNEL = "#🔗┃file-scan"
+
 # channel_id → last reply timestamp
 _cooldowns: dict[int, float] = {}
 COOLDOWN_SEC = 8.0
@@ -233,6 +237,34 @@ _SHOP_FAQ: tuple[FaqEntry, ...] = (
         f"{MONEY_LOG_HINT}",
         "shop",
     ),
+    FaqEntry(
+        (
+            "rückerstattung",
+            "rueckerstattung",
+            "geld zurück",
+            "geld zurueck",
+            "refund",
+            "erstattung",
+            "geld wieder",
+        ),
+        "**Rückerstattung:** Bitte kurz Grund + Kaufzeit/IGN hier reinschreiben. "
+        "Staff prüft den Fall und entscheidet über eine Rückerstattung.",
+        "shop",
+    ),
+    FaqEntry(
+        (
+            "mengenrabatt",
+            "volume discount",
+            "mehrere packs kaufen",
+            "mehrere kaufen",
+            "viele packs",
+            "bulk",
+            "großbestellung",
+            "grossbestellung",
+        ),
+        format_volume_tiers_help(),
+        "shop",
+    ),
 )
 
 # ── Support-/Service-Ticket FAQ (kein Payment) ───────────────────────
@@ -432,6 +464,77 @@ _ANY_FAQ: tuple[FaqEntry, ...] = (
         "`/msg TxTEmpire !link CODE` (privat).\n"
         "Dann Auto-Confirm bei passender Zahlung. "
         "**Unverifizieren:** Panel-Button oder `/unlink`.",
+        "any",
+    ),
+    FaqEntry(
+        (
+            "virus",
+            "viren",
+            "trojaner",
+            "malware",
+            "infiziert",
+            "keylogger",
+            "virenscan",
+            "virus scan",
+            "virusscan",
+            "ist die datei sicher",
+            "ist das sicher",
+            "datei scannen",
+            "datei prüfen",
+            "datei pruefen",
+            "rat",
+            "stealer",
+        ),
+        "🦠 **Virus-Sorgen?** Lade die Datei im Channel "
+        f"{FILE_SCAN_CHANNEL} hoch — dort läuft ein automatischer "
+        "Antivirus-Scan (ZIP/RAR/JAR, Signaturen + Heuristik) und du "
+        "bekommst sofort ein Ergebnis.\n"
+        "Bitte **keine Dateien hier im Ticket** posten.",
+        "any",
+    ),
+    FaqEntry(
+        (
+            "giveaway",
+            "give away",
+            "gewinnspiel",
+            "wie teilnehmen",
+            "wie mitmachen",
+            "verlosung",
+        ),
+        "**Giveaway:** Einfach auf den **Teilnehmen**-Button unter der "
+        "Giveaway-Nachricht klicken. Der Gewinner wird automatisch nach "
+        "Ablauf der Zeit gezogen und bekommt eine DM/Ping.",
+        "any",
+    ),
+    FaqEntry(
+        (
+            "boost",
+            "boosten",
+            "server boost",
+            "boost belohnung",
+            "boost reward",
+            "nitro boost",
+        ),
+        "**Server-Boost-Belohnung:** Nach dem Boosten schickt der Bot dir "
+        "automatisch eine DM zur Pack-Auswahl (2. Boost = mehr Auswahl). "
+        "Keine DM bekommen? Prüfe deine Privatsphäre-Einstellungen (Server-DMs "
+        "erlauben) und melde dich sonst hier.",
+        "any",
+    ),
+    FaqEntry(
+        (
+            "invite",
+            "invites",
+            "einladung",
+            "einladungen",
+            "leute einladen",
+            "invite belohnung",
+            "invite reward",
+        ),
+        "**Invite-Belohnungen:** Deine Invites werden automatisch getrackt. "
+        "Ab bestimmten Invite-Meilensteinen gibt's automatisch Credits/Rabatt "
+        "gutgeschrieben. Bei Fragen zum aktuellen Stand: hier IGN/Discord-Name "
+        "nennen — Staff prüft.",
         "any",
     ),
 )
