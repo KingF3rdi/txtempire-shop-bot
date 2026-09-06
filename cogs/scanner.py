@@ -115,14 +115,14 @@ async def open_scan_premium_ticket(
 
 
 class ScannerCog(commands.Cog):
-    """Antivirus-ähnlicher ZIP/RAR/JAR-Scanner (RATs, Stealer, Signaturen)."""
+    """Antivirus-ähnlicher ZIP/RAR/JAR/7Z- und Einzeldatei-Scanner (RATs, Stealer, Signaturen)."""
 
     def __init__(self, bot: ShopBot) -> None:
         self.bot = bot
 
     scan = app_commands.Group(
         name="scan",
-        description="Antivirus File Scanner (ZIP/RAR/JAR)",
+        description="Antivirus File Scanner (ZIP/RAR/JAR/7Z/.exe)",
     )
 
     @app_commands.command(
@@ -164,9 +164,9 @@ class ScannerCog(commands.Cog):
 
     @scan.command(
         name="file",
-        description="ZIP/RAR/JAR antivirus-ähnlich scannen (Signaturen + Heuristik)",
+        description="ZIP/RAR/JAR/7Z oder .exe antivirus-ähnlich scannen (Signaturen + Heuristik)",
     )
-    @app_commands.describe(file="Archiv-Datei (.zip / .rar / .jar)")
+    @app_commands.describe(file="Archiv (.zip/.rar/.jar/.7z) oder Einzeldatei (.exe/.dll/...)")
     async def scan_file(
         self,
         interaction: discord.Interaction,
@@ -183,7 +183,9 @@ class ScannerCog(commands.Cog):
             await interaction.response.send_message(
                 embed=error_embed(
                     "Falscher Dateityp",
-                    "Bitte eine **.zip**, **.rar** oder **.jar** Datei anhängen.",
+                    "Bitte ein Archiv (**.zip / .rar / .jar / .7z**) oder eine "
+                    "gefährdungsrelevante Einzeldatei (z. B. **.exe / .dll / "
+                    ".bat / .ps1**) anhängen.",
                 ),
                 ephemeral=True,
             )
@@ -291,7 +293,7 @@ class ScannerCog(commands.Cog):
 
     @scan.command(
         name="url",
-        description="ZIP/RAR/JAR per Download-URL scannen",
+        description="ZIP/RAR/JAR/7Z per Download-URL scannen",
     )
     @app_commands.describe(url="Direkter http(s)-Link zur Archiv-Datei")
     async def scan_url(

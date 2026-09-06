@@ -28,7 +28,7 @@ async def save_pack_attachment(
 ) -> str:
     """Speichert Anhang unter data/packs/ und gibt relativen Pfad zurück.
 
-    Bei ZIP/RAR/JAR wird auf RAT-/Malware-Indikatoren gescannt.
+    Bei ZIP/RAR/JAR/7Z (und einzelnen .exe/.dll) wird auf RAT-/Malware-Indikatoren gescannt.
     """
     if attachment.size and attachment.size > MAX_PACK_BYTES:
         raise ValueError(f"Datei zu groß (max. {MAX_PACK_BYTES // (1024 * 1024)} MB).")

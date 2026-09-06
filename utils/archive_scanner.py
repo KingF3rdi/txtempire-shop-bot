@@ -232,8 +232,11 @@ _KNOWN_BAD_SHA256: frozenset[str] = frozenset(
     }
 )
 
-ARCHIVE_EXTS = {".zip", ".rar", ".jar", ".apk", ".war"}
-NESTED_ARCHIVE_EXTS = {".zip", ".jar", ".apk", ".war"}
+ARCHIVE_EXTS = {".zip", ".rar", ".jar", ".apk", ".war", ".7z"}
+NESTED_ARCHIVE_EXTS = {".zip", ".jar", ".apk", ".war", ".7z"}
+# Einzeldateien, die auch OHNE Archiv direkt hochgeladen/gescannt werden dürfen
+# (z. B. eine nackte .exe, die jemand vor dem Ausführen prüfen will).
+SINGLE_FILE_SCAN_EXTS = frozenset(_DANGEROUS_EXTS)
 MAX_ENTRIES = 8000
 MAX_NAME_LEN = 512
 MAX_CONTENT_PEEK = 256 * 1024  # Text-Heuristik: erste 256 KB
@@ -291,7 +294,8 @@ TEXTISH_EXTS = {
 
 SCAN_DISCLAIMER = (
     "⚠️ **Keine 100 %-Garantie:** Multi-Engine-Heuristik "
-    f"({ENGINE_NAME} {ENGINE_VERSION}: Namen, Hashes, Signaturen, Inhalt, "
+    f"({ENGINE_NAME} {ENGINE_VERSION}: ZIP/RAR/JAR/7Z + einzelne .exe/.dll, "
+    "Namen, Hashes, Signaturen, Inhalt, "
     "Discord-Token-Grabber, IP-Logger/C2-Muster, Java-Agent-Injection, "
     "Kompressions-/Entropie-Analyse, Kombinations-Scoring). "
     "Kann Threats übersehen oder Fehlalarme erzeugen — "
@@ -1188,6 +1192,144 @@ def _scan_rar_bytes(data: bytes, filename: str) -> ScanResult:
     return result
 
 
+_SEVENZ_MAGIC = b"7z\xbc\xaf\x27\x1c"
+
+
+def _is_safe_relative_member(name: str) -> bool:
+    """True nur für Pfade ohne Traversal/absolute Komponenten (Zip-Slip-Schutz)."""
+    raw = name.replace("\\", "/")
+    if not raw or raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
+        return False
+    return ".." not in Path(raw).parts
+
+
+def _scan_7z_bytes(data: bytes, filename: str) -> ScanResult:
+    """
+    7z hat (anders als zip/rar) in py7zr keine Streaming-Read-API — Einträge
+    müssen extrahiert werden. Wir entpacken deshalb nur namentlich geprüfte,
+    traversal-sichere Einträge in ein isoliertes Temp-Verzeichnis und scannen
+    sie von dort, statt dem Archiv blind zu vertrauen.
+    """
+    result = ScanResult(filename=filename, archive_type="7z")
+    seen: set[tuple[str, str]] = set()
+    budget = [MAX_TOTAL_SCAN_BYTES]
+    try:
+        import py7zr  # type: ignore
+    except ImportError:
+        _check_entry_name(filename, result.findings, seen=seen)
+        result.error = (
+            "7Z-Inhaltsscan braucht Paket `py7zr` (pip install py7zr). "
+            "Nur Dateiname geprüft."
+        )
+        return result
+
+    import shutil
+    import tempfile
+
+    tmpdir = tempfile.mkdtemp(prefix="scan7z_")
+    try:
+        with py7zr.SevenZipFile(io.BytesIO(data), mode="r") as zf:
+            infos = zf.list()
+            result.entry_count = len(infos)
+            if len(infos) > MAX_ENTRIES:
+                _add_finding(
+                    result.findings,
+                    severity="medium",
+                    path=filename,
+                    reason=f"Sehr viele Einträge ({len(infos)}) — Zip-Bomb-Verdacht",
+                    threat_name="Heur.Archive.ZipBomb",
+                    seen=seen,
+                )
+
+            names_wanted: list[str] = []
+            for info in infos[:MAX_ENTRIES]:
+                name = getattr(info, "filename", "") or ""
+                is_dir = bool(getattr(info, "is_directory", False))
+                _check_entry_name(name, result.findings, seen=seen)
+                if is_dir or not name:
+                    continue
+
+                uncomp = int(getattr(info, "uncompressed", 0) or 0)
+                comp = int(getattr(info, "compressed", 0) or 0)
+                if comp and comp > 4096 and uncomp > 0:
+                    ratio = uncomp / comp
+                    if ratio > 300:
+                        _add_finding(
+                            result.findings,
+                            severity="high",
+                            path=name,
+                            reason=(
+                                f"Extreme Kompressionsrate (1:{ratio:.0f}) "
+                                "im Archiv-Eintrag"
+                            ),
+                            threat_name="Heur.Archive.CompressionBomb",
+                            seen=seen,
+                        )
+
+                if not _is_safe_relative_member(name):
+                    # Bereits als Pfad-Traversal geflaggt — nicht extrahieren.
+                    continue
+                if budget[0] > 0:
+                    names_wanted.append(name)
+
+            if names_wanted:
+                try:
+                    zf.reset()
+                    zf.extract(path=tmpdir, targets=names_wanted)
+                except Exception as e:
+                    _add_finding(
+                        result.findings,
+                        severity="medium",
+                        path=filename,
+                        reason=f"7Z-Entpacken fehlgeschlagen: {type(e).__name__}",
+                        threat_name="Heur.Scan.ExtractError",
+                        seen=seen,
+                    )
+                    names_wanted = []
+
+            root = Path(tmpdir).resolve()
+            for name in names_wanted:
+                if budget[0] <= 0:
+                    _add_finding(
+                        result.findings,
+                        severity="medium",
+                        path=filename,
+                        reason="Scan-Budget erreicht — Rest übersprungen",
+                        threat_name="Heur.Scan.BudgetCap",
+                        seen=seen,
+                    )
+                    break
+
+                fp = (Path(tmpdir) / name).resolve()
+                # Zip-Slip-Endkontrolle: extrahierte Datei muss im Temp-Root bleiben.
+                if root not in fp.parents and fp != root:
+                    continue
+                if not fp.is_file():
+                    continue
+
+                try:
+                    with open(fp, "rb") as fh:
+                        files, nbytes = _scan_stream(
+                            name,
+                            fh,
+                            result.findings,
+                            seen=seen,
+                            nested_depth=0,
+                            budget=budget,
+                            size_hint=fp.stat().st_size,
+                        )
+                    result.files_scanned += files
+                    result.bytes_scanned += nbytes
+                except Exception:
+                    continue
+    except Exception as e:
+        _check_entry_name(filename, result.findings, seen=seen)
+        result.error = f"7Z-Scan: {type(e).__name__}: {e}"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return result
+
+
 def scan_archive_bytes(data: bytes, filename: str) -> ScanResult:
     """Antivirus Deep-Scan: jede Datei hashen + Signaturen über den Inhalt."""
     started = time.perf_counter()
@@ -1219,6 +1361,8 @@ def scan_archive_bytes(data: bytes, filename: str) -> ScanResult:
         result = _scan_zip_bytes(data, filename)
     elif name.endswith(".rar") or data[:4] == b"Rar!":
         result = _scan_rar_bytes(data, filename)
+    elif name.endswith(".7z") or data[:6] == _SEVENZ_MAGIC:
+        result = _scan_7z_bytes(data, filename)
     else:
         result = ScanResult(filename=filename, archive_type="file")
         result.entry_count = 1
@@ -1228,10 +1372,17 @@ def scan_archive_bytes(data: bytes, filename: str) -> ScanResult:
         result.files_scanned = files
         result.bytes_scanned = nbytes
         if not result.findings and not outer_findings:
-            result.error = (
-                "Kein ZIP/RAR — Einzeldatei deep-gescannt. "
-                "Für Packs bitte Archiv (.zip/.rar/.jar) verwenden."
-            )
+            if Path(name).suffix in SINGLE_FILE_SCAN_EXTS:
+                result.error = (
+                    "Einzeldatei deep-gescannt (Hash, Signaturen, Entropie, "
+                    "PE-Header). Für vollständige Pack-Prüfung idealerweise "
+                    "als Archiv (.zip/.rar/.jar/.7z) hochladen."
+                )
+            else:
+                result.error = (
+                    "Kein ZIP/RAR/7Z — Einzeldatei deep-gescannt. "
+                    "Für Packs bitte Archiv (.zip/.rar/.jar/.7z) verwenden."
+                )
 
     for f in outer_findings:
         key = (f.path, f.threat_name or f.reason)
@@ -1261,4 +1412,5 @@ def scan_archive_path(path: Path) -> ScanResult:
 def is_scannable_filename(filename: str | None) -> bool:
     if not filename:
         return False
-    return Path(filename).suffix.lower() in ARCHIVE_EXTS
+    suffix = Path(filename).suffix.lower()
+    return suffix in ARCHIVE_EXTS or suffix in SINGLE_FILE_SCAN_EXTS

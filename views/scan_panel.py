@@ -25,7 +25,8 @@ async def build_scan_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embed:
     prices = await get_scan_prices(bot, guild_id)
     embed = base_embed(
         "🛡 File Scanner (Deep Scan)",
-        "Scannt **ZIP / RAR / JAR** antivirus-mäßig — **jede Datei** wird gestreamt:\n"
+        "Scannt **ZIP / RAR / JAR / 7Z** sowie einzelne **.exe/.dll/...** "
+        "antivirus-mäßig — **jede Datei** wird gestreamt:\n"
         "SHA-256 · Signaturen über den gesamten Inhalt · PE/MZ · Nested-Archive.\n\n"
         f"• Free: **{config.SCAN_FREE_DAILY} Scan/Tag**\n"
         f"• 14 Tage Premium: **{config.SCAN_PREMIUM_DAILY} Scans/Tag**\n"
@@ -298,7 +299,8 @@ class ScanPanelView(discord.ui.View):
             embed=success_embed(
                 "Datei droppen",
                 f"{interaction.user.mention}: Sende jetzt eine "
-                "**`.zip` / `.rar` / `.jar`** Datei **in diesen Channel** "
+                "**`.zip` / `.rar` / `.jar` / `.7z`** Datei oder **`.exe`/`.dll`** "
+                "**in diesen Channel** "
                 "(innerhalb von **2 Minuten**).\n"
                 "Ergebnis kommt privat zu dir.",
             ),
@@ -329,7 +331,8 @@ class ScanPanelView(discord.ui.View):
             await interaction.followup.send(
                 embed=error_embed(
                     "Falscher Dateityp",
-                    "Bitte **.zip / .rar / .jar** senden.",
+                    "Bitte ein Archiv (**.zip/.rar/.jar/.7z**) oder eine Einzeldatei "
+                    "(**.exe/.dll/...**) senden.",
                 ),
                 ephemeral=True,
             )
@@ -392,8 +395,8 @@ class ScanPanelView(discord.ui.View):
             await dm.send(
                 embed=success_embed(
                     "Datei zum Scannen",
-                    "Sende jetzt eine **.zip / .rar / .jar** Datei "
-                    "per Drag & Drop in diesen Chat "
+                    "Sende jetzt eine **.zip / .rar / .jar / .7z** Datei oder "
+                    "eine **.exe/.dll** per Drag & Drop in diesen Chat "
                     "(innerhalb von **2 Minuten**).",
                 )
             )
@@ -441,7 +444,8 @@ class ScanPanelView(discord.ui.View):
             await dm.send(
                 embed=error_embed(
                     "Falscher Dateityp",
-                    "Bitte **.zip / .rar / .jar** senden.",
+                    "Bitte ein Archiv (**.zip/.rar/.jar/.7z**) oder eine Einzeldatei "
+                    "(**.exe/.dll/...**) senden.",
                 )
             )
             return

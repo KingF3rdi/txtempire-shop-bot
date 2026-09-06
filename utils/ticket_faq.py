@@ -487,7 +487,7 @@ _ANY_FAQ: tuple[FaqEntry, ...] = (
         ),
         "🦠 **Virus-Sorgen?** Lade die Datei im Channel "
         f"{FILE_SCAN_CHANNEL} hoch — dort läuft ein automatischer "
-        "Antivirus-Scan (ZIP/RAR/JAR, Signaturen + Heuristik) und du "
+        "Antivirus-Scan (ZIP/RAR/JAR/7Z + .exe, Signaturen + Heuristik) und du "
         "bekommst sofort ein Ergebnis.\n"
         "Bitte **keine Dateien hier im Ticket** posten.",
         "any",

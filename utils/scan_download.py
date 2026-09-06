@@ -194,10 +194,16 @@ async def download_archive_from_url(url: str) -> tuple[bytes, str]:
                     # RAR magic Rar!
                     if data[:4] == b"Rar!":
                         fname = Path(fname).stem + ".rar"
+                    # 7z magic 37 7A BC AF 27 1C
+                    elif data[:6] == b"7z\xbc\xaf\x27\x1c":
+                        fname = Path(fname).stem + ".7z"
+                    # PE magic MZ — nackte .exe per Direkt-Link
+                    elif data[:2] == b"MZ":
+                        fname = Path(fname).stem + ".exe"
                     else:
                         raise ValueError(
-                            "Kein erkennbares Archiv (.zip / .rar / .jar). "
-                            "URL muss auf eine Archiv-Datei zeigen."
+                            "Kein erkennbares Archiv/.exe (.zip / .rar / .jar "
+                            "/ .7z / .exe). URL muss auf eine solche Datei zeigen."
                         )
 
                 return data, fname
