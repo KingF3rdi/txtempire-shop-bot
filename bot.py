@@ -30,6 +30,7 @@ class ShopBot(commands.Bot):
             "cogs.credits",
             "cogs.discount_codes",
             "cogs.scanner",
+            "cogs.username_sniper",
             "cogs.payback",
             "cogs.vouch",
             "cogs.announce",
@@ -54,6 +55,9 @@ class ShopBot(commands.Bot):
         from views.scan_panel import ScanPanelView
 
         self.add_view(ScanPanelView(self))
+        from views.snipe_panel import SnipePanelView
+
+        self.add_view(SnipePanelView(self))
         from utils.vouch_request import VouchRatingView
         from views.service_ticket_panel import (
             ApplicationPanelView,

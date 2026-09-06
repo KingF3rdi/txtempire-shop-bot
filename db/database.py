@@ -194,6 +194,12 @@ class Database:
                 message_id INTEGER
             );
 
+            CREATE TABLE IF NOT EXISTS snipe_panel (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER,
+                message_id INTEGER
+            );
+
             CREATE TABLE IF NOT EXISTS daily_deals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER NOT NULL,
@@ -382,6 +388,19 @@ class Database:
             await self.db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS scan_panel (
+                    guild_id INTEGER PRIMARY KEY,
+                    channel_id INTEGER,
+                    message_id INTEGER
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS snipe_panel (
                     guild_id INTEGER PRIMARY KEY,
                     channel_id INTEGER,
                     message_id INTEGER
@@ -1849,6 +1868,34 @@ class Database:
             """
         )
         return [int(r["guild_id"]) for r in rows]
+
+    async def get_snipe_panel(self, guild_id: int) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            "SELECT * FROM snipe_panel WHERE guild_id = ?", (guild_id,)
+        )
+        return dict(row) if row else None
+
+    async def set_snipe_panel(
+        self, guild_id: int, *, channel_id: int, message_id: int
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO snipe_panel (guild_id, channel_id, message_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                channel_id = excluded.channel_id,
+                message_id = excluded.message_id
+            """,
+            (guild_id, channel_id, message_id),
+        )
+        await self.db.commit()
+
+    async def clear_snipe_panel_message(self, guild_id: int) -> None:
+        await self.db.execute(
+            "UPDATE snipe_panel SET message_id = NULL WHERE guild_id = ?",
+            (guild_id,),
+        )
+        await self.db.commit()
 
     # ── Service tickets (Support / Bewerbung) ───────────────────────
 
