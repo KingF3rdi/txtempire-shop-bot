@@ -146,6 +146,8 @@ async def create_order_ticket(
         if order_kind == "credits"
         else "scanprem"
         if order_kind == "scan_premium"
+        else "snipeprem"
+        if order_kind == "snipe_premium"
         else "order"
     )
     channel_name = f"{prefix}-{seq:04d}-{safe_name}"[:100]
@@ -236,6 +238,14 @@ async def create_order_ticket(
         credits_hint = (
             f"\n⭐ **Scan Premium ({days} Tage)** — nach Bestätigung "
             f"**{premium_scan_label(days=days)}**."
+        )
+    elif order_kind == "snipe_premium":
+        from utils.snipe_prices import premium_snipe_label, snipe_plan_title
+
+        plan = int(float(credits_amount if credits_amount is not None else 14))
+        credits_hint = (
+            f"\n🎯 **Snipe Premium ({snipe_plan_title(plan)})** — nach Bestätigung "
+            f"**{premium_snipe_label(plan=plan)}**."
         )
     elif show_fast_buy:
         from utils.credits import credits_needed_for_total, format_credits

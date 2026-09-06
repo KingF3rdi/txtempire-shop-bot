@@ -325,10 +325,11 @@ async def action_confirm_order(
         update_fields["paid_with_credits"] = 1
     await bot.db.update_order(int(order["id"]), **update_fields)
 
-    # Credits-Kauf / Scan-Premium: keine Packs
+    # Credits-Kauf / Scan-/Snipe-Premium: keine Packs
     credits_granted: float | None = None
     credits_balance = None
     scan_premium_until: str | None = None
+    snipe_premium_until: str | None = None
     if order_kind == "credits":
         amount = float(order.get("credits_amount") or 0)
         if amount <= 0:
@@ -346,6 +347,13 @@ async def action_confirm_order(
         scan_premium_until = await bot.db.extend_scan_premium(
             int(order["guild_id"]), int(order["user_id"]), days
         )
+    elif order_kind == "snipe_premium":
+        from utils.snipe_prices import normalize_snipe_plan
+
+        plan = normalize_snipe_plan(order.get("credits_amount"))
+        snipe_premium_until = await bot.db.extend_snipe_premium(
+            int(order["guild_id"]), int(order["user_id"]), plan
+        )
 
     member = None
     try:
@@ -362,7 +370,7 @@ async def action_confirm_order(
 
     role_result: dict = {"granted": [], "skipped": [], "failed": []}
     delivery_info: dict = {}
-    non_product = order_kind in ("credits", "scan_premium")
+    non_product = order_kind in ("credits", "scan_premium", "snipe_premium")
     if member and not non_product:
         role_result = await grant_purchase_roles(
             member,
@@ -406,6 +414,20 @@ async def action_confirm_order(
         extra_parts.append(
             f"⭐ **Scan Premium** aktiv bis `{scan_premium_until}` "
             f"({days} Tage · {premium_scan_label(days=days)})."
+        )
+    if snipe_premium_until is not None:
+        from utils.snipe_prices import (
+            SNIPE_PLAN_LIFETIME,
+            normalize_snipe_plan,
+            premium_snipe_label,
+            snipe_plan_title,
+        )
+
+        plan = normalize_snipe_plan(order.get("credits_amount"))
+        until = "Lifetime" if plan == SNIPE_PLAN_LIFETIME else snipe_premium_until
+        extra_parts.append(
+            f"🎯 **Snipe Premium** aktiv bis `{until}` "
+            f"({snipe_plan_title(plan)} · {premium_snipe_label(plan=plan)})."
         )
     if paid_with_credits and charged is not None:
         bal = await bot.db.get_credits(int(order["guild_id"]), int(order["user_id"]))
@@ -778,11 +800,15 @@ async def action_apply_discount_code(
             ephemeral=True,
         )
         return
-    if str(order.get("order_kind") or "shop") in ("credits", "scan_premium"):
+    if str(order.get("order_kind") or "shop") in (
+        "credits",
+        "scan_premium",
+        "snipe_premium",
+    ):
         await interaction.response.send_message(
             embed=error_embed(
                 "Nicht verfügbar",
-                "Codes gelten nicht für Credits- oder Scan-Premium-Tickets.",
+                "Codes gelten nicht für Credits- oder Premium-Tickets.",
             ),
             ephemeral=True,
         )

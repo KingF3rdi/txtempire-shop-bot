@@ -200,6 +200,32 @@ class Database:
                 message_id INTEGER
             );
 
+            CREATE TABLE IF NOT EXISTS snipe_premium (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL,
+                unlimited INTEGER NOT NULL DEFAULT 0,
+                lifetime INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS snipe_usage (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                day TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id, day)
+            );
+
+            CREATE TABLE IF NOT EXISTS snipe_finds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                username TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS daily_deals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER NOT NULL,
@@ -309,6 +335,14 @@ class Database:
             ("guild_settings", "mc_auto_confirm", "INTEGER NOT NULL DEFAULT 1"),
             ("items", "is_new", "INTEGER NOT NULL DEFAULT 0"),
             ("items", "marked_new_at", "TEXT"),
+            ("snipe_premium", "unlimited", "INTEGER NOT NULL DEFAULT 0"),
+            ("snipe_premium", "lifetime", "INTEGER NOT NULL DEFAULT 0"),
+            ("guild_settings", "snipe_price_14", "REAL"),
+            ("guild_settings", "snipe_price_30", "REAL"),
+            ("guild_settings", "snipe_price_lifetime", "REAL"),
+            ("guild_settings", "snipe_credits_14", "REAL"),
+            ("guild_settings", "snipe_credits_30", "REAL"),
+            ("guild_settings", "snipe_credits_lifetime", "REAL"),
         ):
             try:
                 await self.db.execute(
@@ -404,6 +438,53 @@ class Database:
                     guild_id INTEGER PRIMARY KEY,
                     channel_id INTEGER,
                     message_id INTEGER
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS snipe_premium (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    unlimited INTEGER NOT NULL DEFAULT 0,
+                    lifetime INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS snipe_usage (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    day TEXT NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id, day)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS snipe_finds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    platform TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 )
                 """
             )
@@ -1210,7 +1291,11 @@ class Database:
         credits_amount: float | None = None,
         source_panel_slot: int | None = None,
     ) -> int:
-        kind = order_kind if order_kind in ("shop", "credits", "scan_premium") else "shop"
+        kind = (
+            order_kind
+            if order_kind in ("shop", "credits", "scan_premium", "snipe_premium")
+            else "shop"
+        )
         subtotal = sum(float(r["price"]) * int(r["qty"]) for r in cart_rows)
         pack_qty = sum(int(r.get("qty") or 1) for r in cart_rows)
         volume_pct = 0.0
@@ -1868,6 +1953,252 @@ class Database:
             """
         )
         return [int(r["guild_id"]) for r in rows]
+
+    async def get_snipe_premium_row(
+        self, guild_id: int, user_id: int
+    ) -> dict[str, Any] | None:
+        row = await self.fetchone(
+            """
+            SELECT expires_at, unlimited, lifetime FROM snipe_premium
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        return dict(row) if row else None
+
+    async def get_snipe_premium_expires(
+        self, guild_id: int, user_id: int
+    ) -> str | None:
+        row = await self.get_snipe_premium_row(guild_id, user_id)
+        return str(row["expires_at"]) if row else None
+
+    def _snipe_expiry_active(self, expires: str | None) -> bool:
+        from datetime import datetime, timezone
+
+        if not expires:
+            return False
+        try:
+            exp = datetime.strptime(expires, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            try:
+                exp = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+            except ValueError:
+                return False
+        return exp > datetime.now(timezone.utc)
+
+    async def is_snipe_premium(self, guild_id: int, user_id: int) -> bool:
+        row = await self.get_snipe_premium_row(guild_id, user_id)
+        if not row:
+            return False
+        if int(row.get("lifetime") or 0):
+            return True
+        return self._snipe_expiry_active(str(row.get("expires_at") or ""))
+
+    async def is_snipe_premium_unlimited(
+        self, guild_id: int, user_id: int
+    ) -> bool:
+        if not await self.is_snipe_premium(guild_id, user_id):
+            return False
+        row = await self.get_snipe_premium_row(guild_id, user_id)
+        if not row:
+            return False
+        return bool(int(row.get("unlimited") or 0) or int(row.get("lifetime") or 0))
+
+    async def is_snipe_premium_lifetime(
+        self, guild_id: int, user_id: int
+    ) -> bool:
+        if not await self.is_snipe_premium(guild_id, user_id):
+            return False
+        row = await self.get_snipe_premium_row(guild_id, user_id)
+        return bool(row and int(row.get("lifetime") or 0))
+
+    async def extend_snipe_premium(
+        self, guild_id: int, user_id: int, plan: int
+    ) -> str:
+        """
+        Verlängert Snipe-Premium.
+        plan: 14 = 14 Tage (30/Tag), 30 = 30 Tage unlimited,
+              0 = Lifetime unlimited.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        existing = await self.get_snipe_premium_row(guild_id, user_id)
+        current = str(existing["expires_at"]) if existing else None
+        already_life = bool(existing and int(existing.get("lifetime") or 0))
+        already_unlim = bool(existing and int(existing.get("unlimited") or 0))
+        still_active = already_life or self._snipe_expiry_active(current)
+
+        want_life = int(plan) == 0 or int(plan) >= 3650
+        want_unlimited = want_life or int(plan) >= 30
+        lifetime = 1 if (want_life or (already_life and still_active)) else 0
+        unlimited = 1 if (
+            want_unlimited or lifetime or (already_unlim and still_active)
+        ) else 0
+
+        if lifetime:
+            stamp = datetime(2099, 12, 31, 23, 59, 59, tzinfo=timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        else:
+            start = now
+            if current and still_active:
+                try:
+                    exp = datetime.strptime(current, "%Y-%m-%d %H:%M:%S").replace(
+                        tzinfo=timezone.utc
+                    )
+                    if exp > now:
+                        start = exp
+                except ValueError:
+                    pass
+            days = max(1, int(plan))
+            stamp = (start + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+        await self.db.execute(
+            """
+            INSERT INTO snipe_premium
+              (guild_id, user_id, expires_at, unlimited, lifetime)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+              expires_at = excluded.expires_at,
+              unlimited = excluded.unlimited,
+              lifetime = excluded.lifetime
+            """,
+            (guild_id, user_id, stamp, unlimited, lifetime),
+        )
+        await self.db.commit()
+        return stamp
+
+    async def get_snipe_usage_today(self, guild_id: int, user_id: int) -> int:
+        row = await self.fetchone(
+            """
+            SELECT count FROM snipe_usage
+            WHERE guild_id = ? AND user_id = ? AND day = ?
+            """,
+            (guild_id, user_id, self._utc_day()),
+        )
+        return int(row["count"]) if row else 0
+
+    async def increment_snipe_usage(
+        self, guild_id: int, user_id: int, amount: int = 1
+    ) -> int:
+        day = self._utc_day()
+        add = max(0, int(amount))
+        if add <= 0:
+            return await self.get_snipe_usage_today(guild_id, user_id)
+        await self.db.execute(
+            """
+            INSERT INTO snipe_usage (guild_id, user_id, day, count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, day) DO UPDATE SET
+              count = count + excluded.count
+            """,
+            (guild_id, user_id, day, add),
+        )
+        await self.db.commit()
+        return await self.get_snipe_usage_today(guild_id, user_id)
+
+    async def record_snipe_finds(
+        self,
+        guild_id: int,
+        user_id: int,
+        platform: str,
+        usernames: list[str],
+    ) -> int:
+        names = [str(n).strip() for n in usernames if str(n).strip()]
+        if not names:
+            return 0
+        await self.db.executemany(
+            """
+            INSERT INTO snipe_finds (guild_id, user_id, platform, username)
+            VALUES (?, ?, ?, ?)
+            """,
+            [(guild_id, user_id, platform, name[:64]) for name in names],
+        )
+        await self.db.commit()
+        return len(names)
+
+    async def get_snipe_free_total(self, guild_id: int) -> int:
+        row = await self.fetchone(
+            "SELECT COUNT(*) AS cnt FROM snipe_finds WHERE guild_id = ?",
+            (guild_id,),
+        )
+        return int(row["cnt"]) if row else 0
+
+    async def get_snipe_stats(self, guild_id: int) -> dict[str, Any]:
+        total = await self.get_snipe_free_total(guild_id)
+        unique = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt FROM (
+                SELECT DISTINCT platform, username
+                FROM snipe_finds WHERE guild_id = ?
+            ) AS uniq
+            """,
+            (guild_id,),
+        )
+        by_platform = await self.fetchall(
+            """
+            SELECT platform, COUNT(*) AS cnt
+            FROM snipe_finds WHERE guild_id = ?
+            GROUP BY platform
+            ORDER BY cnt DESC
+            """,
+            (guild_id,),
+        )
+        unique_users = await self.fetchone(
+            """
+            SELECT COUNT(DISTINCT user_id) AS cnt
+            FROM snipe_finds WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
+        usage_sum = await self.fetchone(
+            "SELECT COALESCE(SUM(count), 0) AS total FROM snipe_usage WHERE guild_id = ?",
+            (guild_id,),
+        )
+        premium_buys = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt FROM orders
+            WHERE guild_id = ? AND order_kind = 'snipe_premium'
+              AND status = 'completed'
+            """,
+            (guild_id,),
+        )
+        premium_buyers = await self.fetchone(
+            """
+            SELECT COUNT(DISTINCT user_id) AS cnt FROM orders
+            WHERE guild_id = ? AND order_kind = 'snipe_premium'
+              AND status = 'completed'
+            """,
+            (guild_id,),
+        )
+        active_premium = await self.fetchone(
+            """
+            SELECT COUNT(*) AS cnt FROM snipe_premium
+            WHERE guild_id = ?
+              AND (
+                lifetime = 1
+                OR datetime(expires_at) > datetime('now')
+              )
+            """,
+            (guild_id,),
+        )
+        return {
+            "free_total": total,
+            "free_unique": int(unique["cnt"]) if unique else 0,
+            "finders": int(unique_users["cnt"]) if unique_users else 0,
+            "usage_total": int(usage_sum["total"]) if usage_sum else 0,
+            "premium_purchases": int(premium_buys["cnt"]) if premium_buys else 0,
+            "premium_buyers": int(premium_buyers["cnt"]) if premium_buyers else 0,
+            "premium_active": int(active_premium["cnt"]) if active_premium else 0,
+            "by_platform": [
+                (str(r["platform"]), int(r["cnt"])) for r in by_platform
+            ],
+        }
 
     async def get_snipe_panel(self, guild_id: int) -> dict[str, Any] | None:
         row = await self.fetchone(

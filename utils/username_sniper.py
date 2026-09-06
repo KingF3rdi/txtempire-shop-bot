@@ -9,9 +9,12 @@ from enum import Enum
 import httpx
 
 # Nur klar bestätigte FREE-Treffer werden dem User als verfügbar gezeigt.
-MAX_NAMES_PER_RUN = 25
-MAX_LENGTH_CANDIDATES = 20
-DEFAULT_DELAY = 0.35
+MAX_NAMES_PER_RUN = 50
+MAX_LENGTH_NAMES = 50
+MAX_LENGTH_CANDIDATES = MAX_LENGTH_NAMES  # Alias: intern = max. freie Names / Lauf
+DEFAULT_DELAY = 0.25
+FIND_BATCH_SIZE = 12
+FIND_MAX_CHECKS = 400
 
 
 class Status(str, Enum):
@@ -90,19 +93,27 @@ def generate_candidates(
     count: int,
     prefix: str = "",
     suffix: str = "",
+    exclude: set[str] | None = None,
+    hard_cap: int | None = None,
 ) -> list[str]:
     spec = PLATFORMS[platform]
-    count = max(1, min(count, MAX_LENGTH_CANDIDATES))
+    cap = hard_cap if hard_cap is not None else MAX_LENGTH_NAMES
+    count = max(1, min(count, cap))
     if not (spec.min_len <= length <= spec.max_len):
         raise ValueError(f"Länge für {spec.label}: {spec.min_len}–{spec.max_len}")
     core_len = length - len(prefix) - len(suffix)
     if core_len < 0:
         raise ValueError("Prefix+Suffix länger als gewünschte Länge")
     if core_len == 0:
-        return [f"{prefix}{suffix}"]
+        name = f"{prefix}{suffix}"
+        if platform == "discord":
+            name = name.lower()
+        if exclude and name in exclude:
+            return []
+        return [name] if validate_local(platform, name) is None else []
 
     out: list[str] = []
-    seen: set[str] = set()
+    seen: set[str] = set(exclude or ())
     # Roblox: Prefix/Suffix dürfen die _-Regeln nicht brechen — Validate filtert später
     while len(out) < count:
         core = "".join(random.choice(spec.charset) for _ in range(core_len))
@@ -114,7 +125,7 @@ def generate_candidates(
         seen.add(name)
         if validate_local(platform, name) is None:
             out.append(name)
-        if len(seen) > count * 40:
+        if len(seen) > count * 40 + len(exclude or ()):
             break
     return out
 
@@ -235,13 +246,7 @@ async def check_one(
     return CheckResult(platform, username, Status.INVALID, "Unbekannte Plattform")
 
 
-async def check_many(
-    platform: str,
-    names: list[str],
-    *,
-    delay: float = DEFAULT_DELAY,
-) -> list[CheckResult]:
-    """Prüft Namen sequentiell. UNKNOWN wird nie als verfügbar gewertet."""
+def _clean_names(platform: str, names: list[str], *, limit: int) -> list[str]:
     cleaned: list[str] = []
     seen: set[str] = set()
     for raw in names:
@@ -252,9 +257,20 @@ async def check_many(
             continue
         seen.add(n)
         cleaned.append(n)
-        if len(cleaned) >= MAX_NAMES_PER_RUN:
+        if len(cleaned) >= limit:
             break
+    return cleaned
 
+
+async def check_many(
+    platform: str,
+    names: list[str],
+    *,
+    delay: float = DEFAULT_DELAY,
+    limit: int | None = None,
+) -> list[CheckResult]:
+    """Prüft Namen sequentiell. UNKNOWN wird nie als verfügbar gewertet."""
+    cleaned = _clean_names(platform, names, limit=limit or MAX_NAMES_PER_RUN)
     results: list[CheckResult] = []
     async with httpx.AsyncClient(
         follow_redirects=True,
@@ -269,6 +285,65 @@ async def check_many(
             if i + 1 < len(cleaned) and delay > 0:
                 await asyncio.sleep(delay)
     return results
+
+
+async def find_available_names(
+    platform: str,
+    length: int,
+    want: int,
+    *,
+    prefix: str = "",
+    suffix: str = "",
+    delay: float = DEFAULT_DELAY,
+    max_checks: int | None = None,
+) -> tuple[list[CheckResult], int]:
+    """
+    Sucht so lange, bis `want` bestätigte freie Names gefunden sind
+    oder max_checks erreicht ist.
+    Returns (available_results, checks_done).
+    """
+    want = max(1, min(int(want), MAX_LENGTH_NAMES))
+    cap = max_checks if max_checks is not None else min(
+        FIND_MAX_CHECKS, max(want * 25, 80)
+    )
+    tried: set[str] = set()
+    free: list[CheckResult] = []
+    checks = 0
+
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=20.0,
+        headers={
+            "User-Agent": "TxtEmpireUsernameSniper/1.0",
+            "Accept": "application/json",
+        },
+    ) as client:
+        while len(free) < want and checks < cap:
+            batch_n = min(FIND_BATCH_SIZE, cap - checks, (want - len(free)) * 8)
+            batch = generate_candidates(
+                platform,
+                length,
+                count=batch_n,
+                prefix=prefix,
+                suffix=suffix,
+                exclude=tried,
+                hard_cap=FIND_MAX_CHECKS,
+            )
+            if not batch:
+                break
+            for i, name in enumerate(batch):
+                tried.add(name)
+                result = await check_one(client, platform, name)
+                checks += 1
+                if result.status == Status.AVAILABLE:
+                    free.append(result)
+                    if len(free) >= want:
+                        break
+                if i + 1 < len(batch) and delay > 0:
+                    await asyncio.sleep(delay)
+                if checks >= cap:
+                    break
+    return free[:want], checks
 
 
 def only_available(results: list[CheckResult]) -> list[CheckResult]:
@@ -302,7 +377,7 @@ def format_results_embed_body(
         for r in free:
             lines.append(f"✅ `{r.username}`")
     else:
-        lines.append("_Keine bestätigten freien Namen._")
+        lines.append("_Keine bestätigten freien Names._")
 
     if show_all and (taken or invalid or unknown):
         lines.append("")

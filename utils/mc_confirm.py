@@ -146,6 +146,7 @@ async def confirm_order_by_id(
         credits_granted: float | None = None
         credits_balance = None
         scan_premium_until: str | None = None
+        snipe_premium_until: str | None = None
         if order_kind == "credits":
             from utils.credits import currency_to_credits, format_credits
 
@@ -163,6 +164,13 @@ async def confirm_order_by_id(
             scan_premium_until = await bot.db.extend_scan_premium(
                 guild_id, int(order["user_id"]), days
             )
+        elif order_kind == "snipe_premium":
+            from utils.snipe_prices import normalize_snipe_plan
+
+            plan = normalize_snipe_plan(order.get("credits_amount"))
+            snipe_premium_until = await bot.db.extend_snipe_premium(
+                guild_id, int(order["user_id"]), plan
+            )
 
         member: discord.Member | None = None
         try:
@@ -179,7 +187,7 @@ async def confirm_order_by_id(
 
         role_result: dict = {"granted": [], "skipped": [], "failed": []}
         delivery_info: dict = {}
-        non_product = order_kind in ("credits", "scan_premium")
+        non_product = order_kind in ("credits", "scan_premium", "snipe_premium")
         channel: discord.TextChannel | None = None
         ch_id = order.get("ticket_channel_id")
         if ch_id:
@@ -241,6 +249,20 @@ async def confirm_order_by_id(
             extra_parts.append(
                 f"⭐ **Scan Premium** bis `{scan_premium_until}` "
                 f"({days} Tage · {premium_scan_label(days=days)})."
+            )
+        if snipe_premium_until is not None:
+            from utils.snipe_prices import (
+                SNIPE_PLAN_LIFETIME,
+                normalize_snipe_plan,
+                premium_snipe_label,
+                snipe_plan_title,
+            )
+
+            plan = normalize_snipe_plan(order.get("credits_amount"))
+            until = "Lifetime" if plan == SNIPE_PLAN_LIFETIME else snipe_premium_until
+            extra_parts.append(
+                f"🎯 **Snipe Premium** bis `{until}` "
+                f"({snipe_plan_title(plan)} · {premium_snipe_label(plan=plan)})."
             )
         if delivery_info.get("dm_sent"):
             extra_parts.append("Pack-DM gesendet.")
