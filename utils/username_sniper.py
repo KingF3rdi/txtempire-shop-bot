@@ -17,6 +17,29 @@ FIND_BATCH_SIZE = 12
 FIND_MAX_CHECKS = 400
 
 
+# Verhindert, dass ein User zwei Sniper-Suchen gleichzeitig startet
+# (z.B. durch Doppelklick oder Modal + Command parallel).
+_ACTIVE_SNIPES: set[tuple[int, int]] = set()
+
+
+def start_snipe(guild_id: int, user_id: int) -> bool:
+    """Reserviert einen Sniper-Lauf für (guild_id, user_id).
+
+    Gibt True zurück, wenn reserviert werden konnte, False wenn für diesen
+    User bereits eine Suche läuft. Bei True MUSS finish_snipe() im finally
+    aufgerufen werden.
+    """
+    key = (guild_id, user_id)
+    if key in _ACTIVE_SNIPES:
+        return False
+    _ACTIVE_SNIPES.add(key)
+    return True
+
+
+def finish_snipe(guild_id: int, user_id: int) -> None:
+    _ACTIVE_SNIPES.discard((guild_id, user_id))
+
+
 class Status(str, Enum):
     AVAILABLE = "available"
     TAKEN = "taken"
@@ -119,10 +142,25 @@ def generate_candidates(
             return []
         return [name] if validate_local(platform, name) is None else []
 
+    # Größe des gesamten Namensraums für diese core_len — verhindert eine
+    # Endlosschleife, wenn (fast) alle möglichen Kombinationen bereits in
+    # `exclude` stecken (z.B. sehr kurze core_len mit festem Prefix/Suffix).
+    space_size = len(charset) ** core_len
+    already = len(exclude or ())
+    if already >= space_size:
+        return []
+
     out: list[str] = []
     seen: set[str] = set(exclude or ())
+    # Harte Obergrenze an Zufalls-Ziehungen, unabhängig davon, ob `seen`
+    # noch wächst — ohne das kann die Schleife bei kleinem Namensraum
+    # (core_len klein) für immer weiterlaufen, weil jede Ziehung bereits
+    # bekannt/ungültig ist, und dabei den Event-Loop blockieren.
+    max_attempts = min(space_size - already, max(count * 40, 2000))
+    attempts = 0
     # Roblox: Prefix/Suffix dürfen die _-Regeln nicht brechen — Validate filtert später
-    while len(out) < count:
+    while len(out) < count and attempts < max_attempts:
+        attempts += 1
         core = "".join(random.choice(charset) for _ in range(core_len))
         name = f"{prefix}{core}{suffix}"
         if platform == "discord":
@@ -132,8 +170,6 @@ def generate_candidates(
         seen.add(name)
         if validate_local(platform, name) is None:
             out.append(name)
-        if len(seen) > count * 40 + len(exclude or ()):
-            break
     return out
 
 
@@ -328,7 +364,12 @@ async def find_available_names(
     ) as client:
         while len(free) < want and checks < cap:
             batch_n = min(FIND_BATCH_SIZE, cap - checks, (want - len(free)) * 8)
-            batch = generate_candidates(
+            # generate_candidates ist synchron/CPU-gebunden — in einem Thread
+            # ausführen, damit ein teurer Batch (z.B. kleiner Namensraum, viele
+            # bereits ausprobierte Namen) niemals den Event-Loop blockiert und
+            # damit den Discord-Gateway-Heartbeat gefährdet.
+            batch = await asyncio.to_thread(
+                generate_candidates,
                 platform,
                 length,
                 count=batch_n,

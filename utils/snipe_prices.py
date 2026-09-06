@@ -39,11 +39,13 @@ def snipe_plan_title(plan: int) -> str:
 
 
 def premium_snipe_label(*, plan: int | None = None, days: int | None = None) -> str:
-    """Kurztext für Snipe-Kontingent."""
+    """Kurztext für Snipe-Kontingent (pro Kategorie: Minecraft/Roblox/Discord)."""
     resolved = normalize_snipe_plan(plan if plan is not None else days)
-    if resolved in (SNIPE_PLAN_LIFETIME, SNIPE_PLAN_30):
-        return "unbegrenzte Names/Tag"
-    return f"{config.SNIPE_PREMIUM_14_DAILY} Names/Tag"
+    if resolved == SNIPE_PLAN_LIFETIME:
+        return f"{config.SNIPE_PREMIUM_LIFETIME_DAILY} Names/Tag je Kategorie"
+    if resolved == SNIPE_PLAN_30:
+        return f"{config.SNIPE_PREMIUM_30_DAILY} Names/Tag je Kategorie"
+    return f"{config.SNIPE_PREMIUM_14_DAILY} Names/Tag je Kategorie"
 
 
 async def get_snipe_prices(bot: ShopBot, guild_id: int) -> dict[str, float]:

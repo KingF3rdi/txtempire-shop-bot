@@ -43,9 +43,13 @@ SCAN_PREMIUM_30_CREDITS = (
     float(_SCAN_30_CREDITS) if _SCAN_30_CREDITS else SCAN_PREMIUM_30_PRICE / 100_000
 )
 
-# Username-Sniper Limits
-SNIPE_FREE_DAILY = int(os.getenv("SNIPE_FREE_DAILY", "5") or "5")
-SNIPE_PREMIUM_14_DAILY = int(os.getenv("SNIPE_PREMIUM_14_DAILY", "30") or "30")
+# Username-Sniper Limits (pro Plattform/Kategorie: Minecraft/Roblox/Discord getrennt)
+SNIPE_FREE_DAILY = int(os.getenv("SNIPE_FREE_DAILY", "20") or "20")
+SNIPE_PREMIUM_14_DAILY = int(os.getenv("SNIPE_PREMIUM_14_DAILY", "100") or "100")
+SNIPE_PREMIUM_30_DAILY = int(os.getenv("SNIPE_PREMIUM_30_DAILY", "500") or "500")
+SNIPE_PREMIUM_LIFETIME_DAILY = int(
+    os.getenv("SNIPE_PREMIUM_LIFETIME_DAILY", "500") or "500"
+)
 # Preise für Snipe-Premium (Shop-Währung, 1 Credit = 100k)
 SNIPE_PREMIUM_14_PRICE = float(os.getenv("SNIPE_PREMIUM_14_PRICE", "500000") or "500000")
 SNIPE_PREMIUM_30_PRICE = float(os.getenv("SNIPE_PREMIUM_30_PRICE", "1000000") or "1000000")

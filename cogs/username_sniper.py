@@ -260,26 +260,31 @@ class UsernameSniperCog(commands.Cog):
             )
             return
         staff = await is_staff(self.bot, interaction)
-        quota = await get_snipe_quota(
-            self.bot,
-            interaction.guild.id,
-            interaction.user.id,
-            is_staff=staff,
-        )
+        quotas = {
+            p: await get_snipe_quota(
+                self.bot,
+                interaction.guild.id,
+                interaction.user.id,
+                p,
+                is_staff=staff,
+            )
+            for p in PLATFORMS
+        }
+        any_quota = next(iter(quotas.values()))
         extra = ""
-        if not quota.get("premium") and not staff:
+        if not any_quota.get("premium") and not staff:
             prices = await get_snipe_prices(self.bot, interaction.guild.id)
             extra = (
-                f"\n\nPremium: `/snipepremium` —\n"
+                f"\n\nPremium: `/snipepremium` (je Kategorie) —\n"
                 f"• 14 Tage ({format_price(prices['price_14'])}) → "
                 f"**{config.SNIPE_PREMIUM_14_DAILY}/Tag**\n"
                 f"• 30 Tage ({format_price(prices['price_30'])}) → "
-                f"**unbegrenzt**\n"
+                f"**{config.SNIPE_PREMIUM_30_DAILY}/Tag**\n"
                 f"• Lifetime ({format_price(prices['price_lifetime'])}) → "
-                f"**unbegrenzt**"
+                f"**{config.SNIPE_PREMIUM_LIFETIME_DAILY}/Tag**"
             )
         await interaction.response.send_message(
-            embed=success_embed("Snipe-Status", _snipe_status_body(quota) + extra),
+            embed=success_embed("Snipe-Status", _snipe_status_body(quotas) + extra),
             ephemeral=True,
         )
 
@@ -329,8 +334,10 @@ class UsernameSniperCog(commands.Cog):
             )
             return
         prices = await get_snipe_prices(self.bot, interaction.guild.id)
+        # Premium-Status ist plattformunabhängig (nur das Kontingent ist es nicht) —
+        # eine beliebige Kategorie reicht, um premium/lifetime/expires_at zu lesen.
         quota = await get_snipe_quota(
-            self.bot, interaction.guild.id, interaction.user.id
+            self.bot, interaction.guild.id, interaction.user.id, "minecraft"
         )
         extra = ""
         if quota["premium"]:
@@ -344,16 +351,17 @@ class UsernameSniperCog(commands.Cog):
         await interaction.response.send_message(
             embed=success_embed(
                 "Snipe Premium",
+                "_Kontingent gilt je Kategorie (Minecraft/Roblox/Discord getrennt)._\n"
                 f"Free: **{config.SNIPE_FREE_DAILY}/Tag**\n"
                 f"• **14 Tage** — {format_price(prices['price_14'])} "
                 f"oder **{format_credits(prices['credits_14'])} Credits** "
                 f"→ **{config.SNIPE_PREMIUM_14_DAILY}/Tag**\n"
                 f"• **30 Tage** — {format_price(prices['price_30'])} "
                 f"oder **{format_credits(prices['credits_30'])} Credits** "
-                f"→ **unbegrenzte Names**\n"
+                f"→ **{config.SNIPE_PREMIUM_30_DAILY}/Tag**\n"
                 f"• **Lifetime** — {format_price(prices['price_lifetime'])} "
                 f"oder **{format_credits(prices['credits_lifetime'])} Credits** "
-                f"→ **unbegrenzte Names**"
+                f"→ **{config.SNIPE_PREMIUM_LIFETIME_DAILY}/Tag**"
                 f"{extra}",
             ),
             view=SnipePremiumPanelBuyView(self.bot),
@@ -370,9 +378,18 @@ class UsernameSniperCog(commands.Cog):
     )
     @app_commands.choices(
         plan=[
-            app_commands.Choice(name="14 Tage (30/Tag)", value=14),
-            app_commands.Choice(name="30 Tage (unbegrenzt)", value=30),
-            app_commands.Choice(name="Lifetime (unbegrenzt)", value=36500),
+            app_commands.Choice(
+                name=f"14 Tage ({config.SNIPE_PREMIUM_14_DAILY}/Tag je Kategorie)",
+                value=14,
+            ),
+            app_commands.Choice(
+                name=f"30 Tage ({config.SNIPE_PREMIUM_30_DAILY}/Tag je Kategorie)",
+                value=30,
+            ),
+            app_commands.Choice(
+                name=f"Lifetime ({config.SNIPE_PREMIUM_LIFETIME_DAILY}/Tag je Kategorie)",
+                value=36500,
+            ),
         ]
     )
     @app_commands.default_permissions(manage_guild=True)
@@ -495,13 +512,13 @@ class UsernameSniperCog(commands.Cog):
                 f"**Quelle:** {src}\n\n"
                 f"• **14 Tage** — {format_price(prices['price_14'])} "
                 f"/ **{format_credits(prices['credits_14'])} Credits** "
-                f"→ {config.SNIPE_PREMIUM_14_DAILY}/Tag\n"
+                f"→ {config.SNIPE_PREMIUM_14_DAILY}/Tag je Kategorie\n"
                 f"• **30 Tage** — {format_price(prices['price_30'])} "
                 f"/ **{format_credits(prices['credits_30'])} Credits** "
-                f"→ unbegrenzt\n"
+                f"→ {config.SNIPE_PREMIUM_30_DAILY}/Tag je Kategorie\n"
                 f"• **Lifetime** — {format_price(prices['price_lifetime'])} "
                 f"/ **{format_credits(prices['credits_lifetime'])} Credits** "
-                f"→ unbegrenzt\n\n"
+                f"→ {config.SNIPE_PREMIUM_LIFETIME_DAILY}/Tag je Kategorie\n\n"
                 "Danach `/snipepanel` neu posten, damit das Panel die Preise zeigt.",
             ),
             ephemeral=True,

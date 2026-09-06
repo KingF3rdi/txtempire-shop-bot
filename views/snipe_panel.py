@@ -27,8 +27,10 @@ from utils.username_sniper import (
     PLATFORMS,
     check_many,
     find_available_names,
+    finish_snipe,
     format_results_embed_body,
     generate_candidates,
+    start_snipe,
 )
 from views.ticket_views import is_staff
 
@@ -44,9 +46,11 @@ async def build_snipe_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embed:
         "Finde **bestätigt freie** Usernames auf:\n"
         "🟩 Minecraft · 🟥 Roblox · 🟦 Discord\n\n"
         f"**Free Usernames gefunden (gesamt):** **{free_total}**\n\n"
+        "_Kontingent gilt pro Kategorie (Minecraft/Roblox/Discord getrennt)._\n"
         f"• Free: **{config.SNIPE_FREE_DAILY} Names/Tag**\n"
         f"• 14 Tage Premium: **{config.SNIPE_PREMIUM_14_DAILY} Names/Tag**\n"
-        f"• 30 Tage / Lifetime: **unbegrenzte Names/Tag**\n\n"
+        f"• 30 Tage Premium: **{config.SNIPE_PREMIUM_30_DAILY} Names/Tag**\n"
+        f"• Lifetime: **{config.SNIPE_PREMIUM_LIFETIME_DAILY} Names/Tag**\n\n"
         "**Name prüfen** — bestimmte Usernames checken\n"
         "**Nach Länge** — so viele **freie** Names finden, wie du angibst\n\n"
         "Ergebnis zeigt **nur API-bestätigte verfügbare** Names "
@@ -58,13 +62,13 @@ async def build_snipe_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embed:
         value=(
             f"14 Tage — {format_price(prices['price_14'])} "
             f"oder **{format_credits(prices['credits_14'])} Credits** "
-            f"({config.SNIPE_PREMIUM_14_DAILY}/Tag)\n"
+            f"({config.SNIPE_PREMIUM_14_DAILY}/Tag je Kategorie)\n"
             f"30 Tage — {format_price(prices['price_30'])} "
             f"oder **{format_credits(prices['credits_30'])} Credits** "
-            f"(unbegrenzt)\n"
+            f"({config.SNIPE_PREMIUM_30_DAILY}/Tag je Kategorie)\n"
             f"Lifetime — {format_price(prices['price_lifetime'])} "
             f"oder **{format_credits(prices['credits_lifetime'])} Credits** "
-            f"(unbegrenzt)"
+            f"({config.SNIPE_PREMIUM_LIFETIME_DAILY}/Tag je Kategorie)"
         ),
         inline=False,
     )
@@ -198,53 +202,66 @@ async def run_snipe_check(
         )
         return
 
-    staff = await is_staff(bot, interaction)
-    try:
-        allowed, quota = await reserve_snipe_quota(
-            bot,
-            interaction.guild.id,
-            interaction.user.id,
-            len(parts),
-            is_staff=staff,
-        )
-    except ValueError as e:
+    if not start_snipe(interaction.guild.id, interaction.user.id):
         await interaction.response.send_message(
-            embed=error_embed("Tageslimit", str(e)), ephemeral=True
+            embed=error_embed(
+                "Suche läuft bereits",
+                "Du hast schon eine laufende Sniper-Suche. Bitte warte, bis sie fertig ist.",
+            ),
+            ephemeral=True,
         )
         return
+    try:
+        staff = await is_staff(bot, interaction)
+        try:
+            allowed, quota = await reserve_snipe_quota(
+                bot,
+                interaction.guild.id,
+                interaction.user.id,
+                platform,
+                len(parts),
+                is_staff=staff,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(
+                embed=error_embed("Tageslimit", str(e)), ephemeral=True
+            )
+            return
 
-    capped = parts[:allowed]
-    cap_note = ""
-    if allowed < len(parts):
-        cap_note = (
-            f"\n_Nur **{allowed}** von {len(parts)} Names geprüft "
-            f"(Tageslimit)._"
-        )
+        capped = parts[:allowed]
+        cap_note = ""
+        if allowed < len(parts):
+            cap_note = (
+                f"\n_Nur **{allowed}** von {len(parts)} Names geprüft "
+                f"(Tageslimit)._"
+            )
 
-    if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True)
-    spec = PLATFORMS[platform]
-    status = await interaction.followup.send(
-        embed=warn_embed(
-            "🎯 Sniper läuft…",
-            f"{spec.emoji} **{spec.label}** — {len(capped)} Name(n)…\n"
-            f"{format_snipe_quota_line(quota)}",
-        ),
-        ephemeral=True,
-    )
-    results = await check_many(platform, capped, limit=allowed)
-    body, free = format_results_embed_body(platform, results, show_all=details)
-    if free:
-        await bot.db.record_snipe_finds(
-            interaction.guild.id, interaction.user.id, platform, free
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        spec = PLATFORMS[platform]
+        status = await interaction.followup.send(
+            embed=warn_embed(
+                "🎯 Sniper läuft…",
+                f"{spec.emoji} **{spec.label}** — {len(capped)} Name(n)…\n"
+                f"{format_snipe_quota_line(quota)}",
+            ),
+            ephemeral=True,
         )
-    body = f"{body}{cap_note}\n{format_snipe_quota_line(quota)}"
-    embed = (
-        success_embed(f"✅ {len(free)} verfügbar — {spec.label}", body)
-        if free
-        else warn_embed(f"Keine freien Treffer — {spec.label}", body)
-    )
-    await status.edit(embed=embed)
+        results = await check_many(platform, capped, limit=allowed)
+        body, free = format_results_embed_body(platform, results, show_all=details)
+        if free:
+            await bot.db.record_snipe_finds(
+                interaction.guild.id, interaction.user.id, platform, free
+            )
+        body = f"{body}{cap_note}\n{format_snipe_quota_line(quota)}"
+        embed = (
+            success_embed(f"✅ {len(free)} verfügbar — {spec.label}", body)
+            if free
+            else warn_embed(f"Keine freien Treffer — {spec.label}", body)
+        )
+        await status.edit(embed=embed)
+    finally:
+        finish_snipe(interaction.guild.id, interaction.user.id)
 
 
 async def run_snipe_length(
@@ -309,81 +326,94 @@ async def run_snipe_length(
         )
         return
 
-    staff = await is_staff(bot, interaction)
-    try:
-        allowed, quota = await reserve_snipe_quota(
-            bot,
-            interaction.guild.id,
-            interaction.user.id,
-            count,
-            is_staff=staff,
-        )
-    except ValueError as e:
+    if not start_snipe(interaction.guild.id, interaction.user.id):
         await interaction.response.send_message(
-            embed=error_embed("Tageslimit", str(e)), ephemeral=True
+            embed=error_embed(
+                "Suche läuft bereits",
+                "Du hast schon eine laufende Sniper-Suche. Bitte warte, bis sie fertig ist.",
+            ),
+            ephemeral=True,
         )
         return
-
-    cap_note = ""
-    if allowed < count:
-        cap_note = (
-            f"\n_Anfrage auf **{allowed}** freie Names gekürzt (Tageslimit)._"
-        )
-
-    if not interaction.response.is_done():
-        await interaction.response.defer(ephemeral=True)
-    clean_note = " · ✨ clean (nur Buchstaben)" if clean else ""
-    status = await interaction.followup.send(
-        embed=warn_embed(
-            "🎯 Length-Sniper läuft…",
-            f"{spec.emoji} **{spec.label}** · len **{length}**{clean_note} · "
-            f"sucht **{allowed}** freie Names…\n"
-            f"{format_snipe_quota_line(quota)}",
-        ),
-        ephemeral=True,
-    )
     try:
-        free_results, checks = await find_available_names(
-            platform,
-            length,
-            allowed,
-            prefix=prefix,
-            suffix=suffix,
-            clean=clean,
-        )
-    except ValueError as e:
-        await status.edit(embed=error_embed("Ungültig", str(e)))
-        return
+        staff = await is_staff(bot, interaction)
+        try:
+            allowed, quota = await reserve_snipe_quota(
+                bot,
+                interaction.guild.id,
+                interaction.user.id,
+                platform,
+                count,
+                is_staff=staff,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(
+                embed=error_embed("Tageslimit", str(e)), ephemeral=True
+            )
+            return
 
-    body, free = format_results_embed_body(
-        platform, free_results, show_all=details
-    )
-    if free:
-        await bot.db.record_snipe_finds(
-            interaction.guild.id, interaction.user.id, platform, free
+        cap_note = ""
+        if allowed < count:
+            cap_note = (
+                f"\n_Anfrage auf **{allowed}** freie Names gekürzt (Tageslimit)._"
+            )
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        clean_note = " · ✨ clean (nur Buchstaben)" if clean else ""
+        status = await interaction.followup.send(
+            embed=warn_embed(
+                "🎯 Length-Sniper läuft…",
+                f"{spec.emoji} **{spec.label}** · len **{length}**{clean_note} · "
+                f"sucht **{allowed}** freie Names…\n"
+                f"{format_snipe_quota_line(quota)}",
+            ),
+            ephemeral=True,
         )
-    found_note = (
-        f"\nGesucht: **{allowed}** freie Names · geprüft: **{checks}**"
-        f"{cap_note}"
-    )
-    if len(free) < allowed:
-        found_note += (
-            f"\n_Nur **{len(free)}** von {allowed} freien Names gefunden._"
+        try:
+            free_results, checks = await find_available_names(
+                platform,
+                length,
+                allowed,
+                prefix=prefix,
+                suffix=suffix,
+                clean=clean,
+            )
+        except ValueError as e:
+            await status.edit(embed=error_embed("Ungültig", str(e)))
+            return
+
+        body, free = format_results_embed_body(
+            platform, free_results, show_all=details
         )
-    body = f"{body}{found_note}\n{format_snipe_quota_line(quota)}"
-    title_suffix = f"(len {length}{', clean' if clean else ''})"
-    embed = (
-        success_embed(
-            f"✅ {len(free)} verfügbar — {spec.label} {title_suffix}",
-            body,
+        if free:
+            await bot.db.record_snipe_finds(
+                interaction.guild.id, interaction.user.id, platform, free
+            )
+        found_note = (
+            f"\nGesucht: **{allowed}** freie Names · geprüft: **{checks}**"
+            f"{cap_note}"
         )
-        if free
-        else warn_embed(
-            f"Keine freien Treffer — {spec.label} {title_suffix}",
-            body,
+        if len(free) < allowed:
+            found_note += (
+                f"\n_Nur **{len(free)}** von {allowed} freien Names gefunden._"
+            )
+        body = f"{body}{found_note}\n{format_snipe_quota_line(quota)}"
+        title_suffix = f"(len {length}{', clean' if clean else ''})"
+        embed = (
+            success_embed(
+                f"✅ {len(free)} verfügbar — {spec.label} {title_suffix}",
+                body,
+            )
+            if free
+            else warn_embed(
+                f"Keine freien Treffer — {spec.label} {title_suffix}",
+                body,
+            )
         )
-    )
-    await status.edit(embed=embed)
+        await status.edit(embed=embed)
+    finally:
+        finish_snipe(interaction.guild.id, interaction.user.id)
 
 
 class PlatformPickView(discord.ui.View):
@@ -486,14 +516,18 @@ class SnipePanelView(discord.ui.View):
             )
             return
         staff = await is_staff(self.bot, interaction)
-        quota = await get_snipe_quota(
-            self.bot,
-            interaction.guild.id,
-            interaction.user.id,
-            is_staff=staff,
-        )
+        quotas = {
+            p: await get_snipe_quota(
+                self.bot,
+                interaction.guild.id,
+                interaction.user.id,
+                p,
+                is_staff=staff,
+            )
+            for p in PLATFORMS
+        }
         await interaction.response.send_message(
-            embed=success_embed("Snipe-Status", _snipe_status_body(quota)),
+            embed=success_embed("Snipe-Status", _snipe_status_body(quotas)),
             ephemeral=True,
         )
 
@@ -518,13 +552,14 @@ class SnipePanelView(discord.ui.View):
                 "Snipe Premium",
                 f"• **14 Tage** — {format_price(prices['price_14'])} / "
                 f"{format_credits(prices['credits_14'])} Credits → "
-                f"**{config.SNIPE_PREMIUM_14_DAILY}/Tag**\n"
+                f"**{config.SNIPE_PREMIUM_14_DAILY}/Tag je Kategorie**\n"
                 f"• **30 Tage** — {format_price(prices['price_30'])} / "
                 f"{format_credits(prices['credits_30'])} Credits → "
-                f"**unbegrenzt**\n"
+                f"**{config.SNIPE_PREMIUM_30_DAILY}/Tag je Kategorie**\n"
                 f"• **Lifetime** — {format_price(prices['price_lifetime'])} / "
                 f"{format_credits(prices['credits_lifetime'])} Credits → "
-                f"**unbegrenzt**\n\n"
+                f"**{config.SNIPE_PREMIUM_LIFETIME_DAILY}/Tag je Kategorie**\n\n"
+                "_Minecraft/Roblox/Discord haben je ein eigenes Kontingent._\n\n"
                 "Wähle Dauer und Zahlungsart:",
             ),
             view=SnipePremiumPanelBuyView(self.bot),
@@ -532,33 +567,27 @@ class SnipePanelView(discord.ui.View):
         )
 
 
-def _snipe_status_body(quota: dict) -> str:
-    if quota.get("staff"):
-        return f"**Staff** — kein Limit.\nHeute genutzt: **{quota['used']}** Names"
-    if quota.get("lifetime"):
-        return (
-            "**Lifetime Premium**\n"
-            "**Unbegrenzte Names/Tag**\n"
-            f"Heute genutzt: **{quota['used']}**"
-        )
-    if quota["premium"] and quota.get("unlimited"):
-        return (
-            f"**Premium** bis `{quota['expires_at']}`\n"
-            "**Unbegrenzte Names/Tag**\n"
-            f"Heute genutzt: **{quota['used']}**"
-        )
-    if quota["premium"]:
-        return (
-            f"**Premium** bis `{quota['expires_at']}`\n"
-            f"**{config.SNIPE_PREMIUM_14_DAILY} Names/Tag**\n"
-            f"Heute: **{quota['used']}/{quota['limit']}** "
-            f"(noch {quota['remaining']})"
-        )
-    return (
-        f"**Free** — {config.SNIPE_FREE_DAILY}/Tag\n"
-        f"Heute: **{quota['used']}/{quota['limit']}** "
-        f"(noch {quota['remaining']})"
+def _snipe_status_body(quotas: dict[str, dict]) -> str:
+    """quotas: {platform: quota_dict} — ein Kontingent je Kategorie."""
+    any_quota = next(iter(quotas.values()))
+
+    if any_quota.get("staff"):
+        header = "**Staff** — kein Limit."
+    elif any_quota.get("lifetime"):
+        header = "**Lifetime Premium**"
+    elif any_quota.get("premium") and any_quota.get("unlimited"):
+        header = f"**Premium 30 Tage** bis `{any_quota['expires_at']}`"
+    elif any_quota.get("premium"):
+        header = f"**Premium 14 Tage** bis `{any_quota['expires_at']}`"
+    else:
+        header = "**Free**"
+
+    lines = "\n".join(
+        f"{PLATFORMS[p].emoji} **{PLATFORMS[p].label}** — "
+        f"**{q['used']}/{q['limit']}** (noch {q['remaining']})"
+        for p, q in quotas.items()
     )
+    return f"{header}\n{lines}"
 
 
 class SnipePremiumPanelBuyView(discord.ui.View):

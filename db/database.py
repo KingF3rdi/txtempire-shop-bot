@@ -421,6 +421,22 @@ class Database:
         try:
             await self.db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS snipe_usage_platform (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    platform TEXT NOT NULL,
+                    day TEXT NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id, platform, day)
+                )
+                """
+            )
+            await self.db.commit()
+        except Exception:
+            pass
+        try:
+            await self.db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS scan_panel (
                     guild_id INTEGER PRIMARY KEY,
                     channel_id INTEGER,
@@ -2021,8 +2037,9 @@ class Database:
     ) -> str:
         """
         Verlängert Snipe-Premium.
-        plan: 14 = 14 Tage (30/Tag), 30 = 30 Tage unlimited,
-              0 = Lifetime unlimited.
+        plan: 14 = 14 Tage, 30 = 30 Tage ("unlimited"-Tier), 0 = Lifetime.
+        Die tatsächlichen Tages-Kontingente (je Kategorie) kommen aus
+        config.SNIPE_PREMIUM_14_DAILY / _30_DAILY / _LIFETIME_DAILY.
         """
         from datetime import datetime, timedelta, timezone
 
@@ -2073,34 +2090,37 @@ class Database:
         await self.db.commit()
         return stamp
 
-    async def get_snipe_usage_today(self, guild_id: int, user_id: int) -> int:
+    async def get_snipe_usage_today(
+        self, guild_id: int, user_id: int, platform: str
+    ) -> int:
+        """Kontingent-Nutzung heute — pro Plattform/Kategorie getrennt."""
         row = await self.fetchone(
             """
-            SELECT count FROM snipe_usage
-            WHERE guild_id = ? AND user_id = ? AND day = ?
+            SELECT count FROM snipe_usage_platform
+            WHERE guild_id = ? AND user_id = ? AND platform = ? AND day = ?
             """,
-            (guild_id, user_id, self._utc_day()),
+            (guild_id, user_id, platform, self._utc_day()),
         )
         return int(row["count"]) if row else 0
 
     async def increment_snipe_usage(
-        self, guild_id: int, user_id: int, amount: int = 1
+        self, guild_id: int, user_id: int, platform: str, amount: int = 1
     ) -> int:
         day = self._utc_day()
         add = max(0, int(amount))
         if add <= 0:
-            return await self.get_snipe_usage_today(guild_id, user_id)
+            return await self.get_snipe_usage_today(guild_id, user_id, platform)
         await self.db.execute(
             """
-            INSERT INTO snipe_usage (guild_id, user_id, day, count)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(guild_id, user_id, day) DO UPDATE SET
+            INSERT INTO snipe_usage_platform (guild_id, user_id, platform, day, count)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, platform, day) DO UPDATE SET
               count = count + excluded.count
             """,
-            (guild_id, user_id, day, add),
+            (guild_id, user_id, platform, day, add),
         )
         await self.db.commit()
-        return await self.get_snipe_usage_today(guild_id, user_id)
+        return await self.get_snipe_usage_today(guild_id, user_id, platform)
 
     async def record_snipe_finds(
         self,
@@ -2156,9 +2176,16 @@ class Database:
             """,
             (guild_id,),
         )
+        # Alte (vor der Pro-Kategorie-Umstellung) + neue Tabelle zusammenzählen,
+        # damit historische Nutzung nicht aus der Statistik verschwindet.
         usage_sum = await self.fetchone(
-            "SELECT COALESCE(SUM(count), 0) AS total FROM snipe_usage WHERE guild_id = ?",
-            (guild_id,),
+            """
+            SELECT
+              (SELECT COALESCE(SUM(count), 0) FROM snipe_usage WHERE guild_id = ?) +
+              (SELECT COALESCE(SUM(count), 0) FROM snipe_usage_platform WHERE guild_id = ?)
+              AS total
+            """,
+            (guild_id, guild_id),
         )
         premium_buys = await self.fetchone(
             """
