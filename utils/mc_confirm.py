@@ -362,6 +362,44 @@ async def handle_mc_payment(
 ) -> dict[str, Any]:
     """Verarbeitet eine erkannte Ingame-Zahlung (DB + Discord-Log)."""
     settings = await bot.db.ensure_guild(guild_id)
+
+    # --- NEU: Erst prüfen, ob eine offene WEBSITE-Bestellung zu IGN+Betrag passt ---
+    # (unabhängig davon, ob der Discord-Account per /link verknüpft ist)
+    from integrations.shop_api import shop_api
+
+    if shop_api.enabled:
+        try:
+            web_result = await shop_api.confirm_order_by_amount(ign, amount)
+        except Exception as exc:
+            print(f"[MC-Payment] Website-Order-Check fehlgeschlagen: {exc}")
+            web_result = None
+        if web_result and web_result.get("matched"):
+            event_id = await bot.db.log_mc_payment(
+                guild_id, ign=ign, amount=amount, raw_text=raw_text
+            )
+            await _post_mc_payment_log(
+                bot,
+                guild_id=guild_id,
+                ign=ign,
+                amount=amount,
+                raw_text=raw_text,
+                reason="auto_confirmed",
+                auto_confirmed=True,
+                event_id=event_id,
+            )
+            print(
+                f"[MC-Payment] Website-Bestellung #{web_result.get('order_id')} "
+                f"automatisch bestätigt (IGN {ign}, {amount})."
+            )
+            return {
+                "ok": True,
+                "auto_confirmed": True,
+                "reason": "website_order_confirmed",
+                "event_id": event_id,
+                "website_order_id": web_result.get("order_id"),
+            }
+    # --- Ende Website-Check, ab hier unverändert die bisherige Ticket-Logik ---
+
     link = await bot.db.get_mc_link_by_ign(guild_id, ign)
     user_id: int | None = int(link["user_id"]) if link else None
     order: dict | None = None
