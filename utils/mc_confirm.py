@@ -391,6 +391,29 @@ async def handle_mc_payment(
                 f"[MC-Payment] Website-Bestellung #{web_result.get('order_id')} "
                 f"automatisch bestätigt (IGN {ign}, {amount})."
             )
+
+            # Download zusätzlich per DM zustellen (Website hat ihn schon freigeschaltet)
+            discord_id = web_result.get("discord_id")
+            download_url = web_result.get("download_url")
+            product_name = web_result.get("product_name") or "dein Pack"
+            if discord_id:
+                try:
+                    buyer = await bot.fetch_user(int(discord_id))
+                    embed = discord.Embed(
+                        title="✅ Website-Kauf bestätigt",
+                        description=(
+                            f"Deine Ingame-Zahlung für **{product_name}** wurde bestätigt!\n\n"
+                            + (f"📥 [Download]({download_url})" if download_url else
+                               "Den Download findest du auch jederzeit unter „Meine Downloads“ auf der Website.")
+                        ),
+                        color=discord.Color.green(),
+                    )
+                    await buyer.send(embed=embed)
+                except discord.HTTPException as exc:
+                    print(f"[MC-Payment] DM-Zustellung fehlgeschlagen (Discord-ID {discord_id}): {exc}")
+                except Exception as exc:
+                    print(f"[MC-Payment] DM-Zustellung fehlgeschlagen (Discord-ID {discord_id}): {exc}")
+
             return {
                 "ok": True,
                 "auto_confirmed": True,
