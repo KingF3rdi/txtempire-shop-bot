@@ -114,5 +114,34 @@ class ShopApiClient:
             print(f"[Shop API] Vouch submit fehlgeschlagen: {exc}")
             return None
 
+    async def confirm_order_by_amount(
+        self,
+        minecraft_username: str,
+        amount: float,
+    ) -> dict | None:
+        """Prüft, ob eine offene Website-Bestellung (Ingame-Zahlung) zu
+        IGN + Betrag passt, und bestätigt sie ggf. automatisch."""
+        if not self.enabled:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{self.api_url}/api/bot/orders/confirm_by_amount",
+                    headers={
+                        "X-Bot-Api-Key": self.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "minecraft_username": minecraft_username,
+                        "amount": amount,
+                    },
+                )
+                if resp.status_code >= 400:
+                    return None
+                return resp.json()
+        except Exception as exc:
+            print(f"[Shop API] Website-Order-Confirm fehlgeschlagen: {exc}")
+            return None
+
 
 shop_api = ShopApiClient()
