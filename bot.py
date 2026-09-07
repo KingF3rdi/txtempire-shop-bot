@@ -38,6 +38,7 @@ class ShopBot(commands.Bot):
             "cogs.giveaways",
             "cogs.invites",
             "cogs.mc_link",
+            "cogs.mousetweaks_keys",
             ):
             await self.load_extension(ext)
 
@@ -83,6 +84,10 @@ class ShopBot(commands.Bot):
         from views.mc_link_views import McLinkPanelView
 
         self.add_view(McLinkPanelView(self))
+        from cogs.mousetweaks_keys import MousetweaksKeyPanelView, MousetweaksKeyTicketView
+
+        self.add_view(MousetweaksKeyPanelView(self))
+        self.add_view(MousetweaksKeyTicketView(self))
         n_deals = await register_daily_deal_views(self)
         if n_deals:
             print(f"[DailyDeal] {n_deals} aktive Deal-View(s) registriert")
