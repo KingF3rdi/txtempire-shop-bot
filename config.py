@@ -101,6 +101,17 @@ INVITE_REWARDS: tuple[tuple[int, float], ...] = (
     (100, 25_000_000.0),
 )
 
+# Ferdi Mousetweaks - Lizenzkey-Verkauf (Discord-Ticket + /key generate)
+# MUSS exakt mit LICENSE_SECRET in app/licensing.py der Ferdi-Mousetweaks-
+# App übereinstimmen, sonst kann die App die Keys nicht prüfen.
+MOUSETWEAKS_LICENSE_SECRET = os.getenv("MOUSETWEAKS_LICENSE_SECRET", "").strip()
+# Standardpreise (pro Server überschreibbar mit /keysetup)
+MOUSETWEAKS_PRICE_14D = float(os.getenv("MOUSETWEAKS_PRICE_14D", "0") or "0")
+MOUSETWEAKS_PRICE_30D = float(os.getenv("MOUSETWEAKS_PRICE_30D", "0") or "0")
+MOUSETWEAKS_PRICE_LIFETIME = float(
+    os.getenv("MOUSETWEAKS_PRICE_LIFETIME", "0") or "0"
+)
+
 # Minecraft Account-Link + Chat-Watcher Mod API
 # Bot-Hosting/Pterodactyl setzt SERVER_PORT (= freigegebener Port, z.B. 26026).
 # Der Prozess MUSS genau auf SERVER_PORT lauschen, sonst ist er von außen unerreichbar.
