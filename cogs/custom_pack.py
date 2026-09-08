@@ -364,6 +364,14 @@ class PackDeliverModal(discord.ui.Modal, title="Pack liefern"):
                 )
             except discord.HTTPException:
                 dm_ok = False
+            else:
+                from utils import tweak_vouch
+
+                await tweak_vouch.request_vouch(
+                    self.bot, interaction.guild, buyer,
+                    product="Custom Texturepack",
+                    tier_label=f"{self.order['qty']} Texturen",
+                )
 
         body = f"Bestätigt und geliefert von {interaction.user.mention}."
         if not dm_ok:

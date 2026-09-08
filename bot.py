@@ -103,6 +103,9 @@ class ShopBot(commands.Bot):
         from cogs.tweak_panel import TweakShopPanelView
 
         self.add_view(TweakShopPanelView(self))
+        from utils.tweak_vouch import TweakVouchRatingView
+
+        self.add_view(TweakVouchRatingView(self))
         n_deals = await register_daily_deal_views(self)
         if n_deals:
             print(f"[DailyDeal] {n_deals} aktive Deal-View(s) registriert")
