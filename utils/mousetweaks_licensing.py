@@ -54,13 +54,18 @@ def _sign(payload_b64: bytes, secret: str) -> str:
 
 
 def generate_license_key(
-    hwid: str,
+    hwid: Optional[str],
     note: str,
     tier: str = TIER_LIFETIME,
     expires: Optional[int] = None,
 ) -> str:
     """Erzeugt einen fertigen Lizenzkey-String ("payload.signatur").
-    Braucht config.MOUSETWEAKS_LICENSE_SECRET (siehe licensing_configured())."""
+    Braucht config.MOUSETWEAKS_LICENSE_SECRET (siehe licensing_configured()).
+
+    `hwid`: None/leer erzeugt einen NICHT gebundenen Key - so wird er jetzt
+    beim Kauf sofort ausgegeben, ohne vorher die Hardware-ID abzufragen. Die
+    App bindet ihn automatisch an das Geraet des Kunden beim ersten
+    Eintragen (siehe app/licensing.py: check_license_key)."""
     secret = config.MOUSETWEAKS_LICENSE_SECRET.strip()
     if not secret:
         raise RuntimeError(
@@ -70,7 +75,7 @@ def generate_license_key(
     if expires is None:
         expires = tier_to_expiry(tier, issued)
     payload = {
-        "hwid": hwid.strip(),
+        "hwid": (hwid or "").strip() or None,
         "note": (note or "").strip(),
         "issued": issued,
         "tier": tier,

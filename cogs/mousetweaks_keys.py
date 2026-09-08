@@ -5,13 +5,15 @@ mousetweaks_keys.py
 Verkauf von Lizenzkeys für "Ferdi Mousetweaks" direkt über diesen Bot:
 
   - Kunde klickt auf einem Panel "Key kaufen" -> wählt Laufzeit
-    (14 Tage / 30 Tage / Lifetime) -> gibt seine Hardware-ID ein
-    (die zeigt ihm die App beim ersten Start) -> privates Ticket wird
-    erstellt (fortlaufend nummeriert: Key-Ticket #1, #2, ...).
+    (14 Tage / 30 Tage / Lifetime) -> privates Ticket wird erstellt
+    (fortlaufend nummeriert: Key-Ticket #1, #2, ...). Keine Hardware-ID
+    noetig - der Key ist noch an KEIN Geraet gebunden.
   - Staff bestätigt im Ticket mit einem Klick ("✅ Bestätigen") ->
-    der Bot erzeugt automatisch einen gültigen, an die Hardware-ID
-    gebundenen Lizenzkey und schickt ihn dem Kunden per DM. Kein
-    manueller Schritt außer dem einen Klick nötig.
+    der Bot erzeugt automatisch einen gültigen, noch unadressierten
+    Lizenzkey und schickt ihn dem Kunden per DM. Die App bindet ihn
+    automatisch an das Geraet des Kunden, sobald er ihn dort zum
+    ersten Mal eintraegt. Kein manueller Schritt außer dem einen
+    Klick nötig.
   - Alternativ: `/key generate` erzeugt (für Staff) sofort einen
     gültigen Key ohne Ticket - z.B. wenn die Zahlung schon anderswo
     (Ticket, Überweisung, persönlich) bestätigt wurde.
@@ -258,9 +260,9 @@ def _panel_embed(settings: dict) -> discord.Embed:
         "🖱️ Ferdi Mousetweaks — Lizenzkey",
         "Universeller Maus-Tweak-Konfigurator (DPI, Debounce, RGB, Makros, "
         "Profile).\n\nVerfügbare Laufzeiten:\n" + "\n".join(lines) + "\n\n"
-        "Klicke **Key kaufen**, wähle eine Laufzeit und gib deine "
-        "**Hardware-ID** ein (siehe Aktivierungsfenster der App) — "
-        "danach wird ein privates Ticket erstellt.",
+        "Klicke **Key kaufen** und wähle eine Laufzeit — danach wird ein "
+        "privates Ticket erstellt. Keine Hardware-ID nötig: der Key bindet "
+        "sich automatisch an dein Gerät, sobald du ihn in der App einträgst.",
     )
     return embed
 
@@ -332,7 +334,10 @@ class TierSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         tier = self.values[0]
-        await interaction.response.send_modal(HwidModal(self.bot, tier))
+        # Keine Hardware-ID mehr beim Kauf abfragen - der Key wird sofort
+        # unadressiert ausgegeben und bindet sich automatisch an das Geraet
+        # des Kunden, sobald er ihn zum ersten Mal in der App eintraegt.
+        await _create_key_ticket_channel(self.bot, interaction, tier=tier, hwid="", note="")
 
 
 class TierSelectView(discord.ui.View):
@@ -340,37 +345,6 @@ class TierSelectView(discord.ui.View):
         super().__init__(timeout=180)
         self.bot = bot
         self.add_item(TierSelect(bot, settings))
-
-
-class HwidModal(discord.ui.Modal, title="Ferdi Mousetweaks — Key anfragen"):
-    hwid = discord.ui.TextInput(
-        label="Deine Hardware-ID",
-        placeholder="z.B. AAAAA-BBBBB-CCCCC-DDDDD (aus dem Aktivierungsfenster)",
-        max_length=64,
-        required=True,
-    )
-    note = discord.ui.TextInput(
-        label="Notiz (optional)",
-        placeholder="z.B. dein Name/Zahlungsweg — nur für Staff sichtbar",
-        max_length=200,
-        required=False,
-    )
-
-    def __init__(self, bot: "ShopBot", tier: str) -> None:
-        super().__init__()
-        self.bot = bot
-        self.tier = tier
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        hwid_val = self.hwid.value.strip()
-        if not hwid_val:
-            await interaction.response.send_message(
-                embed=error_embed("Hardware-ID fehlt"), ephemeral=True
-            )
-            return
-        await _create_key_ticket_channel(
-            self.bot, interaction, tier=self.tier, hwid=hwid_val, note=self.note.value.strip()
-        )
 
 
 async def _create_key_ticket_channel(
@@ -454,7 +428,7 @@ async def _create_key_ticket_channel(
         f"Käufer: {interaction.user.mention}\n"
         f"Laufzeit: **{mtlic.TIER_LABELS[tier]}**\n"
         f"Preis: **{price_txt}**\n"
-        f"Hardware-ID: `{hwid}`\n"
+        + (f"Hardware-ID: `{hwid}`\n" if hwid else "Noch nicht an ein Gerät gebunden - bindet sich automatisch.\n")
         + (f"Notiz: {note}\n" if note else "")
         + f"\n**{config.PAYMENT_NOTICE}**\n"
         f"Zahlung an **{payee_name(settings)}**:\n{payee_details_text(settings) or '_Keine Details hinterlegt_'}\n\n"
@@ -578,8 +552,8 @@ class MousetweaksKeyTicketView(discord.ui.View):
                         f"Laufzeit: **{mtlic.describe_tier(row['tier'], expires)}**\n\n"
                         f"```\n{license_key}\n```\n"
                         "Im Programm unter **Lizenzkey einfügen** eintragen. "
-                        "Der Key ist genau an die Hardware-ID gebunden, die du "
-                        "angegeben hast.",
+                        "Der Key bindet sich beim ersten Eintragen automatisch "
+                        "an dein Gerät - danach funktioniert er nur noch dort.",
                     )
                 )
             except discord.HTTPException:
@@ -806,10 +780,13 @@ class MousetweaksKeysCog(commands.Cog):
 
     @key.command(name="generate", description="Sofort einen gültigen Key erzeugen (Staff)")
     @app_commands.describe(
-        hwid="Hardware-ID des Kunden",
         tier="Laufzeit",
         member="Discord-Mitglied (bekommt den Key automatisch per DM)",
         note="Notiz (optional)",
+        hwid=(
+            "Hardware-ID des Kunden - optional. Leer lassen, damit sich der Key "
+            "automatisch beim ersten Eintragen an das Geraet des Kunden bindet."
+        ),
     )
     @app_commands.choices(
         tier=[
@@ -821,10 +798,10 @@ class MousetweaksKeysCog(commands.Cog):
     async def key_generate(
         self,
         interaction: discord.Interaction,
-        hwid: str,
         tier: app_commands.Choice[str],
         member: discord.Member | None = None,
         note: str = "",
+        hwid: str = "",
     ) -> None:
         assert interaction.guild is not None
         if not mtlic.licensing_configured():
@@ -865,11 +842,12 @@ class MousetweaksKeysCog(commands.Cog):
             except discord.HTTPException:
                 dm_note = "\n⚠️ DM fehlgeschlagen (DMs geschlossen) — Key unten manuell weitergeben."
 
+        hwid_line = f"Hardware-ID: `{hwid}`\n" if hwid else "Noch nicht an ein Gerät gebunden - bindet sich automatisch.\n"
         await interaction.followup.send(
             embed=success_embed(
                 f"Key #{key_number} erzeugt",
                 f"Laufzeit: **{mtlic.describe_tier(tier.value, expires)}**\n"
-                f"Hardware-ID: `{hwid}`\n\n"
+                f"{hwid_line}\n"
                 f"```\n{license_key}\n```{dm_note}",
             ),
             ephemeral=True,
