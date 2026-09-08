@@ -176,6 +176,21 @@ async def _get_key_by_id(bot: "ShopBot", key_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+async def _get_latest_confirmed_key(bot: "ShopBot", guild_id: int, user_id: int) -> Optional[dict]:
+    """Fuer den Self-Service HWID-Reset: der zuletzt bestaetigte (bezahlte)
+    Kauf dieses Kunden - nur wer schonmal einen Key bestaetigt bekommen hat,
+    darf sich selbst einen neuen, unadressierten Ersatzkey ausstellen."""
+    row = await bot.db.fetchone(
+        """
+        SELECT * FROM mt_keys
+        WHERE guild_id = ? AND user_id = ? AND status = 'confirmed'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (guild_id, user_id),
+    )
+    return dict(row) if row else None
+
+
 async def _delete_key_row(bot: "ShopBot", key_id: int) -> None:
     await bot.db.db.execute("DELETE FROM mt_keys WHERE id = ?", (key_id,))
     await bot.db.db.commit()
@@ -312,6 +327,95 @@ class MousetweaksKeyPanelView(discord.ui.View):
             view=TierSelectView(self.bot, settings),
             ephemeral=True,
         )
+
+    @discord.ui.button(
+        label="HWID zurücksetzen",
+        style=discord.ButtonStyle.secondary,
+        custom_id="mousetweaks:reset_hwid",
+        emoji="🔄",
+    )
+    async def reset_hwid(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        """Self-Service: nur fuer Kunden mit mindestens einem bestaetigten
+        Kauf. Discord kann Buttons auf einer geteilten Panel-Nachricht nicht
+        pro Nutzer aus-/einblenden - der Button ist fuer alle sichtbar, aber
+        bei jedem ohne bestaetigten Kauf antwortet er nur privat mit einem
+        Hinweis, statt etwas auszuloesen.
+
+        Stellt einen NEUEN, unadressierten Ersatzkey aus (gleiche Laufzeit/
+        Ablaufdatum wie der urspruengliche Kauf) - der bindet sich beim
+        naechsten Eintragen automatisch an das dann genutzte Geraet. Der
+        alte, bereits gebundene Key bleibt auf seinem bisherigen Geraet
+        weiter gueltig."""
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Nur auf dem Server"), ephemeral=True
+            )
+            return
+        if not mtlic.licensing_configured():
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Noch nicht eingerichtet",
+                    "MOUSETWEAKS_LICENSE_SECRET ist noch nicht gesetzt (Staff).",
+                ),
+                ephemeral=True,
+            )
+            return
+        row = await _get_latest_confirmed_key(self.bot, interaction.guild.id, interaction.user.id)
+        if not row:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Kein Kauf gefunden",
+                    "Dieser Button ist nur für Kunden mit einem bereits bestätigten "
+                    "Key gedacht. Kauf zuerst einen über **Key kaufen**.",
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        # Ablaufdatum des urspruenglichen Keys uebernehmen (nicht neu
+        # berechnen) - ein Reset soll die Laufzeit nicht verlaengern.
+        expires = None
+        if row.get("license_key"):
+            ok, old_payload, _err = mtlic.verify_own_key(row["license_key"])
+            if ok and old_payload:
+                expires = old_payload.get("expires")
+        if expires is None:
+            expires = mtlic.tier_to_expiry(row["tier"])
+
+        new_key = mtlic.generate_license_key(None, row.get("note") or "", tier=row["tier"], expires=expires)
+        await _insert_direct_key(
+            self.bot, interaction.guild.id, interaction.user.id, row["tier"],
+            "", row.get("note") or "", new_key, interaction.user.id,
+        )
+
+        try:
+            await interaction.user.send(
+                embed=success_embed(
+                    "🔄 Neuer Ferdi Mousetweaks Key (HWID-Reset)",
+                    f"Laufzeit: **{mtlic.describe_tier(row['tier'], expires)}**\n\n"
+                    f"```\n{new_key}\n```\n"
+                    "Im Programm unter **Lizenzkey einfügen** eintragen - bindet sich "
+                    "automatisch an dieses Gerät. Der alte Key funktioniert auf einem "
+                    "bereits aktivierten Gerät weiterhin, ist danach aber nicht mehr "
+                    "auf einem weiteren Gerät nutzbar.",
+                )
+            )
+            await interaction.followup.send(
+                embed=success_embed("Neuer Key verschickt", "Schau in deine DMs."),
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            await interaction.followup.send(
+                embed=error_embed(
+                    "DM fehlgeschlagen",
+                    "Bitte aktiviere DMs von Servermitgliedern (Datenschutzeinstellungen) "
+                    "und klicke erneut.",
+                ),
+                ephemeral=True,
+            )
 
 
 class TierSelect(discord.ui.Select):
