@@ -276,7 +276,7 @@ class ScanFileModal(discord.ui.Modal, title="Datei prüfen"):
         self.add_item(
             discord.ui.Label(
                 text="Datei",
-                description=f"{supported_types_line()} · maximal {MAX_ARCHIVE_BYTES // (1024 * 1024)} MB",
+                description=f"Archiv oder Einzeldatei · maximal {MAX_ARCHIVE_BYTES // (1024 * 1024)} MB",
                 component=self.file_upload,
             )
         )
