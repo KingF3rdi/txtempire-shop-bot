@@ -5,13 +5,16 @@ mousetweaks_keys.py
 Verkauf von Lizenzkeys für "Ferdi Mousetweaks" direkt über diesen Bot:
 
   - Kunde klickt auf einem Panel "Key kaufen" -> wählt Laufzeit
-    (14 Tage / 30 Tage / Lifetime) -> gibt seine Hardware-ID ein
-    (die zeigt ihm die App beim ersten Start) -> privates Ticket wird
-    erstellt (fortlaufend nummeriert: Key-Ticket #1, #2, ...).
-  - Staff bestätigt im Ticket mit einem Klick ("✅ Bestätigen") ->
-    der Bot erzeugt automatisch einen gültigen, an die Hardware-ID
-    gebundenen Lizenzkey und schickt ihn dem Kunden per DM. Kein
-    manueller Schritt außer dem einen Klick nötig.
+    (14 Tage / 30 Tage / Lifetime) -> privates Ticket wird sofort erstellt
+    (fortlaufend nummeriert: Key-Ticket #1, #2, ...). Die Hardware-ID wird
+    NICHT vorab abgefragt - der Kunde schickt sie einfach als Nachricht
+    im Ticket (die zeigt ihm die App im Aktivierungsfenster, automatisch
+    in die Zwischenablage kopiert).
+  - Staff bestätigt im Ticket mit einem Klick ("✅ Bestätigen") -> ein
+    kleines Formular fragt die Hardware-ID ab (zum Reinkopieren aus der
+    Kunden-Nachricht) -> der Bot erzeugt automatisch einen gültigen, an
+    diese Hardware-ID gebundenen Lizenzkey und schickt ihn dem Kunden
+    per DM.
   - Alternativ: `/key generate` erzeugt (für Staff) sofort einen
     gültigen Key ohne Ticket - z.B. wenn die Zahlung schon anderswo
     (Ticket, Überweisung, persönlich) bestätigt wurde.
@@ -186,15 +189,28 @@ async def _set_ticket_channel(bot: "ShopBot", key_id: int, channel_id: int) -> N
     await bot.db.db.commit()
 
 
-async def _mark_confirmed(bot: "ShopBot", key_id: int, license_key: str, staff_id: int) -> None:
+async def _mark_confirmed(
+    bot: "ShopBot",
+    key_id: int,
+    license_key: str,
+    staff_id: int,
+    *,
+    hwid: Optional[str] = None,
+    note: Optional[str] = None,
+) -> None:
+    """hwid/note werden erst hier final gesetzt (Staff trägt sie beim
+    Bestätigen ein, siehe StaffConfirmModal) - daher optional überschreibbar."""
+    sets = ["status = 'confirmed'", "license_key = ?", "created_by = ?", "confirmed_at = datetime('now')"]
+    params: list = [license_key, staff_id]
+    if hwid is not None:
+        sets.append("hwid = ?")
+        params.append(hwid)
+    if note is not None:
+        sets.append("note = ?")
+        params.append(note)
+    params.append(key_id)
     await bot.db.db.execute(
-        """
-        UPDATE mt_keys
-        SET status = 'confirmed', license_key = ?, created_by = ?,
-            confirmed_at = datetime('now')
-        WHERE id = ?
-        """,
-        (license_key, staff_id, key_id),
+        f"UPDATE mt_keys SET {', '.join(sets)} WHERE id = ?", params
     )
     await bot.db.db.commit()
 
@@ -258,9 +274,9 @@ def _panel_embed(settings: dict) -> discord.Embed:
         "🖱️ Ferdi Mousetweaks — Lizenzkey",
         "Universeller Maus-Tweak-Konfigurator (DPI, Debounce, RGB, Makros, "
         "Profile).\n\nVerfügbare Laufzeiten:\n" + "\n".join(lines) + "\n\n"
-        "Klicke **Key kaufen**, wähle eine Laufzeit und gib deine "
-        "**Hardware-ID** ein (siehe Aktivierungsfenster der App) — "
-        "danach wird ein privates Ticket erstellt.",
+        "Klicke **Key kaufen** und wähle eine Laufzeit — danach wird sofort "
+        "ein privates Ticket erstellt. Deine **Hardware-ID** (zeigt dir das "
+        "Aktivierungsfenster der App) schickst du dann einfach im Ticket.",
     )
     return embed
 
@@ -332,7 +348,9 @@ class TierSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         tier = self.values[0]
-        await interaction.response.send_modal(HwidModal(self.bot, tier))
+        # Hardware-ID wird nicht mehr vorab abgefragt — Kunde schickt sie im
+        # Ticket als normale Nachricht, Staff trägt sie beim Bestätigen ein.
+        await _create_key_ticket_channel(self.bot, interaction, tier=tier, hwid="", note="")
 
 
 class TierSelectView(discord.ui.View):
@@ -340,37 +358,6 @@ class TierSelectView(discord.ui.View):
         super().__init__(timeout=180)
         self.bot = bot
         self.add_item(TierSelect(bot, settings))
-
-
-class HwidModal(discord.ui.Modal, title="Ferdi Mousetweaks — Key anfragen"):
-    hwid = discord.ui.TextInput(
-        label="Deine Hardware-ID",
-        placeholder="z.B. AAAAA-BBBBB-CCCCC-DDDDD (aus dem Aktivierungsfenster)",
-        max_length=64,
-        required=True,
-    )
-    note = discord.ui.TextInput(
-        label="Notiz (optional)",
-        placeholder="z.B. dein Name/Zahlungsweg — nur für Staff sichtbar",
-        max_length=200,
-        required=False,
-    )
-
-    def __init__(self, bot: "ShopBot", tier: str) -> None:
-        super().__init__()
-        self.bot = bot
-        self.tier = tier
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        hwid_val = self.hwid.value.strip()
-        if not hwid_val:
-            await interaction.response.send_message(
-                embed=error_embed("Hardware-ID fehlt"), ephemeral=True
-            )
-            return
-        await _create_key_ticket_channel(
-            self.bot, interaction, tier=self.tier, hwid=hwid_val, note=self.note.value.strip()
-        )
 
 
 async def _create_key_ticket_channel(
@@ -449,17 +436,22 @@ async def _create_key_ticket_channel(
     await _set_ticket_channel(bot, key_id, channel.id)
 
     price_txt = format_price(price) if price > 0 else "Preis auf Anfrage — Staff nennt dir den Betrag"
+    hwid_line = f"Hardware-ID: `{hwid}`\n" if hwid else ""
     embed = base_embed(
         f"🔑 Key-Ticket #{key_number}",
         f"Käufer: {interaction.user.mention}\n"
         f"Laufzeit: **{mtlic.TIER_LABELS[tier]}**\n"
         f"Preis: **{price_txt}**\n"
-        f"Hardware-ID: `{hwid}`\n"
+        f"{hwid_line}"
         + (f"Notiz: {note}\n" if note else "")
         + f"\n**{config.PAYMENT_NOTICE}**\n"
         f"Zahlung an **{payee_name(settings)}**:\n{payee_details_text(settings) or '_Keine Details hinterlegt_'}\n\n"
-        "Sobald die Zahlung eingegangen ist, klickt Staff **✅ Bestätigen** — "
-        "der Key wird automatisch erzeugt und dir per DM geschickt.",
+        "**Wichtig:** Schick jetzt deine **Hardware-ID** hier in den Chat "
+        "(zeigt dir das Aktivierungsfenster der App — beim Öffnen automatisch "
+        "kopiert, einfach mit Strg+V einfügen).\n\n"
+        "Sobald die Zahlung eingegangen ist, klickt Staff **✅ Bestätigen** "
+        "und trägt dabei deine Hardware-ID ein — der Key wird automatisch "
+        "erzeugt und dir per DM geschickt.",
     )
     mention = staff_role.mention if staff_role else "Staff"
     await channel.send(
@@ -519,6 +511,90 @@ async def _resolve_member(
         return None
 
 
+class StaffConfirmModal(discord.ui.Modal, title="Key bestätigen"):
+    hwid = discord.ui.TextInput(
+        label="Hardware-ID des Kunden",
+        placeholder="z.B. AAAAA-BBBBB-CCCCC-DDDDD (aus der Kunden-Nachricht oben im Ticket)",
+        max_length=64,
+        required=True,
+    )
+    note = discord.ui.TextInput(
+        label="Notiz (optional)",
+        placeholder="z.B. Zahlungsweg — nur für dich sichtbar",
+        max_length=200,
+        required=False,
+    )
+
+    def __init__(self, bot: "ShopBot", row: dict, ticket_message: discord.Message) -> None:
+        super().__init__()
+        self.bot = bot
+        self.row = row
+        self.ticket_message = ticket_message
+        if row.get("hwid"):
+            self.hwid.default = row["hwid"]
+        if row.get("note"):
+            self.note.default = row["note"]
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        hwid_val = self.hwid.value.strip()
+        if not hwid_val:
+            await interaction.response.send_message(
+                embed=error_embed("Hardware-ID fehlt"), ephemeral=True
+            )
+            return
+        row = await _get_key_by_id(self.bot, int(self.row["id"]))
+        if not row or row["status"] != "pending":
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Bereits bearbeitet",
+                    f"Status: `{row['status'] if row else 'gelöscht'}`",
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer()
+
+        note_val = self.note.value.strip()
+        expires = mtlic.tier_to_expiry(row["tier"])
+        license_key = mtlic.generate_license_key(
+            hwid_val, note_val, tier=row["tier"], expires=expires
+        )
+        await _mark_confirmed(
+            self.bot, int(row["id"]), license_key, interaction.user.id,
+            hwid=hwid_val, note=note_val,
+        )
+
+        buyer = await _resolve_member(interaction.guild, row.get("user_id"))
+        dm_ok = True
+        if buyer is not None:
+            try:
+                await buyer.send(
+                    embed=success_embed(
+                        "🔑 Dein Ferdi Mousetweaks Key",
+                        f"Laufzeit: **{mtlic.describe_tier(row['tier'], expires)}**\n\n"
+                        f"```\n{license_key}\n```\n"
+                        "Im Programm unter **Lizenzkey einfügen** eintragen. "
+                        "Der Key ist genau an die Hardware-ID gebunden, die du "
+                        "angegeben hast.",
+                    )
+                )
+            except discord.HTTPException:
+                dm_ok = False
+
+        try:
+            view = MousetweaksKeyTicketView(self.bot)
+            for child in view.children:
+                child.disabled = True  # type: ignore[attr-defined]
+            await self.ticket_message.edit(view=view)
+        except discord.HTTPException:
+            pass
+
+        body = f"Bestätigt von {interaction.user.mention}.\nHardware-ID: `{hwid_val}`\n```\n{license_key}\n```"
+        if not dm_ok:
+            body += "\n⚠️ DM an Käufer fehlgeschlagen (DMs geschlossen) — Key oben manuell weitergeben."
+        await interaction.followup.send(embed=success_embed("Key erzeugt", body))
+
+
 class MousetweaksKeyTicketView(discord.ui.View):
     def __init__(self, bot: "ShopBot") -> None:
         super().__init__(timeout=None)
@@ -560,42 +636,11 @@ class MousetweaksKeyTicketView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        await interaction.response.defer()
-
-        expires = mtlic.tier_to_expiry(row["tier"])
-        license_key = mtlic.generate_license_key(
-            row["hwid"], row["note"] or "", tier=row["tier"], expires=expires
+        # Hardware-ID wurde nicht vorab abgefragt - Staff trägt sie jetzt ein
+        # (der Kunde hat sie als Nachricht ins Ticket geschickt).
+        await interaction.response.send_modal(
+            StaffConfirmModal(self.bot, row, interaction.message)
         )
-        await _mark_confirmed(self.bot, int(row["id"]), license_key, interaction.user.id)
-
-        buyer = await _resolve_member(interaction.guild, row.get("user_id"))
-        dm_ok = True
-        if buyer is not None:
-            try:
-                await buyer.send(
-                    embed=success_embed(
-                        "🔑 Dein Ferdi Mousetweaks Key",
-                        f"Laufzeit: **{mtlic.describe_tier(row['tier'], expires)}**\n\n"
-                        f"```\n{license_key}\n```\n"
-                        "Im Programm unter **Lizenzkey einfügen** eintragen. "
-                        "Der Key ist genau an die Hardware-ID gebunden, die du "
-                        "angegeben hast.",
-                    )
-                )
-            except discord.HTTPException:
-                dm_ok = False
-
-        for child in self.children:
-            child.disabled = True  # type: ignore[attr-defined]
-        try:
-            await interaction.message.edit(view=self)
-        except discord.HTTPException:
-            pass
-
-        body = f"Bestätigt von {interaction.user.mention}.\n```\n{license_key}\n```"
-        if not dm_ok:
-            body += "\n⚠️ DM an Käufer fehlgeschlagen (DMs geschlossen) — Key oben manuell weitergeben."
-        await interaction.followup.send(embed=success_embed("Key erzeugt", body))
 
     @discord.ui.button(
         label="Ablehnen",
