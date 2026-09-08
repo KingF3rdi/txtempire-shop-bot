@@ -1,8 +1,10 @@
 """
-mousetweaks_keys.py
+gputweaks_keys.py
 ====================
 
-Verkauf von Lizenzkeys für "Ferdi Mousetweaks" direkt über diesen Bot:
+Verkauf von Lizenzkeys für "y3zz GPU Tweaks" direkt über diesen Bot -
+Aufbau 1:1 wie cogs/mousetweaks_keys.py, nur eigenständige Tabellen,
+Preise und Custom-IDs (getrenntes Produkt, getrennter Lizenz-Secret):
 
   - Kunde klickt auf einem Panel "Key kaufen" -> wählt Laufzeit
     (14 Tage / 30 Tage / Lifetime) -> privates Ticket wird erstellt
@@ -14,13 +16,17 @@ Verkauf von Lizenzkeys für "Ferdi Mousetweaks" direkt über diesen Bot:
     automatisch an das Geraet des Kunden, sobald er ihn dort zum
     ersten Mal eintraegt. Kein manueller Schritt außer dem einen
     Klick nötig.
-  - Alternativ: `/key generate` erzeugt (für Staff) sofort einen
+  - Alternativ: `/gtkey generate` erzeugt (für Staff) sofort einen
     gültigen Key ohne Ticket - z.B. wenn die Zahlung schon anderswo
     (Ticket, Überweisung, persönlich) bestätigt wurde.
+  - Nach jeder Bestätigung wird der Kunde per DM eingeladen, im
+    gemeinsamen Tweak-Vouch-Kanal (siehe /tweakvouchsetup) einen
+    Vouch für genau diesen (den neuesten) Kauf zu hinterlassen.
 
-Braucht: MOUSETWEAKS_LICENSE_SECRET in .env (siehe .env.example) -
-muss exakt mit LICENSE_SECRET in app/licensing.py der App übereinstimmen.
-Eigene Tabellen (mt_settings, mt_keys) - keine Änderung an db/database.py
+Braucht: GPUTWEAKS_LICENSE_SECRET in .env (siehe .env.example) -
+muss exakt mit LICENSE_SECRET in licensing.py der y3zz-GPU-Tweaks-App
+übereinstimmen.
+Eigene Tabellen (gt_settings, gt_keys) - keine Änderung an db/database.py
 nötig.
 """
 from __future__ import annotations
@@ -33,7 +39,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
-from utils import mousetweaks_licensing as mtlic
+from utils import gputweaks_licensing as gtlic
 from utils import tweak_vouch
 from utils.embeds import (
     base_embed,
@@ -49,7 +55,7 @@ from views.ticket_views import is_staff
 if TYPE_CHECKING:
     from bot import ShopBot
 
-TIER_ORDER = (mtlic.TIER_14D, mtlic.TIER_30D, mtlic.TIER_LIFETIME)
+TIER_ORDER = (gtlic.TIER_14D, gtlic.TIER_30D, gtlic.TIER_LIFETIME)
 
 
 # ── DB Bootstrap & Helpers (eigene Tabellen, kein Eingriff in database.py) ──
@@ -57,7 +63,7 @@ TIER_ORDER = (mtlic.TIER_14D, mtlic.TIER_30D, mtlic.TIER_LIFETIME)
 async def _ensure_tables(bot: "ShopBot") -> None:
     await bot.db.db.executescript(
         """
-        CREATE TABLE IF NOT EXISTS mt_settings (
+        CREATE TABLE IF NOT EXISTS gt_settings (
             guild_id INTEGER PRIMARY KEY,
             price_14d REAL NOT NULL DEFAULT 0,
             price_30d REAL NOT NULL DEFAULT 0,
@@ -66,7 +72,7 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             support_role_id INTEGER
         );
 
-        CREATE TABLE IF NOT EXISTS mt_keys (
+        CREATE TABLE IF NOT EXISTS gt_keys (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             guild_id INTEGER NOT NULL,
             key_number INTEGER NOT NULL,
@@ -89,25 +95,25 @@ async def _ensure_tables(bot: "ShopBot") -> None:
 
 async def _get_settings(bot: "ShopBot", guild_id: int) -> dict:
     row = await bot.db.fetchone(
-        "SELECT * FROM mt_settings WHERE guild_id = ?", (guild_id,)
+        "SELECT * FROM gt_settings WHERE guild_id = ?", (guild_id,)
     )
     if row:
         return dict(row)
     defaults = {
-        "price_14d": config.MOUSETWEAKS_PRICE_14D,
-        "price_30d": config.MOUSETWEAKS_PRICE_30D,
-        "price_lifetime": config.MOUSETWEAKS_PRICE_LIFETIME,
+        "price_14d": config.GPUTWEAKS_PRICE_14D,
+        "price_30d": config.GPUTWEAKS_PRICE_30D,
+        "price_lifetime": config.GPUTWEAKS_PRICE_LIFETIME,
     }
     await bot.db.db.execute(
         """
-        INSERT INTO mt_settings (guild_id, price_14d, price_30d, price_lifetime)
+        INSERT INTO gt_settings (guild_id, price_14d, price_30d, price_lifetime)
         VALUES (?, ?, ?, ?)
         """,
         (guild_id, defaults["price_14d"], defaults["price_30d"], defaults["price_lifetime"]),
     )
     await bot.db.db.commit()
     row = await bot.db.fetchone(
-        "SELECT * FROM mt_settings WHERE guild_id = ?", (guild_id,)
+        "SELECT * FROM gt_settings WHERE guild_id = ?", (guild_id,)
     )
     return dict(row)  # type: ignore[arg-type]
 
@@ -119,7 +125,7 @@ async def _update_settings(bot: "ShopBot", guild_id: int, **fields) -> None:
     cols = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [guild_id]
     await bot.db.db.execute(
-        f"UPDATE mt_settings SET {cols} WHERE guild_id = ?", values
+        f"UPDATE gt_settings SET {cols} WHERE guild_id = ?", values
     )
     await bot.db.db.commit()
 
@@ -128,7 +134,7 @@ async def _next_key_number(bot: "ShopBot", guild_id: int) -> int:
     settings = await _get_settings(bot, guild_id)
     n = int(settings.get("next_key_number") or 1)
     await bot.db.db.execute(
-        "UPDATE mt_settings SET next_key_number = ? WHERE guild_id = ?",
+        "UPDATE gt_settings SET next_key_number = ? WHERE guild_id = ?",
         (n + 1, guild_id),
     )
     await bot.db.db.commit()
@@ -142,7 +148,7 @@ def _price_for(settings: dict, tier: str) -> float:
 async def _count_open_keys(bot: "ShopBot", guild_id: int, user_id: int) -> int:
     row = await bot.db.fetchone(
         """
-        SELECT COUNT(*) AS cnt FROM mt_keys
+        SELECT COUNT(*) AS cnt FROM gt_keys
         WHERE guild_id = ? AND user_id = ? AND status = 'pending'
         """,
         (guild_id, user_id),
@@ -156,7 +162,7 @@ async def _create_pending_key(
     key_number = await _next_key_number(bot, guild_id)
     cur = await bot.db.db.execute(
         """
-        INSERT INTO mt_keys (guild_id, key_number, user_id, hwid, tier, price, note, status)
+        INSERT INTO gt_keys (guild_id, key_number, user_id, hwid, tier, price, note, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
         """,
         (guild_id, key_number, user_id, hwid, tier, price, note),
@@ -167,13 +173,13 @@ async def _create_pending_key(
 
 async def _get_key_by_channel(bot: "ShopBot", channel_id: int) -> Optional[dict]:
     row = await bot.db.fetchone(
-        "SELECT * FROM mt_keys WHERE ticket_channel_id = ?", (channel_id,)
+        "SELECT * FROM gt_keys WHERE ticket_channel_id = ?", (channel_id,)
     )
     return dict(row) if row else None
 
 
 async def _get_key_by_id(bot: "ShopBot", key_id: int) -> Optional[dict]:
-    row = await bot.db.fetchone("SELECT * FROM mt_keys WHERE id = ?", (key_id,))
+    row = await bot.db.fetchone("SELECT * FROM gt_keys WHERE id = ?", (key_id,))
     return dict(row) if row else None
 
 
@@ -183,7 +189,7 @@ async def _get_latest_confirmed_key(bot: "ShopBot", guild_id: int, user_id: int)
     darf sich selbst einen neuen, unadressierten Ersatzkey ausstellen."""
     row = await bot.db.fetchone(
         """
-        SELECT * FROM mt_keys
+        SELECT * FROM gt_keys
         WHERE guild_id = ? AND user_id = ? AND status = 'confirmed'
         ORDER BY id DESC LIMIT 1
         """,
@@ -193,13 +199,13 @@ async def _get_latest_confirmed_key(bot: "ShopBot", guild_id: int, user_id: int)
 
 
 async def _delete_key_row(bot: "ShopBot", key_id: int) -> None:
-    await bot.db.db.execute("DELETE FROM mt_keys WHERE id = ?", (key_id,))
+    await bot.db.db.execute("DELETE FROM gt_keys WHERE id = ?", (key_id,))
     await bot.db.db.commit()
 
 
 async def _set_ticket_channel(bot: "ShopBot", key_id: int, channel_id: int) -> None:
     await bot.db.db.execute(
-        "UPDATE mt_keys SET ticket_channel_id = ? WHERE id = ?", (channel_id, key_id)
+        "UPDATE gt_keys SET ticket_channel_id = ? WHERE id = ?", (channel_id, key_id)
     )
     await bot.db.db.commit()
 
@@ -207,7 +213,7 @@ async def _set_ticket_channel(bot: "ShopBot", key_id: int, channel_id: int) -> N
 async def _mark_confirmed(bot: "ShopBot", key_id: int, license_key: str, staff_id: int) -> None:
     await bot.db.db.execute(
         """
-        UPDATE mt_keys
+        UPDATE gt_keys
         SET status = 'confirmed', license_key = ?, created_by = ?,
             confirmed_at = datetime('now')
         WHERE id = ?
@@ -220,7 +226,7 @@ async def _mark_confirmed(bot: "ShopBot", key_id: int, license_key: str, staff_i
 async def _mark_rejected(bot: "ShopBot", key_id: int, staff_id: int) -> None:
     await bot.db.db.execute(
         """
-        UPDATE mt_keys
+        UPDATE gt_keys
         SET status = 'rejected', created_by = ?, confirmed_at = datetime('now')
         WHERE id = ?
         """,
@@ -242,7 +248,7 @@ async def _insert_direct_key(
     key_number = await _next_key_number(bot, guild_id)
     await bot.db.db.execute(
         """
-        INSERT INTO mt_keys
+        INSERT INTO gt_keys
           (guild_id, key_number, user_id, hwid, tier, price, note,
            status, license_key, created_by, confirmed_at)
         VALUES (?, ?, ?, ?, ?, 0, ?, 'confirmed', ?, ?, datetime('now'))
@@ -256,7 +262,7 @@ async def _insert_direct_key(
 async def _list_recent_keys(bot: "ShopBot", guild_id: int, limit: int = 15) -> list[dict]:
     rows = await bot.db.fetchall(
         """
-        SELECT * FROM mt_keys WHERE guild_id = ?
+        SELECT * FROM gt_keys WHERE guild_id = ?
         ORDER BY id DESC LIMIT ?
         """,
         (guild_id, limit),
@@ -271,11 +277,12 @@ def _panel_embed(settings: dict) -> discord.Embed:
     for tier in TIER_ORDER:
         price = _price_for(settings, tier)
         price_txt = format_price(price) if price > 0 else "Preis auf Anfrage"
-        lines.append(f"**{mtlic.TIER_LABELS[tier]}** — {price_txt}")
+        lines.append(f"**{gtlic.TIER_LABELS[tier]}** — {price_txt}")
     embed = base_embed(
-        "🖱️ Ferdi Mousetweaks — Lizenzkey",
-        "Universeller Maus-Tweak-Konfigurator (DPI, Debounce, RGB, Makros, "
-        "Profile).\n\nVerfügbare Laufzeiten:\n" + "\n".join(lines) + "\n\n"
+        "🖥️ y3zz GPU Tweaks — Lizenzkey",
+        "GPU-Optimierer (Deep Scan Auto-Tune, Power/Takt/Lüfter, Farbtiefe, "
+        "Kantenschärfung, Schattenqualität) mit 80°C-Sicherheitsgrenze.\n\n"
+        "Verfügbare Laufzeiten:\n" + "\n".join(lines) + "\n\n"
         "Klicke **Key kaufen** und wähle eine Laufzeit — danach wird ein "
         "privates Ticket erstellt. Keine Hardware-ID nötig: der Key bindet "
         "sich automatisch an dein Gerät, sobald du ihn in der App einträgst.",
@@ -283,7 +290,7 @@ def _panel_embed(settings: dict) -> discord.Embed:
     return embed
 
 
-class MousetweaksKeyPanelView(discord.ui.View):
+class GputweaksKeyPanelView(discord.ui.View):
     def __init__(self, bot: "ShopBot") -> None:
         super().__init__(timeout=None)
         self.bot = bot
@@ -291,7 +298,7 @@ class MousetweaksKeyPanelView(discord.ui.View):
     @discord.ui.button(
         label="Key kaufen",
         style=discord.ButtonStyle.success,
-        custom_id="mousetweaks:buy_key",
+        custom_id="gputweaks:buy_key",
         emoji="🔑",
     )
     async def buy_key(
@@ -302,11 +309,11 @@ class MousetweaksKeyPanelView(discord.ui.View):
                 embed=error_embed("Nur auf dem Server"), ephemeral=True
             )
             return
-        if not mtlic.licensing_configured():
+        if not gtlic.licensing_configured():
             await interaction.response.send_message(
                 embed=error_embed(
                     "Noch nicht eingerichtet",
-                    "MOUSETWEAKS_LICENSE_SECRET ist noch nicht gesetzt (Staff).",
+                    "GPUTWEAKS_LICENSE_SECRET ist noch nicht gesetzt (Staff).",
                 ),
                 ephemeral=True,
             )
@@ -332,7 +339,7 @@ class MousetweaksKeyPanelView(discord.ui.View):
     @discord.ui.button(
         label="HWID zurücksetzen",
         style=discord.ButtonStyle.secondary,
-        custom_id="mousetweaks:reset_hwid",
+        custom_id="gputweaks:reset_hwid",
         emoji="🔄",
     )
     async def reset_hwid(
@@ -354,11 +361,11 @@ class MousetweaksKeyPanelView(discord.ui.View):
                 embed=error_embed("Nur auf dem Server"), ephemeral=True
             )
             return
-        if not mtlic.licensing_configured():
+        if not gtlic.licensing_configured():
             await interaction.response.send_message(
                 embed=error_embed(
                     "Noch nicht eingerichtet",
-                    "MOUSETWEAKS_LICENSE_SECRET ist noch nicht gesetzt (Staff).",
+                    "GPUTWEAKS_LICENSE_SECRET ist noch nicht gesetzt (Staff).",
                 ),
                 ephemeral=True,
             )
@@ -381,12 +388,12 @@ class MousetweaksKeyPanelView(discord.ui.View):
         # Tier+issued berechnet wird.
         issued = None
         if row.get("license_key"):
-            ok, old_payload, _err = mtlic.verify_own_key(row["license_key"])
+            ok, old_payload, _err = gtlic.verify_own_key(row["license_key"])
             if ok and old_payload:
                 issued = old_payload.get("issued")
 
-        new_key = mtlic.generate_license_key(None, tier=row["tier"], issued=issued)
-        expires = mtlic.tier_to_expiry(row["tier"], issued)
+        new_key = gtlic.generate_license_key(None, tier=row["tier"], issued=issued)
+        expires = gtlic.tier_to_expiry(row["tier"], issued)
         await _insert_direct_key(
             self.bot, interaction.guild.id, interaction.user.id, row["tier"],
             "", row.get("note") or "", new_key, interaction.user.id,
@@ -395,10 +402,10 @@ class MousetweaksKeyPanelView(discord.ui.View):
         try:
             await interaction.user.send(
                 embed=success_embed(
-                    "🔄 Neuer Ferdi Mousetweaks Key (HWID-Reset)",
-                    f"Laufzeit: **{mtlic.describe_tier(row['tier'], expires)}**\n\n"
+                    "🔄 Neuer y3zz GPU Tweaks Key (HWID-Reset)",
+                    f"Laufzeit: **{gtlic.describe_tier(row['tier'], expires)}**\n\n"
                     f"```\n{new_key}\n```\n"
-                    "Im Programm unter **Lizenzkey einfügen** eintragen - bindet sich "
+                    "In der App unter **Lizenzkey einfügen** eintragen - bindet sich "
                     "automatisch an dieses Gerät. Der alte Key funktioniert auf einem "
                     "bereits aktivierten Gerät weiterhin, ist danach aber nicht mehr "
                     "auf einem weiteren Gerät nutzbar.",
@@ -428,7 +435,7 @@ class TierSelect(discord.ui.Select):
             price_txt = format_price(price) if price > 0 else "Preis auf Anfrage"
             options.append(
                 discord.SelectOption(
-                    label=mtlic.TIER_LABELS[tier],
+                    label=gtlic.TIER_LABELS[tier],
                     value=tier,
                     description=price_txt,
                 )
@@ -466,14 +473,14 @@ async def _create_key_ticket_channel(
         await interaction.response.defer(ephemeral=True)
 
     settings = await bot.db.ensure_guild(guild.id)
-    mt_settings = await _get_settings(bot, guild.id)
-    price = _price_for(mt_settings, tier)
+    gt_settings = await _get_settings(bot, guild.id)
+    price = _price_for(gt_settings, tier)
 
     category_id = settings.get("ticket_category_id")
     category = guild.get_channel(int(category_id)) if category_id else None
     if category is not None and not isinstance(category, discord.CategoryChannel):
         category = None
-    staff_role = await _resolve_support_role(bot, guild, mt_settings)
+    staff_role = await _resolve_support_role(bot, guild, gt_settings)
     me = guild.me
     if me is None:
         await interaction.followup.send(
@@ -509,14 +516,14 @@ async def _create_key_ticket_channel(
     safe = "".join(
         c if c.isalnum() or c in "-_" else "-" for c in interaction.user.name.lower()
     )[:18]
-    name = f"key-{key_number:04d}-{safe}"[:100]
+    name = f"gtkey-{key_number:04d}-{safe}"[:100]
 
     try:
         channel = await guild.create_text_channel(
             name=name,
             category=category,
             overwrites=overwrites,
-            reason=f"Mousetweaks-Key-Ticket von {interaction.user}",
+            reason=f"GPU-Tweaks-Key-Ticket von {interaction.user}",
         )
     except discord.HTTPException as e:
         await _delete_key_row(bot, key_id)
@@ -531,7 +538,7 @@ async def _create_key_ticket_channel(
     embed = base_embed(
         f"🔑 Key-Ticket #{key_number}",
         f"Käufer: {interaction.user.mention}\n"
-        f"Laufzeit: **{mtlic.TIER_LABELS[tier]}**\n"
+        f"Laufzeit: **{gtlic.TIER_LABELS[tier]}**\n"
         f"Preis: **{price_txt}**\n"
         + (f"Hardware-ID: `{hwid}`\n" if hwid else "Noch nicht an ein Gerät gebunden - bindet sich automatisch.\n")
         + (f"Notiz: {note}\n" if note else "")
@@ -544,7 +551,7 @@ async def _create_key_ticket_channel(
     await channel.send(
         content=f"{interaction.user.mention} {mention}",
         embed=embed,
-        view=MousetweaksKeyTicketView(bot),
+        view=GputweaksKeyTicketView(bot),
     )
     await interaction.followup.send(
         embed=success_embed("Ticket erstellt", f"Dein Ticket: {channel.mention}"),
@@ -553,13 +560,13 @@ async def _create_key_ticket_channel(
 
 
 async def _resolve_support_role(
-    bot: "ShopBot", guild: discord.Guild, mt_settings: Optional[dict] = None
+    bot: "ShopBot", guild: discord.Guild, gt_settings: Optional[dict] = None
 ) -> Optional[discord.Role]:
-    """Eigene Mousetweaks-Support-Rolle, falls gesetzt (/keysetup support_role:@...)
+    """Eigene GPU-Tweaks-Support-Rolle, falls gesetzt (/gtkeysetup support_role:@...)
     - sonst Fallback auf die normale Shop-Staff-Rolle (/setup)."""
-    if mt_settings is None:
-        mt_settings = await _get_settings(bot, guild.id)
-    role_id = mt_settings.get("support_role_id")
+    if gt_settings is None:
+        gt_settings = await _get_settings(bot, guild.id)
+    role_id = gt_settings.get("support_role_id")
     if role_id:
         role = guild.get_role(int(role_id))
         if role is not None:
@@ -569,15 +576,15 @@ async def _resolve_support_role(
     return guild.get_role(int(staff_role_id)) if staff_role_id else None
 
 
-async def _is_mousetweaks_staff(bot: "ShopBot", interaction: discord.Interaction) -> bool:
-    """Wie is_staff(), aber die eigene Mousetweaks-Support-Rolle zählt
+async def _is_gputweaks_staff(bot: "ShopBot", interaction: discord.Interaction) -> bool:
+    """Wie is_staff(), aber die eigene GPU-Tweaks-Support-Rolle zählt
     zusätzlich zur normalen Shop-Staff-Rolle."""
     user = interaction.user
     if isinstance(user, discord.Member) and user.guild_permissions.administrator:
         return True
     assert interaction.guild is not None
-    mt_settings = await _get_settings(bot, interaction.guild.id)
-    role_id = mt_settings.get("support_role_id")
+    gt_settings = await _get_settings(bot, interaction.guild.id)
+    role_id = gt_settings.get("support_role_id")
     if role_id and isinstance(user, discord.Member):
         if any(r.id == int(role_id) for r in user.roles):
             return True
@@ -598,7 +605,7 @@ async def _resolve_member(
         return None
 
 
-class MousetweaksKeyTicketView(discord.ui.View):
+class GputweaksKeyTicketView(discord.ui.View):
     def __init__(self, bot: "ShopBot") -> None:
         super().__init__(timeout=None)
         self.bot = bot
@@ -606,7 +613,7 @@ class MousetweaksKeyTicketView(discord.ui.View):
     @discord.ui.button(
         label="Bestätigen",
         style=discord.ButtonStyle.success,
-        custom_id="mtkey:confirm",
+        custom_id="gtkey:confirm",
         emoji="✅",
     )
     async def confirm(
@@ -614,7 +621,7 @@ class MousetweaksKeyTicketView(discord.ui.View):
     ) -> None:
         if interaction.guild is None:
             return
-        if not await _is_mousetweaks_staff(self.bot, interaction):
+        if not await _is_gputweaks_staff(self.bot, interaction):
             await interaction.response.send_message(
                 embed=error_embed("Nur Staff"), ephemeral=True
             )
@@ -631,18 +638,18 @@ class MousetweaksKeyTicketView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        if not mtlic.licensing_configured():
+        if not gtlic.licensing_configured():
             await interaction.response.send_message(
                 embed=error_embed(
-                    "Nicht eingerichtet", "MOUSETWEAKS_LICENSE_SECRET fehlt in .env."
+                    "Nicht eingerichtet", "GPUTWEAKS_LICENSE_SECRET fehlt in .env."
                 ),
                 ephemeral=True,
             )
             return
         await interaction.response.defer()
 
-        license_key = mtlic.generate_license_key(row["hwid"] or None, tier=row["tier"])
-        expires = mtlic.tier_to_expiry(row["tier"])
+        license_key = gtlic.generate_license_key(row["hwid"] or None, tier=row["tier"])
+        expires = gtlic.tier_to_expiry(row["tier"])
         await _mark_confirmed(self.bot, int(row["id"]), license_key, interaction.user.id)
 
         buyer = await _resolve_member(interaction.guild, row.get("user_id"))
@@ -651,10 +658,10 @@ class MousetweaksKeyTicketView(discord.ui.View):
             try:
                 await buyer.send(
                     embed=success_embed(
-                        "🔑 Dein Ferdi Mousetweaks Key",
-                        f"Laufzeit: **{mtlic.describe_tier(row['tier'], expires)}**\n\n"
+                        "🔑 Dein y3zz GPU Tweaks Key",
+                        f"Laufzeit: **{gtlic.describe_tier(row['tier'], expires)}**\n\n"
                         f"```\n{license_key}\n```\n"
-                        "Im Programm unter **Lizenzkey einfügen** eintragen. "
+                        "In der App unter **Lizenzkey einfügen** eintragen. "
                         "Der Key bindet sich beim ersten Eintragen automatisch "
                         "an dein Gerät - danach funktioniert er nur noch dort.",
                     )
@@ -663,8 +670,8 @@ class MousetweaksKeyTicketView(discord.ui.View):
                 dm_ok = False
             await tweak_vouch.request_vouch(
                 self.bot, interaction.guild, buyer,
-                product="Ferdi Mousetweaks",
-                tier_label=mtlic.describe_tier(row["tier"], expires),
+                product="y3zz GPU Tweaks",
+                tier_label=gtlic.describe_tier(row["tier"], expires),
             )
 
         for child in self.children:
@@ -682,7 +689,7 @@ class MousetweaksKeyTicketView(discord.ui.View):
     @discord.ui.button(
         label="Ablehnen",
         style=discord.ButtonStyle.danger,
-        custom_id="mtkey:reject",
+        custom_id="gtkey:reject",
         emoji="❌",
     )
     async def reject(
@@ -690,7 +697,7 @@ class MousetweaksKeyTicketView(discord.ui.View):
     ) -> None:
         if interaction.guild is None:
             return
-        if not await _is_mousetweaks_staff(self.bot, interaction):
+        if not await _is_gputweaks_staff(self.bot, interaction):
             await interaction.response.send_message(
                 embed=error_embed("Nur Staff"), ephemeral=True
             )
@@ -716,7 +723,7 @@ class MousetweaksKeyTicketView(discord.ui.View):
                 await buyer.send(
                     embed=warn_embed(
                         "Bestellung abgelehnt",
-                        "Deine Mousetweaks-Key-Bestellung wurde abgelehnt "
+                        "Deine GPU-Tweaks-Key-Bestellung wurde abgelehnt "
                         "(z.B. keine Zahlung erkannt). Melde dich im Ticket "
                         "für Rückfragen.",
                     )
@@ -737,7 +744,7 @@ class MousetweaksKeyTicketView(discord.ui.View):
     @discord.ui.button(
         label="Schließen",
         style=discord.ButtonStyle.secondary,
-        custom_id="mtkey:close",
+        custom_id="gtkey:close",
         emoji="🔒",
     )
     async def close(
@@ -753,7 +760,7 @@ class MousetweaksKeyTicketView(discord.ui.View):
                 embed=error_embed("Kein Key-Ticket"), ephemeral=True
             )
             return
-        staff = await _is_mousetweaks_staff(self.bot, interaction)
+        staff = await _is_gputweaks_staff(self.bot, interaction)
         is_owner = row.get("user_id") and interaction.user.id == int(row["user_id"])
         if not staff and not is_owner:
             await interaction.response.send_message(
@@ -780,26 +787,26 @@ class MousetweaksKeyTicketView(discord.ui.View):
 
 # ── Slash-Commands ───────────────────────────────────────────────────────
 
-class MousetweaksKeysCog(commands.Cog):
+class GputweaksKeysCog(commands.Cog):
     def __init__(self, bot: "ShopBot") -> None:
         self.bot = bot
 
     @app_commands.command(
-        name="keysetup",
-        description="Preise für Ferdi-Mousetweaks-Keys setzen (Staff)",
+        name="gtkeysetup",
+        description="Preise für y3zz-GPU-Tweaks-Keys setzen (Staff)",
     )
     @app_commands.describe(
         price_14d="Preis für 14 Tage (leer = unverändert)",
         price_30d="Preis für 30 Tage (leer = unverändert)",
         price_lifetime="Preis für Lifetime (leer = unverändert)",
         support_role=(
-            "Eigene Support-Rolle für Mousetweaks-Ticket (sieht Tickets, darf "
+            "Eigene Support-Rolle für GPU-Tweaks-Ticket (sieht Tickets, darf "
             "bestätigen/ablehnen). Leer = weiter unverändert."
         ),
         clear_support_role="Eigene Support-Rolle entfernen (Fallback: normale Shop-Staff-Rolle)",
     )
     @app_commands.default_permissions(manage_guild=True)
-    async def keysetup(
+    async def gtkeysetup(
         self,
         interaction: discord.Interaction,
         price_14d: Optional[float] = None,
@@ -823,7 +830,7 @@ class MousetweaksKeysCog(commands.Cog):
         if fields:
             await _update_settings(self.bot, interaction.guild.id, **fields)
         settings = await _get_settings(self.bot, interaction.guild.id)
-        secret_ok = mtlic.licensing_configured()
+        secret_ok = gtlic.licensing_configured()
 
         role_id = settings.get("support_role_id")
         role = interaction.guild.get_role(int(role_id)) if role_id else None
@@ -835,28 +842,28 @@ class MousetweaksKeysCog(commands.Cog):
 
         await interaction.response.send_message(
             embed=success_embed(
-                "Mousetweaks Key-Einstellungen",
-                f"14 Tage: **{format_price(_price_for(settings, mtlic.TIER_14D))}**\n"
-                f"30 Tage: **{format_price(_price_for(settings, mtlic.TIER_30D))}**\n"
-                f"Lifetime: **{format_price(_price_for(settings, mtlic.TIER_LIFETIME))}**\n"
+                "GPU-Tweaks Key-Einstellungen",
+                f"14 Tage: **{format_price(_price_for(settings, gtlic.TIER_14D))}**\n"
+                f"30 Tage: **{format_price(_price_for(settings, gtlic.TIER_30D))}**\n"
+                f"Lifetime: **{format_price(_price_for(settings, gtlic.TIER_LIFETIME))}**\n"
                 f"{role_line}\n\n"
                 + (
-                    "✅ MOUSETWEAKS_LICENSE_SECRET ist gesetzt."
+                    "✅ GPUTWEAKS_LICENSE_SECRET ist gesetzt."
                     if secret_ok
-                    else "⚠️ MOUSETWEAKS_LICENSE_SECRET fehlt noch in der .env "
-                    "(muss mit LICENSE_SECRET in app/licensing.py der App übereinstimmen)."
+                    else "⚠️ GPUTWEAKS_LICENSE_SECRET fehlt noch in der .env "
+                    "(muss mit LICENSE_SECRET in licensing.py der App übereinstimmen)."
                 ),
             ),
             ephemeral=True,
         )
 
     @app_commands.command(
-        name="keypanel",
-        description="Kauf-Panel für Ferdi-Mousetweaks-Keys posten (Staff)",
+        name="gtkeypanel",
+        description="Kauf-Panel für y3zz-GPU-Tweaks-Keys posten (Staff)",
     )
     @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
     @app_commands.default_permissions(manage_guild=True)
-    async def keypanel(
+    async def gtkeypanel(
         self,
         interaction: discord.Interaction,
         channel: discord.TextChannel | None = None,
@@ -873,20 +880,20 @@ class MousetweaksKeysCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         settings = await _get_settings(self.bot, interaction.guild.id)
         msg = await target.send(
-            embed=_panel_embed(settings), view=MousetweaksKeyPanelView(self.bot)
+            embed=_panel_embed(settings), view=GputweaksKeyPanelView(self.bot)
         )
         await interaction.followup.send(
             embed=success_embed("Key-Panel gepostet", f"In {target.mention}: {msg.jump_url}"),
             ephemeral=True,
         )
 
-    key = app_commands.Group(
-        name="key",
-        description="Ferdi-Mousetweaks-Lizenzkeys verwalten (Staff)",
+    gtkey = app_commands.Group(
+        name="gtkey",
+        description="y3zz-GPU-Tweaks-Lizenzkeys verwalten (Staff)",
         default_permissions=discord.Permissions(manage_guild=True),
     )
 
-    @key.command(name="generate", description="Sofort einen gültigen Key erzeugen (Staff)")
+    @gtkey.command(name="generate", description="Sofort einen gültigen Key erzeugen (Staff)")
     @app_commands.describe(
         tier="Laufzeit",
         member="Discord-Mitglied (bekommt den Key automatisch per DM)",
@@ -898,12 +905,12 @@ class MousetweaksKeysCog(commands.Cog):
     )
     @app_commands.choices(
         tier=[
-            app_commands.Choice(name="Lifetime", value=mtlic.TIER_LIFETIME),
-            app_commands.Choice(name="14 Tage", value=mtlic.TIER_14D),
-            app_commands.Choice(name="30 Tage", value=mtlic.TIER_30D),
+            app_commands.Choice(name="Lifetime", value=gtlic.TIER_LIFETIME),
+            app_commands.Choice(name="14 Tage", value=gtlic.TIER_14D),
+            app_commands.Choice(name="30 Tage", value=gtlic.TIER_30D),
         ]
     )
-    async def key_generate(
+    async def gtkey_generate(
         self,
         interaction: discord.Interaction,
         tier: app_commands.Choice[str],
@@ -912,18 +919,18 @@ class MousetweaksKeysCog(commands.Cog):
         hwid: str = "",
     ) -> None:
         assert interaction.guild is not None
-        if not mtlic.licensing_configured():
+        if not gtlic.licensing_configured():
             await interaction.response.send_message(
                 embed=error_embed(
                     "Nicht eingerichtet",
-                    "MOUSETWEAKS_LICENSE_SECRET fehlt in der .env.",
+                    "GPUTWEAKS_LICENSE_SECRET fehlt in der .env.",
                 ),
                 ephemeral=True,
             )
             return
         await interaction.response.defer(ephemeral=True)
-        expires = mtlic.tier_to_expiry(tier.value)
-        license_key = mtlic.generate_license_key(hwid or None, tier=tier.value)
+        expires = gtlic.tier_to_expiry(tier.value)
+        license_key = gtlic.generate_license_key(hwid or None, tier=tier.value)
         key_number = await _insert_direct_key(
             self.bot,
             interaction.guild.id,
@@ -940,10 +947,10 @@ class MousetweaksKeysCog(commands.Cog):
             try:
                 await member.send(
                     embed=success_embed(
-                        "🔑 Dein Ferdi Mousetweaks Key",
-                        f"Laufzeit: **{mtlic.describe_tier(tier.value, expires)}**\n\n"
+                        "🔑 Dein y3zz GPU Tweaks Key",
+                        f"Laufzeit: **{gtlic.describe_tier(tier.value, expires)}**\n\n"
                         f"```\n{license_key}\n```\n"
-                        "Im Programm unter **Lizenzkey einfügen** eintragen.",
+                        "In der App unter **Lizenzkey einfügen** eintragen.",
                     )
                 )
                 dm_note = f"\n📨 Per DM an {member.mention} geschickt."
@@ -951,23 +958,23 @@ class MousetweaksKeysCog(commands.Cog):
                 dm_note = "\n⚠️ DM fehlgeschlagen (DMs geschlossen) — Key unten manuell weitergeben."
             await tweak_vouch.request_vouch(
                 self.bot, interaction.guild, member,
-                product="Ferdi Mousetweaks",
-                tier_label=mtlic.describe_tier(tier.value, expires),
+                product="y3zz GPU Tweaks",
+                tier_label=gtlic.describe_tier(tier.value, expires),
             )
 
         hwid_line = f"Hardware-ID: `{hwid}`\n" if hwid else "Noch nicht an ein Gerät gebunden - bindet sich automatisch.\n"
         await interaction.followup.send(
             embed=success_embed(
                 f"Key #{key_number} erzeugt",
-                f"Laufzeit: **{mtlic.describe_tier(tier.value, expires)}**\n"
+                f"Laufzeit: **{gtlic.describe_tier(tier.value, expires)}**\n"
                 f"{hwid_line}\n"
                 f"```\n{license_key}\n```{dm_note}",
             ),
             ephemeral=True,
         )
 
-    @key.command(name="list", description="Zuletzt ausgestellte Keys anzeigen (Staff)")
-    async def key_list(self, interaction: discord.Interaction) -> None:
+    @gtkey.command(name="list", description="Zuletzt ausgestellte Keys anzeigen (Staff)")
+    async def gtkey_list(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
         rows = await _list_recent_keys(self.bot, interaction.guild.id)
         if not rows:
@@ -980,15 +987,15 @@ class MousetweaksKeysCog(commands.Cog):
         for r in rows:
             who = f"<@{r['user_id']}>" if r.get("user_id") else "(kein Discord-User)"
             lines.append(
-                f"**#{r['key_number']}** · {mtlic.TIER_LABELS.get(r['tier'], r['tier'])} "
+                f"**#{r['key_number']}** · {gtlic.TIER_LABELS.get(r['tier'], r['tier'])} "
                 f"· `{r['status']}` · {who}"
             )
         await interaction.response.send_message(
-            embed=success_embed("Letzte Mousetweaks-Keys", "\n".join(lines[:15])),
+            embed=success_embed("Letzte GPU-Tweaks-Keys", "\n".join(lines[:15])),
             ephemeral=True,
         )
 
 
 async def setup(bot: "ShopBot") -> None:
     await _ensure_tables(bot)
-    await bot.add_cog(MousetweaksKeysCog(bot))
+    await bot.add_cog(GputweaksKeysCog(bot))

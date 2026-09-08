@@ -112,6 +112,17 @@ MOUSETWEAKS_PRICE_LIFETIME = float(
     os.getenv("MOUSETWEAKS_PRICE_LIFETIME", "0") or "0"
 )
 
+# y3zz GPU Tweaks - Lizenzkey-Verkauf (Discord-Ticket + /gtkey generate)
+# MUSS exakt mit LICENSE_SECRET in licensing.py der y3zz-GPU-Tweaks-App
+# übereinstimmen, sonst kann die App die Keys nicht prüfen.
+GPUTWEAKS_LICENSE_SECRET = os.getenv("GPUTWEAKS_LICENSE_SECRET", "").strip()
+# Standardpreise (pro Server überschreibbar mit /gtkeysetup)
+GPUTWEAKS_PRICE_14D = float(os.getenv("GPUTWEAKS_PRICE_14D", "0") or "0")
+GPUTWEAKS_PRICE_30D = float(os.getenv("GPUTWEAKS_PRICE_30D", "0") or "0")
+GPUTWEAKS_PRICE_LIFETIME = float(
+    os.getenv("GPUTWEAKS_PRICE_LIFETIME", "0") or "0"
+)
+
 # Minecraft Account-Link + Chat-Watcher Mod API
 # Bot-Hosting/Pterodactyl setzt SERVER_PORT (= freigegebener Port, z.B. 26026).
 # Der Prozess MUSS genau auf SERVER_PORT lauschen, sonst ist er von außen unerreichbar.
