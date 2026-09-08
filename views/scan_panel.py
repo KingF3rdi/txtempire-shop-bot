@@ -8,6 +8,7 @@ import discord
 import config
 from utils.archive_scanner import (
     ARCHIVE_EXTS,
+    MAX_ARCHIVE_BYTES,
     SINGLE_FILE_SCAN_EXTS,
     is_scannable_filename,
     scan_archive_bytes_async,
@@ -28,18 +29,9 @@ if TYPE_CHECKING:
 # lösen den Auto-Scan aus. Wird beim Posten/Refresh des Panels aktualisiert.
 _PANEL_CHANNELS: dict[int, int] = {}
 
-# (channel_id, user_id) Paare, für die gerade ein Button-Flow
-# (scan_channel / scan_dm) auf genau diese Datei wartet — verhindert,
-# dass der Auto-Scan-Listener dieselbe Nachricht ein zweites Mal verarbeitet.
-_PENDING_CHANNEL_WAITS: set[tuple[int, int]] = set()
-
 
 def get_panel_channel_id(guild_id: int) -> int | None:
     return _PANEL_CHANNELS.get(guild_id)
-
-
-def is_pending_wait(channel_id: int, user_id: int) -> bool:
-    return (channel_id, user_id) in _PENDING_CHANNEL_WAITS
 
 
 def supported_types_line() -> str:
@@ -62,7 +54,7 @@ async def build_scan_panel_embed(bot: ShopBot, guild_id: int) -> discord.Embed:
         "📎 **Datei direkt hier in den Channel droppen** — kein Button, "
         "kein Command nötig. Ergebnis kommt **per DM**, im Channel siehst "
         "du nur eine Reaction (✅/⚠️/⛔).\n"
-        "**Datei hier droppen** (Button) — geführter Ablauf mit Antwort im Chat\n"
+        "**Datei hier droppen** (Button) — öffnet ein Upload-Fenster direkt hier\n"
         "**URL scannen** — Download-Link (Discord-CDN, Dropbox `dl=1`, Drive)\n"
         "Auch: `/scan url` · `/scan file`\n\n"
         "⚠️ **Keine 100 %-Garantie** — Multi-Engine, kein Windows Defender.",
@@ -269,6 +261,64 @@ class ScanUrlModal(discord.ui.Modal, title="Datei-URL scannen"):
         )
 
 
+class ScanFileModal(discord.ui.Modal, title="Datei prüfen"):
+    """Natives Discord-Upload-Feld (discord.py 2.7 Components-V2) statt
+    'Datei in den Channel droppen + 2 Minuten warten' - der Kunde zieht die
+    Datei direkt in dieses Modal, kein Zwischenschritt im Chat nötig."""
+
+    def __init__(self, bot: ShopBot, guild_id: int) -> None:
+        super().__init__()
+        self.bot = bot
+        self.guild_id = guild_id
+        self.file_upload = discord.ui.FileUpload(
+            custom_id="scan_file", max_values=1, min_values=1, required=True,
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Datei",
+                description=f"{supported_types_line()} · maximal {MAX_ARCHIVE_BYTES // (1024 * 1024)} MB",
+                component=self.file_upload,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        atts = self.file_upload.values
+        if not atts:
+            await interaction.followup.send(
+                embed=error_embed("Keine Datei", "Es wurde keine Datei hochgeladen."),
+                ephemeral=True,
+            )
+            return
+        att = atts[0]
+        if not is_scannable_filename(att.filename):
+            await interaction.followup.send(
+                embed=error_embed(
+                    "Falscher Dateityp",
+                    "Bitte ein Archiv (**.zip/.rar/.jar/.7z**) oder eine Einzeldatei "
+                    "(**.exe/.dll/...**) hochladen.",
+                ),
+                ephemeral=True,
+            )
+            return
+        try:
+            data = await att.read()
+        except discord.HTTPException as e:
+            await interaction.followup.send(
+                embed=error_embed("Download fehlgeschlagen", str(e)[:400]),
+                ephemeral=True,
+            )
+            return
+
+        await deliver_scan_result(
+            self.bot,
+            interaction,
+            data=data,
+            filename=att.filename or "archive",
+            guild_id=self.guild_id,
+        )
+
+
 class ScanPanelView(discord.ui.View):
     """Persistentes Scan-Panel."""
 
@@ -312,86 +362,11 @@ class ScanPanelView(discord.ui.View):
                 embed=error_embed("Nur auf dem Server"), ephemeral=True
             )
             return
-        if not isinstance(interaction.channel, discord.TextChannel):
-            await interaction.response.send_message(
-                embed=error_embed("Nur in Text-Channels"), ephemeral=True
-            )
-            return
         if not await self._quota_ok(interaction):
             return
 
-        await interaction.response.defer(ephemeral=True)
-        channel = interaction.channel
-        user_id = interaction.user.id
-        guild_id = interaction.guild.id
-
-        await interaction.followup.send(
-            embed=success_embed(
-                "Datei droppen",
-                f"{interaction.user.mention}: Sende jetzt eine "
-                "**`.zip` / `.rar` / `.jar` / `.7z`** Datei oder **`.exe`/`.dll`** "
-                "**in diesen Channel** "
-                "(innerhalb von **2 Minuten**).\n"
-                "Ergebnis kommt privat zu dir.",
-            ),
-            ephemeral=True,
-        )
-
-        def check(message: discord.Message) -> bool:
-            return (
-                message.author.id == user_id
-                and message.channel.id == channel.id
-                and bool(message.attachments)
-            )
-
-        pending_key = (channel.id, user_id)
-        _PENDING_CHANNEL_WAITS.add(pending_key)
-        try:
-            msg = await self.bot.wait_for("message", check=check, timeout=120.0)
-        except asyncio.TimeoutError:
-            await interaction.followup.send(
-                embed=error_embed(
-                    "Zeit abgelaufen",
-                    "Keine Datei erhalten. Bitte erneut starten.",
-                ),
-                ephemeral=True,
-            )
-            return
-        finally:
-            _PENDING_CHANNEL_WAITS.discard(pending_key)
-
-        att = msg.attachments[0]
-        if not is_scannable_filename(att.filename):
-            await interaction.followup.send(
-                embed=error_embed(
-                    "Falscher Dateityp",
-                    "Bitte ein Archiv (**.zip/.rar/.jar/.7z**) oder eine Einzeldatei "
-                    "(**.exe/.dll/...**) senden.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        try:
-            data = await att.read()
-        except discord.HTTPException as e:
-            await interaction.followup.send(
-                embed=error_embed("Download fehlgeschlagen", str(e)[:400]),
-                ephemeral=True,
-            )
-            return
-
-        try:
-            await msg.add_reaction("✅")
-        except discord.HTTPException:
-            pass
-
-        await deliver_scan_result(
-            self.bot,
-            interaction,
-            data=data,
-            filename=att.filename or "archive",
-            guild_id=guild_id,
+        await interaction.response.send_modal(
+            ScanFileModal(self.bot, interaction.guild.id)
         )
 
     @discord.ui.button(

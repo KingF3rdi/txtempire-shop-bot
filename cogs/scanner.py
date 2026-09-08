@@ -124,22 +124,15 @@ class ScannerCog(commands.Cog):
     async def on_message(self, message: discord.Message) -> None:
         """
         Auto-Scan: Datei wird OHNE Button/Command direkt in den Scan-Panel-
-        Channel gedroppt. Läuft parallel zum geführten Button-Flow, ohne
-        dieselbe Datei doppelt zu scannen (siehe _PENDING_CHANNEL_WAITS).
+        Channel gedroppt.
         """
         if message.author.bot or message.guild is None or not message.attachments:
             return
 
-        from views.scan_panel import (
-            auto_scan_dropped_file,
-            get_panel_channel_id,
-            is_pending_wait,
-        )
+        from views.scan_panel import auto_scan_dropped_file, get_panel_channel_id
 
         panel_channel_id = get_panel_channel_id(message.guild.id)
         if panel_channel_id is None or message.channel.id != panel_channel_id:
-            return
-        if is_pending_wait(message.channel.id, message.author.id):
             return
 
         attachment = next(

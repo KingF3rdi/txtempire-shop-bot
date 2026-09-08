@@ -41,6 +41,7 @@ class ShopBot(commands.Bot):
             "cogs.mousetweaks_keys",
             "cogs.gputweaks_keys",
             "cogs.tweak_vouch_setup",
+            "cogs.custom_pack",
             ):
             await self.load_extension(ext)
 
@@ -94,6 +95,10 @@ class ShopBot(commands.Bot):
 
         self.add_view(GputweaksKeyPanelView(self))
         self.add_view(GputweaksKeyTicketView(self))
+        from cogs.custom_pack import CustomPackPanelView, CustomPackTicketView
+
+        self.add_view(CustomPackPanelView(self))
+        self.add_view(CustomPackTicketView(self))
         n_deals = await register_daily_deal_views(self)
         if n_deals:
             print(f"[DailyDeal] {n_deals} aktive Deal-View(s) registriert")
