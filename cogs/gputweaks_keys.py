@@ -290,6 +290,122 @@ def _panel_embed(settings: dict) -> discord.Embed:
     return embed
 
 
+async def handle_buy_key(bot: "ShopBot", interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            embed=error_embed("Nur auf dem Server"), ephemeral=True
+        )
+        return
+    if not gtlic.licensing_configured():
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Noch nicht eingerichtet",
+                "GPUTWEAKS_LICENSE_SECRET ist noch nicht gesetzt (Staff).",
+            ),
+            ephemeral=True,
+        )
+        return
+    open_n = await _count_open_keys(bot, interaction.guild.id, interaction.user.id)
+    if open_n >= 1:
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Bereits offen",
+                "Du hast schon eine offene Key-Bestellung. "
+                "Schließe erst dieses Ticket.",
+            ),
+            ephemeral=True,
+        )
+        return
+    settings = await _get_settings(bot, interaction.guild.id)
+    await interaction.response.send_message(
+        embed=base_embed("Laufzeit wählen", "Für welche Laufzeit möchtest du einen Key?"),
+        view=TierSelectView(bot, settings),
+        ephemeral=True,
+    )
+
+
+async def handle_reset_hwid(bot: "ShopBot", interaction: discord.Interaction) -> None:
+    """Self-Service: nur fuer Kunden mit mindestens einem bestaetigten
+    Kauf. Discord kann Buttons auf einer geteilten Panel-Nachricht nicht
+    pro Nutzer aus-/einblenden - der Button ist fuer alle sichtbar, aber
+    bei jedem ohne bestaetigten Kauf antwortet er nur privat mit einem
+    Hinweis, statt etwas auszuloesen.
+
+    Stellt einen NEUEN, unadressierten Ersatzkey aus (gleiche Laufzeit/
+    Ablaufdatum wie der urspruengliche Kauf) - der bindet sich beim
+    naechsten Eintragen automatisch an das dann genutzte Geraet. Der
+    alte, bereits gebundene Key bleibt auf seinem bisherigen Geraet
+    weiter gueltig."""
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            embed=error_embed("Nur auf dem Server"), ephemeral=True
+        )
+        return
+    if not gtlic.licensing_configured():
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Noch nicht eingerichtet",
+                "GPUTWEAKS_LICENSE_SECRET ist noch nicht gesetzt (Staff).",
+            ),
+            ephemeral=True,
+        )
+        return
+    row = await _get_latest_confirmed_key(bot, interaction.guild.id, interaction.user.id)
+    if not row:
+        await interaction.response.send_message(
+            embed=error_embed(
+                "Kein Kauf gefunden",
+                "Dieser Button ist nur für Kunden mit einem bereits bestätigten "
+                "Key gedacht. Kauf zuerst einen über **Key kaufen**.",
+            ),
+            ephemeral=True,
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+
+    # Urspruengliches Ausstellungsdatum uebernehmen (nicht "jetzt") - ein
+    # Reset soll die Laufzeit nicht verlaengern, da der Ablauf aus
+    # Tier+issued berechnet wird.
+    issued = None
+    if row.get("license_key"):
+        ok, old_payload, _err = gtlic.verify_own_key(row["license_key"])
+        if ok and old_payload:
+            issued = old_payload.get("issued")
+
+    new_key = gtlic.generate_license_key(None, tier=row["tier"], issued=issued)
+    expires = gtlic.tier_to_expiry(row["tier"], issued)
+    await _insert_direct_key(
+        bot, interaction.guild.id, interaction.user.id, row["tier"],
+        "", row.get("note") or "", new_key, interaction.user.id,
+    )
+
+    try:
+        await interaction.user.send(
+            embed=success_embed(
+                "🔄 Neuer y3zz GPU Tweaks Key (HWID-Reset)",
+                f"Laufzeit: **{gtlic.describe_tier(row['tier'], expires)}**\n\n"
+                f"```\n{new_key}\n```\n"
+                "In der App unter **Lizenzkey einfügen** eintragen - bindet sich "
+                "automatisch an dieses Gerät. Der alte Key funktioniert auf einem "
+                "bereits aktivierten Gerät weiterhin, ist danach aber nicht mehr "
+                "auf einem weiteren Gerät nutzbar.",
+            )
+        )
+        await interaction.followup.send(
+            embed=success_embed("Neuer Key verschickt", "Schau in deine DMs."),
+            ephemeral=True,
+        )
+    except discord.HTTPException:
+        await interaction.followup.send(
+            embed=error_embed(
+                "DM fehlgeschlagen",
+                "Bitte aktiviere DMs von Servermitgliedern (Datenschutzeinstellungen) "
+                "und klicke erneut.",
+            ),
+            ephemeral=True,
+        )
+
+
 class GputweaksKeyPanelView(discord.ui.View):
     def __init__(self, bot: "ShopBot") -> None:
         super().__init__(timeout=None)
@@ -304,37 +420,7 @@ class GputweaksKeyPanelView(discord.ui.View):
     async def buy_key(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                embed=error_embed("Nur auf dem Server"), ephemeral=True
-            )
-            return
-        if not gtlic.licensing_configured():
-            await interaction.response.send_message(
-                embed=error_embed(
-                    "Noch nicht eingerichtet",
-                    "GPUTWEAKS_LICENSE_SECRET ist noch nicht gesetzt (Staff).",
-                ),
-                ephemeral=True,
-            )
-            return
-        open_n = await _count_open_keys(self.bot, interaction.guild.id, interaction.user.id)
-        if open_n >= 1:
-            await interaction.response.send_message(
-                embed=error_embed(
-                    "Bereits offen",
-                    "Du hast schon eine offene Key-Bestellung. "
-                    "Schließe erst dieses Ticket.",
-                ),
-                ephemeral=True,
-            )
-            return
-        settings = await _get_settings(self.bot, interaction.guild.id)
-        await interaction.response.send_message(
-            embed=base_embed("Laufzeit wählen", "Für welche Laufzeit möchtest du einen Key?"),
-            view=TierSelectView(self.bot, settings),
-            ephemeral=True,
-        )
+        await handle_buy_key(self.bot, interaction)
 
     @discord.ui.button(
         label="HWID zurücksetzen",
@@ -345,85 +431,7 @@ class GputweaksKeyPanelView(discord.ui.View):
     async def reset_hwid(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        """Self-Service: nur fuer Kunden mit mindestens einem bestaetigten
-        Kauf. Discord kann Buttons auf einer geteilten Panel-Nachricht nicht
-        pro Nutzer aus-/einblenden - der Button ist fuer alle sichtbar, aber
-        bei jedem ohne bestaetigten Kauf antwortet er nur privat mit einem
-        Hinweis, statt etwas auszuloesen.
-
-        Stellt einen NEUEN, unadressierten Ersatzkey aus (gleiche Laufzeit/
-        Ablaufdatum wie der urspruengliche Kauf) - der bindet sich beim
-        naechsten Eintragen automatisch an das dann genutzte Geraet. Der
-        alte, bereits gebundene Key bleibt auf seinem bisherigen Geraet
-        weiter gueltig."""
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                embed=error_embed("Nur auf dem Server"), ephemeral=True
-            )
-            return
-        if not gtlic.licensing_configured():
-            await interaction.response.send_message(
-                embed=error_embed(
-                    "Noch nicht eingerichtet",
-                    "GPUTWEAKS_LICENSE_SECRET ist noch nicht gesetzt (Staff).",
-                ),
-                ephemeral=True,
-            )
-            return
-        row = await _get_latest_confirmed_key(self.bot, interaction.guild.id, interaction.user.id)
-        if not row:
-            await interaction.response.send_message(
-                embed=error_embed(
-                    "Kein Kauf gefunden",
-                    "Dieser Button ist nur für Kunden mit einem bereits bestätigten "
-                    "Key gedacht. Kauf zuerst einen über **Key kaufen**.",
-                ),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.defer(ephemeral=True)
-
-        # Urspruengliches Ausstellungsdatum uebernehmen (nicht "jetzt") - ein
-        # Reset soll die Laufzeit nicht verlaengern, da der Ablauf aus
-        # Tier+issued berechnet wird.
-        issued = None
-        if row.get("license_key"):
-            ok, old_payload, _err = gtlic.verify_own_key(row["license_key"])
-            if ok and old_payload:
-                issued = old_payload.get("issued")
-
-        new_key = gtlic.generate_license_key(None, tier=row["tier"], issued=issued)
-        expires = gtlic.tier_to_expiry(row["tier"], issued)
-        await _insert_direct_key(
-            self.bot, interaction.guild.id, interaction.user.id, row["tier"],
-            "", row.get("note") or "", new_key, interaction.user.id,
-        )
-
-        try:
-            await interaction.user.send(
-                embed=success_embed(
-                    "🔄 Neuer y3zz GPU Tweaks Key (HWID-Reset)",
-                    f"Laufzeit: **{gtlic.describe_tier(row['tier'], expires)}**\n\n"
-                    f"```\n{new_key}\n```\n"
-                    "In der App unter **Lizenzkey einfügen** eintragen - bindet sich "
-                    "automatisch an dieses Gerät. Der alte Key funktioniert auf einem "
-                    "bereits aktivierten Gerät weiterhin, ist danach aber nicht mehr "
-                    "auf einem weiteren Gerät nutzbar.",
-                )
-            )
-            await interaction.followup.send(
-                embed=success_embed("Neuer Key verschickt", "Schau in deine DMs."),
-                ephemeral=True,
-            )
-        except discord.HTTPException:
-            await interaction.followup.send(
-                embed=error_embed(
-                    "DM fehlgeschlagen",
-                    "Bitte aktiviere DMs von Servermitgliedern (Datenschutzeinstellungen) "
-                    "und klicke erneut.",
-                ),
-                ephemeral=True,
-            )
+        await handle_reset_hwid(self.bot, interaction)
 
 
 class TierSelect(discord.ui.Select):
