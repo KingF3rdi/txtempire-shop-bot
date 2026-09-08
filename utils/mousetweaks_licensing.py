@@ -4,9 +4,11 @@ mousetweaks_licensing.py
 
 Signiert Lizenzkeys für "Ferdi Mousetweaks" - byte-kompatibel mit
 app/licensing.py in der Ferdi-Mousetweaks-App. Der Bot und die App
-benutzen exakt denselben Algorithmus (HMAC-SHA256 über einen
-base64-kodierten JSON-Payload); ein hier erzeugter Key wird von der App
-offline geprüft, ohne dass irgendein Server erreichbar sein muss.
+benutzen exakt denselben Algorithmus (HMAC-SHA256 über ein kompaktes
+21-Byte-Binärpaket, Base32-kodiert und in 5er-Gruppen dargestellt - siehe
+app/licensing.py, Abschnitt "KEY-FORMAT" für die genaue Byte-Aufteilung);
+ein hier erzeugter Key wird von der App offline geprüft, ohne dass
+irgendein Server erreichbar sein muss.
 
 WICHTIG: config.MOUSETWEAKS_LICENSE_SECRET (aus der .env) MUSS exakt dem
 Wert entsprechen, der in der App bei app/licensing.py -> LICENSE_SECRET
@@ -20,7 +22,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
+import struct
 import time
 from typing import Optional, Tuple
 
@@ -36,6 +38,13 @@ TIER_LABELS = {
     TIER_30D: "30 Tage",
 }
 
+_TIER_CODES = {TIER_LIFETIME: 0, TIER_14D: 1, TIER_30D: 2}
+_TIER_CODES_REV = {v: k for k, v in _TIER_CODES.items()}
+_PAYLOAD_LEN = 15
+_SIG_LEN = 6
+_TOTAL_LEN = _PAYLOAD_LEN + _SIG_LEN
+_B32_PAD_BY_REMAINDER = {0: 0, 2: 6, 4: 4, 5: 3, 7: 1}
+
 
 def licensing_configured() -> bool:
     return bool(getattr(config, "MOUSETWEAKS_LICENSE_SECRET", "").strip())
@@ -49,43 +58,63 @@ def tier_to_expiry(tier: str, issued_ts: Optional[int] = None) -> Optional[int]:
     return base + days * 86400
 
 
-def _sign(payload_b64: bytes, secret: str) -> str:
-    return hmac.new(secret.encode("utf-8"), payload_b64, hashlib.sha256).hexdigest()[:32]
+def _hwid_to_raw(hwid_display: str) -> bytes:
+    return bytes.fromhex(hwid_display.replace("-", "").strip())
+
+
+def _hwid_from_raw(raw10: bytes) -> str:
+    hex_str = raw10.hex().upper()
+    return "-".join(hex_str[i:i + 5] for i in range(0, 20, 5))
+
+
+def _dash_group(s: str, n: int = 5) -> str:
+    return "-".join(s[i:i + n] for i in range(0, len(s), n))
+
+
+def _b32_encode(data: bytes) -> str:
+    return base64.b32encode(data).decode("ascii").rstrip("=")
+
+
+def _b32_decode(s: str) -> bytes:
+    rem = len(s) % 8
+    pad = _B32_PAD_BY_REMAINDER.get(rem)
+    if pad is None:
+        raise ValueError("ungültige Key-Länge")
+    return base64.b32decode(s + ("=" * pad))
+
+
+def _sign_payload(payload: bytes, secret: str) -> bytes:
+    return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()[:_SIG_LEN]
 
 
 def generate_license_key(
     hwid: Optional[str],
-    note: str,
     tier: str = TIER_LIFETIME,
-    expires: Optional[int] = None,
+    issued: Optional[int] = None,
 ) -> str:
-    """Erzeugt einen fertigen Lizenzkey-String ("payload.signatur").
+    """Erzeugt einen fertigen, kompakten Lizenzkey-String.
     Braucht config.MOUSETWEAKS_LICENSE_SECRET (siehe licensing_configured()).
 
     `hwid`: None/leer erzeugt einen NICHT gebundenen Key - so wird er jetzt
     beim Kauf sofort ausgegeben, ohne vorher die Hardware-ID abzufragen. Die
     App bindet ihn automatisch an das Geraet des Kunden beim ersten
-    Eintragen (siehe app/licensing.py: check_license_key)."""
+    Eintragen (siehe app/licensing.py: check_license_key).
+
+    `issued`: normalerweise leer (= jetzt) - beim HWID-Reset wird das
+    urspruengliche Ausstellungsdatum durchgereicht, damit sich der (aus
+    Tier+issued berechnete) Ablauf dabei nicht verschiebt."""
     secret = config.MOUSETWEAKS_LICENSE_SECRET.strip()
     if not secret:
         raise RuntimeError(
             "MOUSETWEAKS_LICENSE_SECRET ist nicht gesetzt (siehe .env)."
         )
-    issued = int(time.time())
-    if expires is None:
-        expires = tier_to_expiry(tier, issued)
-    payload = {
-        "hwid": (hwid or "").strip() or None,
-        "note": (note or "").strip(),
-        "issued": issued,
-        "tier": tier,
-        "expires": expires,
-    }
-    payload_b64 = base64.urlsafe_b64encode(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    )
-    sig = _sign(payload_b64, secret)
-    return f"{payload_b64.decode('ascii')}.{sig}"
+    if issued is None:
+        issued = int(time.time())
+    hwid_clean = (hwid or "").strip()
+    hwid_raw = _hwid_to_raw(hwid_clean) if hwid_clean else bytes(10)
+    payload = bytes([_TIER_CODES.get(tier, 0)]) + struct.pack(">I", issued) + hwid_raw
+    sig = _sign_payload(payload, secret)
+    return _dash_group(_b32_encode(payload + sig))
 
 
 def describe_tier(tier: str, expires: Optional[int]) -> str:
@@ -99,19 +128,32 @@ def describe_tier(tier: str, expires: Optional[int]) -> str:
 def verify_own_key(key: str) -> Tuple[bool, Optional[dict], str]:
     """Nur zu Debug-/Testzwecken (z.B. /key generate zeigt danach eine
     Selbstprüfung) - prüft NICHT die Hardware-ID, weil der Bot keine hat.
-    Die eigentliche Prüfung passiert in der App (app/licensing.py)."""
+    Die eigentliche Prüfung passiert in der App (app/licensing.py). Gibt im
+    Payload-dict "hwid" (oder None), "tier", "issued", "expires" zurück."""
     secret = config.MOUSETWEAKS_LICENSE_SECRET.strip()
     if not secret:
         return False, None, "MOUSETWEAKS_LICENSE_SECRET nicht gesetzt."
-    if "." not in key:
+    cleaned = (key or "").strip().upper().replace("-", "").replace(" ", "")
+    if not cleaned:
+        return False, None, "Bitte einen Lizenzkey eingeben."
+    try:
+        raw = _b32_decode(cleaned)
+    except Exception:
         return False, None, "Format ungültig."
-    payload_b64_str, sig = key.rsplit(".", 1)
-    expected = _sign(payload_b64_str.encode("ascii"), secret)
+    if len(raw) != _TOTAL_LEN:
+        return False, None, "Key beschädigt (falsche Länge)."
+    payload_bytes, sig = raw[:_PAYLOAD_LEN], raw[_PAYLOAD_LEN:]
+    expected = _sign_payload(payload_bytes, secret)
     if not hmac.compare_digest(sig, expected):
         return False, None, "Signatur ungültig."
-    try:
-        padded = payload_b64_str + "=" * (-len(payload_b64_str) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
-    except Exception:
-        return False, None, "Payload nicht lesbar."
+    tier = _TIER_CODES_REV.get(payload_bytes[0], TIER_LIFETIME)
+    issued = struct.unpack(">I", payload_bytes[1:5])[0]
+    hwid_raw = payload_bytes[5:15]
+    hwid = _hwid_from_raw(hwid_raw) if hwid_raw != bytes(10) else None
+    payload = {
+        "hwid": hwid,
+        "tier": tier,
+        "issued": issued,
+        "expires": tier_to_expiry(tier, issued),
+    }
     return True, payload, ""

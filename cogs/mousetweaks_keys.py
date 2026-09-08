@@ -375,17 +375,17 @@ class MousetweaksKeyPanelView(discord.ui.View):
             return
         await interaction.response.defer(ephemeral=True)
 
-        # Ablaufdatum des urspruenglichen Keys uebernehmen (nicht neu
-        # berechnen) - ein Reset soll die Laufzeit nicht verlaengern.
-        expires = None
+        # Urspruengliches Ausstellungsdatum uebernehmen (nicht "jetzt") - ein
+        # Reset soll die Laufzeit nicht verlaengern, da der Ablauf aus
+        # Tier+issued berechnet wird.
+        issued = None
         if row.get("license_key"):
             ok, old_payload, _err = mtlic.verify_own_key(row["license_key"])
             if ok and old_payload:
-                expires = old_payload.get("expires")
-        if expires is None:
-            expires = mtlic.tier_to_expiry(row["tier"])
+                issued = old_payload.get("issued")
 
-        new_key = mtlic.generate_license_key(None, row.get("note") or "", tier=row["tier"], expires=expires)
+        new_key = mtlic.generate_license_key(None, tier=row["tier"], issued=issued)
+        expires = mtlic.tier_to_expiry(row["tier"], issued)
         await _insert_direct_key(
             self.bot, interaction.guild.id, interaction.user.id, row["tier"],
             "", row.get("note") or "", new_key, interaction.user.id,
@@ -640,10 +640,8 @@ class MousetweaksKeyTicketView(discord.ui.View):
             return
         await interaction.response.defer()
 
+        license_key = mtlic.generate_license_key(row["hwid"] or None, tier=row["tier"])
         expires = mtlic.tier_to_expiry(row["tier"])
-        license_key = mtlic.generate_license_key(
-            row["hwid"], row["note"] or "", tier=row["tier"], expires=expires
-        )
         await _mark_confirmed(self.bot, int(row["id"]), license_key, interaction.user.id)
 
         buyer = await _resolve_member(interaction.guild, row.get("user_id"))
@@ -919,7 +917,7 @@ class MousetweaksKeysCog(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
         expires = mtlic.tier_to_expiry(tier.value)
-        license_key = mtlic.generate_license_key(hwid, note, tier=tier.value, expires=expires)
+        license_key = mtlic.generate_license_key(hwid or None, tier=tier.value)
         key_number = await _insert_direct_key(
             self.bot,
             interaction.guild.id,
