@@ -7,10 +7,15 @@ from utils.packs import resolve_pack_path
 
 
 async def sync_website_purchases(discord_user_id: int, order_items: list[dict]) -> None:
-    """Schaltet für jedes gekaufte Item mit Website-Herkunft (api_id) den
-    zugehörigen Download auf der Website frei."""
+    """Meldet einen abgeschlossenen Discord-Shop-Kauf an die Website:
+
+    - Zählt immer als eine verkaufte Bestellung (nur Stückzahl, kein Betrag -
+      die Discord-Shop-Währung hat keinen festen Euro-Kurs).
+    - Schaltet zusätzlich für jedes Item mit Website-Herkunft (api_id) den
+      zugehörigen Download auf der Website frei."""
     if not shop_api.enabled:
         return
+    await shop_api.sync_sale()
     seen: set[int] = set()
     for item in order_items:
         api_id = item.get("api_id")
