@@ -3278,6 +3278,40 @@ class Database:
             vouch_rating=max(1, min(5, int(rating))),
         )
 
+    async def get_rated_ticket_vouches(self, guild_id: int) -> list[dict[str, Any]]:
+        """Alle bisher abgegebenen Ticket-Vouches mit Sterne-Bewertung
+        (Freitext wird nicht gespeichert - für Website-Backfill)."""
+        rows = await self.fetchall(
+            """
+            SELECT id, user_id, vouch_rating
+            FROM orders
+            WHERE guild_id = ? AND vouch_used = 1 AND vouch_rating IS NOT NULL
+            ORDER BY completed_at ASC, id ASC
+            """,
+            (guild_id,),
+        )
+        return [dict(r) for r in rows]
+
+    async def get_shop_bestsellers(self, guild_id: int) -> list[dict[str, Any]]:
+        """Aggregiert alle abgeschlossenen Shop-Bestellungen nach Produkt-
+        name+Kategorie - für Website-Backfill der echten Bestseller."""
+        rows = await self.fetchall(
+            """
+            SELECT oi.name_snapshot AS name,
+                   oi.category_id AS category_id,
+                   SUM(oi.qty) AS total_qty,
+                   MAX(oi.price_snapshot) AS price
+            FROM order_items oi
+            JOIN orders o ON o.id = oi.order_id
+            WHERE o.guild_id = ? AND o.status = 'completed'
+              AND COALESCE(o.order_kind, 'shop') = 'shop'
+            GROUP BY oi.name_snapshot, oi.category_id
+            ORDER BY total_qty DESC
+            """,
+            (guild_id,),
+        )
+        return [dict(r) for r in rows]
+
     async def get_vouch_and_order_stats(self, guild_id: int) -> dict[str, Any]:
         completed = await self.fetchone(
             """

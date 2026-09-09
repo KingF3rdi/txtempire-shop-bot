@@ -43,6 +43,7 @@ class ShopBot(commands.Bot):
             "cogs.tweak_vouch_setup",
             "cogs.custom_pack",
             "cogs.tweak_panel",
+            "cogs.website_backfill",
             ):
             await self.load_extension(ext)
 

@@ -159,6 +159,42 @@ class ShopApiClient:
             print(f"[Shop API] Revenue sync fehlgeschlagen: {exc}")
             return False
 
+    async def upsert_product(
+        self,
+        *,
+        category_name: str,
+        product_name: str,
+        price: float = 0,
+        sales_count: int = 0,
+        description: str = "",
+    ) -> dict | None:
+        """Legt ein Discord-natives Produkt (Name+Kategorie als Identität)
+        auf der Website an oder aktualisiert seine Verkaufszahl."""
+        if not self.enabled:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{self.api_url}/api/bot/products/upsert",
+                    headers={
+                        "X-Bot-Api-Key": self.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "category_name": category_name,
+                        "product_name": product_name,
+                        "price": price,
+                        "sales_count": sales_count,
+                        "description": description,
+                    },
+                )
+                if resp.status_code >= 400:
+                    return None
+                return resp.json()
+        except Exception as exc:
+            print(f"[Shop API] Product upsert fehlgeschlagen: {exc}")
+            return None
+
     async def sync_purchase(
         self,
         *,
@@ -186,6 +222,27 @@ class ShopApiClient:
                 return resp.status_code < 400
         except Exception as exc:
             print(f"[Shop API] Purchase sync fehlgeschlagen: {exc}")
+            return False
+
+    async def confirm_ingame_login(self, code: str) -> bool:
+        """Bestätigt einen Website-Ingame-Login-Code (Nutzer hat ihn per PN
+        an den Bot ingame geschickt, die Mod hat den Whisper per Discord-
+        Webhook gemeldet)."""
+        if not self.enabled:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{self.api_url}/api/bot/ingame/confirm",
+                    headers={
+                        "X-Bot-Api-Key": self.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={"code": code},
+                )
+                return resp.status_code < 400
+        except Exception as exc:
+            print(f"[Shop API] Ingame-Login-Confirm fehlgeschlagen: {exc}")
             return False
 
     async def confirm_order_by_amount(

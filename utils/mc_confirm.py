@@ -599,6 +599,12 @@ async def handle_mc_link_redeem(
     """Löst einen Link-Code ein (vom Ingame-Bot/Mod)."""
     data = await bot.db.peek_mc_link_code(code)
     if not data:
+        # Kein bot-eigener Link-Code — evtl. ein Website-Ingame-Login-Code
+        # (gleiches TXTE-XXXXXX Format, andere Datenbank).
+        from integrations.shop_api import shop_api
+
+        if shop_api.enabled and await shop_api.confirm_ingame_login(code):
+            return {"ok": True, "reason": "website_ingame_login"}
         return {"ok": False, "reason": "invalid_or_expired_code"}
 
     expected = str(data.get("ign") or "").strip()
