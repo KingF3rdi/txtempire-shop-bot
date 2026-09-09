@@ -2,7 +2,24 @@ from __future__ import annotations
 
 import discord
 
+from integrations.shop_api import shop_api
 from utils.packs import resolve_pack_path
+
+
+async def sync_website_purchases(discord_user_id: int, order_items: list[dict]) -> None:
+    """Schaltet für jedes gekaufte Item mit Website-Herkunft (api_id) den
+    zugehörigen Download auf der Website frei."""
+    if not shop_api.enabled:
+        return
+    seen: set[int] = set()
+    for item in order_items:
+        api_id = item.get("api_id")
+        if not api_id or int(api_id) in seen:
+            continue
+        seen.add(int(api_id))
+        await shop_api.sync_purchase(
+            discord_id=str(discord_user_id), product_id=int(api_id)
+        )
 
 
 async def deliver_packs(

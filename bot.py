@@ -280,6 +280,9 @@ class ShopBot(commands.Bot):
                             f"{result.get('categories', 0)} Kategorien, "
                             f"{result.get('items', 0)} Produkte"
                         )
+                    from utils.revenue_sync import sync_revenue_now
+
+                    await sync_revenue_now(self)
                 from utils.panels import (
                     refresh_all_saved_buy_panels,
                     register_category_panel_views,

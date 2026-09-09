@@ -16,8 +16,9 @@ Kanal, siehe utils/vouch_request.py), aber bewusst KOMPLETT getrennt:
     Definition immer der neueste Kauf, keine Warteschlange wie beim
     normalen `/vouch`.
 
-Eigene Tabelle (tweak_vouch_settings) - keine Änderung an db/database.py
-nötig.
+Eigene Tabellen (tweak_vouch_settings, tweak_vouches) - keine Änderung an
+db/database.py nötig. Die Ratings werden zusätzlich (best-effort) an die
+Website gesynct (siehe integrations/shop_api.py, source="tweak").
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from typing import TYPE_CHECKING, Optional
 
 import discord
 
+from integrations.shop_api import shop_api
 from utils.embeds import base_embed, error_embed, success_embed
 
 if TYPE_CHECKING:
@@ -38,9 +40,41 @@ async def _ensure_table(bot: "ShopBot") -> None:
             guild_id INTEGER PRIMARY KEY,
             channel_id INTEGER
         );
+        CREATE TABLE IF NOT EXISTS tweak_vouches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            product TEXT NOT NULL,
+            tier_label TEXT NOT NULL DEFAULT '',
+            rating INTEGER NOT NULL,
+            message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
         """
     )
     await bot.db.db.commit()
+
+
+async def _save_vouch(
+    bot: "ShopBot",
+    *,
+    guild_id: int,
+    user_id: int,
+    product: str,
+    tier_label: str,
+    rating: int,
+    message: str,
+) -> int:
+    await _ensure_table(bot)
+    cursor = await bot.db.db.execute(
+        """
+        INSERT INTO tweak_vouches (guild_id, user_id, product, tier_label, rating, message)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (guild_id, user_id, product, tier_label, rating, message),
+    )
+    await bot.db.db.commit()
+    return int(cursor.lastrowid)
 
 
 async def get_channel_id(bot: "ShopBot", guild_id: int) -> Optional[int]:
@@ -110,6 +144,27 @@ class TweakVouchMessageModal(discord.ui.Modal, title="Tweaks Vouch"):
         embed.add_field(name="Produkt", value=f"{self.product} — {self.tier_label}", inline=True)
         embed.set_author(name=str(interaction.user), icon_url=interaction.user.display_avatar.url)
         await channel.send(embed=embed)
+
+        vouch_id = await _save_vouch(
+            self.bot,
+            guild_id=self.guild_id,
+            user_id=interaction.user.id,
+            product=self.product,
+            tier_label=self.tier_label,
+            rating=self.rating,
+            message=text,
+        )
+        if shop_api.enabled:
+            # external_id ist website-weit UNIQUE über alle Vouch-Quellen;
+            # negativ gespiegelt, um Kollisionen mit orders.id (Ticket-Vouches) zu vermeiden.
+            await shop_api.sync_vouch(
+                giver_name=str(interaction.user),
+                message=f"{self.product} — {self.tier_label}: {text}",
+                is_positive=self.rating >= 4,
+                external_id=-vouch_id,
+                rating=self.rating,
+                source="tweak",
+            )
 
         await interaction.response.send_message(
             embed=success_embed("Vouch gesendet", "Danke für dein Feedback!"), ephemeral=True,

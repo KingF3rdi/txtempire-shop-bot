@@ -41,6 +41,7 @@ from discord.ext import commands
 import config
 from utils import gputweaks_licensing as gtlic
 from utils import tweak_vouch
+from utils.revenue_sync import sync_revenue_now
 from utils.embeds import (
     base_embed,
     error_embed,
@@ -221,6 +222,7 @@ async def _mark_confirmed(bot: "ShopBot", key_id: int, license_key: str, staff_i
         (license_key, staff_id, key_id),
     )
     await bot.db.db.commit()
+    asyncio.create_task(sync_revenue_now(bot))
 
 
 async def _mark_rejected(bot: "ShopBot", key_id: int, staff_id: int) -> None:

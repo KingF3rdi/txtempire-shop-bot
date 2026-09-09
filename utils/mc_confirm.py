@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 import discord
 
-from utils.delivery import deliver_packs
+from utils.delivery import deliver_packs, sync_website_purchases
+from utils.revenue_sync import sync_revenue_now
 from utils.embeds import (
     error_embed,
     format_price,
@@ -142,6 +143,7 @@ async def confirm_order_by_id(
             "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         }
         await bot.db.update_order(order_id, **update_fields)
+        asyncio.create_task(sync_revenue_now(bot))
 
         credits_granted: float | None = None
         credits_balance = None
@@ -207,6 +209,7 @@ async def confirm_order_by_id(
                 delivery_info = await deliver_packs(
                     member, channel, order_items, bot=bot
                 )
+            await sync_website_purchases(int(order["user_id"]), order_items)
         elif member and non_product:
             role_result = await grant_purchase_roles(member, settings, [])
         elif not member:

@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from utils.delivery import deliver_packs
+from utils.delivery import deliver_packs, sync_website_purchases
+from utils.revenue_sync import sync_revenue_now
 from utils.embeds import (
     error_embed,
     format_price,
@@ -35,6 +36,8 @@ async def enrich_order_item_roles(bot: ShopBot, order_items: list[dict]) -> list
             if live:
                 if live.get("role_id"):
                     row["item_role_id"] = live["role_id"]
+                if live.get("api_id"):
+                    row["api_id"] = live["api_id"]
                 cat_id = live.get("category_id") or row.get("category_id")
                 if cat_id:
                     cat = await bot.db.get_category(int(cat_id))
@@ -330,6 +333,7 @@ async def action_confirm_order(
     if paid_with_credits:
         update_fields["paid_with_credits"] = 1
     await bot.db.update_order(int(order["id"]), **update_fields)
+    asyncio.create_task(sync_revenue_now(bot))
 
     # Credits-Kauf / Scan-/Snipe-Premium: keine Packs
     credits_granted: float | None = None
@@ -390,6 +394,7 @@ async def action_confirm_order(
             delivery_info = await deliver_packs(
                 member, channel, order_items, bot=bot
             )
+        await sync_website_purchases(int(order["user_id"]), order_items)
     elif member and non_product:
         role_result = await grant_purchase_roles(member, settings, [])
     elif not member:
