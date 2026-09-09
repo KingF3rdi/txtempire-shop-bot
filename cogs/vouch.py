@@ -145,6 +145,8 @@ async def _submit_local_vouch(
             message=f"{stars} — {message[:500]}",
             is_positive=rating >= 4,
             external_id=int(order["id"]),
+            rating=rating,
+            source="ticket",
         )
 
     await interaction.followup.send(
