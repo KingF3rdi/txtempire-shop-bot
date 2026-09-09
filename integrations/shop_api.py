@@ -118,26 +118,6 @@ class ShopApiClient:
             print(f"[Shop API] Vouch submit fehlgeschlagen: {exc}")
             return None
 
-    async def sync_revenue(self, bot_umsatz: float) -> bool:
-        """Sendet die kombinierten Discord-Einnahmen (Shop-Bestellungen +
-        Lizenzkey-Verkäufe) als Absolutwert an die Website."""
-        if not self.enabled:
-            return False
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{self.api_url}/api/bot/stats/sync",
-                    headers={
-                        "X-Bot-Api-Key": self.api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json={"bot_umsatz": bot_umsatz},
-                )
-                return resp.status_code < 400
-        except Exception as exc:
-            print(f"[Shop API] Revenue sync fehlgeschlagen: {exc}")
-            return False
-
     async def sync_purchase(
         self,
         *,
