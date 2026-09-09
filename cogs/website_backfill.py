@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import discord
+import httpx
 from discord import app_commands
 from discord.ext import commands
 
+import config
 from integrations.shop_api import shop_api
 from utils.embeds import error_embed, success_embed
 from views.ticket_views import is_staff
@@ -102,6 +104,41 @@ class WebsiteBackfillCog(commands.Cog):
                 f"{products_updated} aktualisiert"
                 + (f", {products_failed} fehlgeschlagen" if products_failed else ""),
             ),
+        )
+
+
+    @app_commands.command(
+        name="nettest",
+        description="Prüft ausgehende Verbindungen des Bot-Hosts (Discord, Cloudflare, allgemein)",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def nettest(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not await is_staff(self.bot, interaction):
+            await interaction.response.send_message(
+                embed=error_embed("Nur Staff"), ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        targets = {
+            "Discord API (Baseline)": "https://discord.com/api/v10/gateway",
+            "Cloudflare Worker (Website)": f"{(config.SHOP_API_URL or '').rstrip('/')}/api/stats",
+            "Allgemeines Internet": "https://1.1.1.1",
+        }
+        lines: list[str] = []
+        for label, url in targets.items():
+            if not url or url == "/api/stats":
+                lines.append(f"⚠️ **{label}**: SHOP_API_URL nicht gesetzt")
+                continue
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(url)
+                lines.append(f"✅ **{label}**: HTTP {resp.status_code} erreichbar")
+            except Exception as exc:
+                lines.append(f"❌ **{label}**: {type(exc).__name__} — {exc}")
+
+        await interaction.followup.send(
+            embed=success_embed("Netzwerk-Test", "\n".join(lines)),
         )
 
 
