@@ -51,10 +51,10 @@ RESERVED_IGNS = frozenset(
 
 # Whisper /msg Formate → Absender + Nachrichtentext
 WHISPER_PREFIXES: tuple[re.Pattern[str], ...] = (
-    # "[Nachricht] p9x1 -> Du: !link …"
+    # "[Nachricht] p9x1 -> Du: !link …" / "[Nachricht](p9x1) --> Du: !link …"
     re.compile(
         r"^\[(?:nachricht|msg|whisper|pn|pm|message)\]\s*"
-        r"(?P<ign>[A-Za-z0-9_]{3,16})\s*(?:->|→|»|›)\s*"
+        r"\(?\s*(?P<ign>[A-Za-z0-9_]{3,16})\s*\)?\s*(?:-+>|→|»|›)\s*"
         r"(?:dir|you|dich|du|[A-Za-z0-9_]{3,16})\s*[:»>]\s*(?P<body>.+)$",
         re.I,
     ),
@@ -178,6 +178,10 @@ def parse_amount(raw: str) -> float | None:
             s = s.replace(",", ".")
     elif s.count(".") > 1:
         s = s.replace(".", "")
+    elif s.count(".") == 1:
+        int_part, frac_part = s.split(".")
+        if int_part and len(frac_part) == 3:
+            s = s.replace(".", "")
     try:
         return float(s) * mult
     except ValueError:
