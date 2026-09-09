@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import discord
 
-from utils.delivery import deliver_packs, sync_website_purchases
-from utils.revenue_sync import sync_revenue_now
+from utils.delivery import deliver_packs, sync_website_sales
 from utils.embeds import (
     error_embed,
     format_price,
@@ -143,7 +142,6 @@ async def confirm_order_by_id(
             "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         }
         await bot.db.update_order(order_id, **update_fields)
-        asyncio.create_task(sync_revenue_now(bot))
 
         credits_granted: float | None = None
         credits_balance = None
@@ -209,7 +207,9 @@ async def confirm_order_by_id(
                 delivery_info = await deliver_packs(
                     member, channel, order_items, bot=bot
                 )
-            await sync_website_purchases(int(order["user_id"]), order_items)
+            asyncio.create_task(
+                sync_website_sales(int(order["user_id"]), order.get("ign"), order_items)
+            )
         elif member and non_product:
             role_result = await grant_purchase_roles(member, settings, [])
         elif not member:
@@ -372,11 +372,11 @@ async def handle_mc_payment(
 
     if shop_api.enabled:
         try:
-            web_result = await shop_api.confirm_order_by_amount(ign, amount)
+            web_result = await shop_api.confirm_payment(ign=ign, amount=amount)
         except Exception as exc:
             print(f"[MC-Payment] Website-Order-Check fehlgeschlagen: {exc}")
             web_result = None
-        if web_result and web_result.get("matched"):
+        if web_result and web_result.get("success"):
             event_id = await bot.db.log_mc_payment(
                 guild_id, ign=ign, amount=amount, raw_text=raw_text
             )
@@ -394,28 +394,8 @@ async def handle_mc_payment(
                 f"[MC-Payment] Website-Bestellung #{web_result.get('order_id')} "
                 f"automatisch bestätigt (IGN {ign}, {amount})."
             )
-
-            # Download zusätzlich per DM zustellen (Website hat ihn schon freigeschaltet)
-            discord_id = web_result.get("discord_id")
-            download_url = web_result.get("download_url")
-            product_name = web_result.get("product_name") or "dein Pack"
-            if discord_id:
-                try:
-                    buyer = await bot.fetch_user(int(discord_id))
-                    embed = discord.Embed(
-                        title="✅ Website-Kauf bestätigt",
-                        description=(
-                            f"Deine Ingame-Zahlung für **{product_name}** wurde bestätigt!\n\n"
-                            + (f"📥 [Download]({download_url})" if download_url else
-                               "Den Download findest du auch jederzeit unter „Meine Downloads“ auf der Website.")
-                        ),
-                        color=discord.Color.green(),
-                    )
-                    await buyer.send(embed=embed)
-                except discord.HTTPException as exc:
-                    print(f"[MC-Payment] DM-Zustellung fehlgeschlagen (Discord-ID {discord_id}): {exc}")
-                except Exception as exc:
-                    print(f"[MC-Payment] DM-Zustellung fehlgeschlagen (Discord-ID {discord_id}): {exc}")
+            # Website postet Kaufbestätigung + Download-DM + Vouch-Anfrage
+            # selbst (siehe backend/app/discord_notify.py) — kein Duplikat hier.
 
             return {
                 "ok": True,

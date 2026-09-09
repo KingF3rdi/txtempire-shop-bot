@@ -118,82 +118,94 @@ class ShopApiClient:
             print(f"[Shop API] Vouch submit fehlgeschlagen: {exc}")
             return None
 
-    async def sync_revenue(self, bot_umsatz: float) -> bool:
-        """Sendet die kombinierten Discord-Einnahmen (Shop-Bestellungen +
-        Lizenzkey-Verkäufe) als Absolutwert an die Website."""
-        if not self.enabled:
+    async def sync_bot_revenue(self, amount: float) -> bool:
+        """Zählt Discord-only Einnahmen ohne Website-Produkt-Bezug (z.B.
+        Lizenzkey-Verkäufe) additiv zur Website-Gesamtsumme hinzu."""
+        if not self.enabled or amount <= 0:
             return False
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
-                    f"{self.api_url}/api/bot/stats/sync",
+                    f"{self.api_url}/api/bot/revenue/sync",
                     headers={
                         "X-Bot-Api-Key": self.api_key,
                         "Content-Type": "application/json",
                     },
-                    json={"bot_umsatz": bot_umsatz},
+                    json={"amount": amount},
                 )
                 return resp.status_code < 400
         except Exception as exc:
             print(f"[Shop API] Revenue sync fehlgeschlagen: {exc}")
             return False
 
-    async def sync_purchase(
+    async def sync_sale(
         self,
         *,
-        discord_id: str,
-        product_id: int,
-        download_url: str | None = None,
-    ) -> bool:
-        """Schaltet einen Website-Download frei, nachdem der Bot einen Kauf
-        (Rollen-/Pack-Lieferung) abgeschlossen hat."""
-        if not self.enabled:
-            return False
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                payload: dict = {"discord_id": discord_id, "product_id": product_id}
-                if download_url:
-                    payload["download_url"] = download_url
-                resp = await client.post(
-                    f"{self.api_url}/api/bot/purchases/sync",
-                    headers={
-                        "X-Bot-Api-Key": self.api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                return resp.status_code < 400
-        except Exception as exc:
-            print(f"[Shop API] Purchase sync fehlgeschlagen: {exc}")
-            return False
-
-    async def confirm_order_by_amount(
-        self,
-        minecraft_username: str,
+        ign: str,
         amount: float,
-    ) -> dict | None:
-        """Prüft, ob eine offene Website-Bestellung (Ingame-Zahlung) zu
-        IGN + Betrag passt, und bestätigt sie ggf. automatisch."""
+        product_id: int | None = None,
+        product_slug: str | None = None,
+        discord_id: str | None = None,
+        discount_code: str | None = None,
+    ) -> bool:
+        """Meldet einen abgeschlossenen Discord-Verkauf eines Website-
+        Produkts — Website legt automatisch eine bestätigte Bestellung an
+        (schaltet das Produkt frei + zählt zu total_revenue/total_sales)."""
         if not self.enabled:
-            return None
+            return False
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
-                    f"{self.api_url}/api/bot/orders/confirm_by_amount",
+                    f"{self.api_url}/api/bot/sales/sync",
                     headers={
                         "X-Bot-Api-Key": self.api_key,
                         "Content-Type": "application/json",
                     },
                     json={
-                        "minecraft_username": minecraft_username,
+                        "ign": ign,
                         "amount": amount,
+                        "product_id": product_id,
+                        "product_slug": product_slug,
+                        "discord_id": discord_id,
+                        "discount_code": discount_code,
+                    },
+                )
+                return resp.status_code < 400
+        except Exception as exc:
+            print(f"[Shop API] Sale sync fehlgeschlagen: {exc}")
+            return False
+
+    async def confirm_payment(
+        self,
+        *,
+        ign: str,
+        amount: float,
+        payment_reference: str | None = None,
+    ) -> dict | None:
+        """Prüft, ob eine offene Website-Bestellung (Ingame-Zahlung) zu
+        IGN + Betrag passt, und bestätigt sie ggf. automatisch (Website
+        schaltet das Produkt frei und postet die Kaufbestätigung selbst)."""
+        if not self.enabled:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{self.api_url}/api/bot/payments/confirm",
+                    headers={
+                        "X-Bot-Api-Key": self.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "ign": ign,
+                        "amount": amount,
+                        "payment_reference": payment_reference,
                     },
                 )
                 if resp.status_code >= 400:
                     return None
                 return resp.json()
         except Exception as exc:
-            print(f"[Shop API] Website-Order-Confirm fehlgeschlagen: {exc}")
+            print(f"[Shop API] Website-Payment-Confirm fehlgeschlagen: {exc}")
             return None
 
 

@@ -6,20 +6,36 @@ from integrations.shop_api import shop_api
 from utils.packs import resolve_pack_path
 
 
-async def sync_website_purchases(discord_user_id: int, order_items: list[dict]) -> None:
-    """Schaltet für jedes gekaufte Item mit Website-Herkunft (api_id) den
-    zugehörigen Download auf der Website frei."""
+async def sync_website_sales(
+    discord_user_id: int, ign: str | None, order_items: list[dict]
+) -> None:
+    """Meldet einen abgeschlossenen Discord-Kauf an die Website:
+
+    - Items mit Website-Herkunft (api_id) werden per /api/bot/sales/sync als
+      eigene Bestellung angelegt -> Website schaltet Download frei und zählt
+      die Einnahme selbst (braucht eine bekannte Minecraft-IGN).
+    - Alles andere (kein api_id oder keine IGN bekannt) zählt best-effort als
+      Discord-only Einnahme über /api/bot/revenue/sync, damit die Website-
+      Gesamtsumme trotzdem stimmt."""
     if not shop_api.enabled:
         return
-    seen: set[int] = set()
+    seen_api_ids: set[int] = set()
+    extra_revenue = 0.0
     for item in order_items:
+        price = float(item.get("price_snapshot") or 0) * int(item.get("qty") or 1)
         api_id = item.get("api_id")
-        if not api_id or int(api_id) in seen:
-            continue
-        seen.add(int(api_id))
-        await shop_api.sync_purchase(
-            discord_id=str(discord_user_id), product_id=int(api_id)
-        )
+        if api_id and ign and int(api_id) not in seen_api_ids:
+            seen_api_ids.add(int(api_id))
+            await shop_api.sync_sale(
+                ign=ign,
+                amount=price,
+                product_id=int(api_id),
+                discord_id=str(discord_user_id),
+            )
+        else:
+            extra_revenue += price
+    if extra_revenue > 0:
+        await shop_api.sync_bot_revenue(extra_revenue)
 
 
 async def deliver_packs(

@@ -3278,31 +3278,6 @@ class Database:
             vouch_rating=max(1, min(5, int(rating))),
         )
 
-    async def get_combined_bot_revenue(self, guild_id: int) -> float:
-        """Discord-seitige Gesamteinnahmen: Shop-Bestellungen + bestätigte
-        Mousetweaks-/GPU-Tweaks-Lizenzkey-Verkäufe."""
-        orders_row = await self.fetchone(
-            """
-            SELECT COALESCE(SUM(total), 0) AS revenue
-            FROM orders
-            WHERE guild_id = ? AND status = 'completed'
-              AND COALESCE(order_kind, 'shop') = 'shop'
-            """,
-            (guild_id,),
-        )
-        total = float(orders_row["revenue"] if orders_row else 0.0)
-        for table in ("gt_keys", "mt_keys"):
-            try:
-                row = await self.fetchone(
-                    f"SELECT COALESCE(SUM(price), 0) AS revenue FROM {table} "
-                    "WHERE guild_id = ? AND status = 'confirmed'",
-                    (guild_id,),
-                )
-                total += float(row["revenue"] if row else 0.0)
-            except Exception:
-                pass  # Cog (und damit Tabelle) evtl. noch nicht geladen
-        return total
-
     async def get_vouch_and_order_stats(self, guild_id: int) -> dict[str, Any]:
         completed = await self.fetchone(
             """
