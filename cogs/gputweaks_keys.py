@@ -39,9 +39,9 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
-from integrations.shop_api import shop_api
 from utils import gputweaks_licensing as gtlic
 from utils import tweak_vouch
+from utils.revenue_sync import sync_revenue_now
 from utils.embeds import (
     base_embed,
     error_embed,
@@ -222,10 +222,7 @@ async def _mark_confirmed(bot: "ShopBot", key_id: int, license_key: str, staff_i
         (license_key, staff_id, key_id),
     )
     await bot.db.db.commit()
-    if shop_api.enabled:
-        row = await bot.db.fetchone("SELECT price FROM gt_keys WHERE id = ?", (key_id,))
-        if row and float(row["price"] or 0) > 0:
-            asyncio.create_task(shop_api.sync_bot_revenue(float(row["price"])))
+    asyncio.create_task(sync_revenue_now(bot))
 
 
 async def _mark_rejected(bot: "ShopBot", key_id: int, staff_id: int) -> None:
