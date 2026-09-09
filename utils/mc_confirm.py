@@ -207,7 +207,9 @@ async def confirm_order_by_id(
                 delivery_info = await deliver_packs(
                     member, channel, order_items, bot=bot
                 )
-            await sync_website_purchases(int(order["user_id"]), order_items)
+            await sync_website_purchases(
+                int(order["user_id"]), order_items, total=float(order.get("total") or 0)
+            )
         elif member and non_product:
             role_result = await grant_purchase_roles(member, settings, [])
         elif not member:

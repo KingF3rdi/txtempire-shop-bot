@@ -118,20 +118,45 @@ class ShopApiClient:
             print(f"[Shop API] Vouch submit fehlgeschlagen: {exc}")
             return None
 
-    async def sync_sale(self) -> bool:
-        """Zählt einen abgeschlossenen Discord-Shop-Kauf (nur Stückzahl,
-        kein Betrag - die Discord-Shop-Währung hat keinen festen Euro-Kurs)."""
+    async def sync_sale(self, amount: float = 0) -> bool:
+        """Zählt einen abgeschlossenen Discord-Shop-Kauf (+1 verkauft) und
+        rechnet den Betrag zum Umsatz dazu (Discord-Shop-Währung 1:1 als
+        Euro übernommen, auf ausdrücklichen Wunsch trotz fehlendem Kurs)."""
         if not self.enabled:
             return False
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
                     f"{self.api_url}/api/bot/sales/sync",
-                    headers={"X-Bot-Api-Key": self.api_key},
+                    headers={
+                        "X-Bot-Api-Key": self.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={"amount": amount},
                 )
                 return resp.status_code < 400
         except Exception as exc:
             print(f"[Shop API] Sale sync fehlgeschlagen: {exc}")
+            return False
+
+    async def sync_revenue(self, amount: float) -> bool:
+        """Zählt zusätzlichen Umsatz ohne Pack-Zählung dazu (z.B. Lizenzkey-
+        Verkäufe - Discord-Shop-Währung 1:1 als Euro übernommen)."""
+        if not self.enabled or amount <= 0:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{self.api_url}/api/bot/revenue/sync",
+                    headers={
+                        "X-Bot-Api-Key": self.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={"amount": amount},
+                )
+                return resp.status_code < 400
+        except Exception as exc:
+            print(f"[Shop API] Revenue sync fehlgeschlagen: {exc}")
             return False
 
     async def sync_purchase(

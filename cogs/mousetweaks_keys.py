@@ -34,6 +34,7 @@ from discord.ext import commands
 
 import config
 from utils import mousetweaks_licensing as mtlic
+from integrations.shop_api import shop_api
 from utils import tweak_vouch
 from utils.embeds import (
     base_embed,
@@ -215,6 +216,10 @@ async def _mark_confirmed(bot: "ShopBot", key_id: int, license_key: str, staff_i
         (license_key, staff_id, key_id),
     )
     await bot.db.db.commit()
+    if shop_api.enabled:
+        row = await bot.db.fetchone("SELECT price FROM mt_keys WHERE id = ?", (key_id,))
+        if row and float(row["price"] or 0) > 0:
+            asyncio.create_task(shop_api.sync_revenue(float(row["price"])))
 
 
 async def _mark_rejected(bot: "ShopBot", key_id: int, staff_id: int) -> None:
