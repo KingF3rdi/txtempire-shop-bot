@@ -19,10 +19,10 @@ public final class ChatParser {
 	);
 
 	private static final Pattern[] WHISPERS = new Pattern[] {
-		// Server: "[Nachricht] p9x1 -> Du: !link …" / "[Nachricht](p9x1) --> Du: !link …"
+		// Server: "[Nachricht] p9x1 -> Du: !link …"
 		Pattern.compile(
 			"(?i)^\\[(?:nachricht|msg|whisper|pn|pm|message)\\]\\s*"
-				+ "\\(?\\s*([A-Za-z0-9_]{3,16})\\s*\\)?\\s*(?:-+>|→|»|›)\\s*"
+				+ "([A-Za-z0-9_]{3,16})\\s*(?:->|→|»|›)\\s*"
 				+ "(?:dir|you|dich|du|[A-Za-z0-9_]{3,16})\\s*[:»>]\\s*(.+)$"
 		),
 		Pattern.compile(
@@ -227,13 +227,6 @@ public final class ChatParser {
 			}
 		} else if (s.chars().filter(ch -> ch == '.').count() > 1) {
 			s = s.replace(".", "");
-		} else if (s.indexOf('.') >= 0) {
-			int dot = s.indexOf('.');
-			String intPart = s.substring(0, dot);
-			String fracPart = s.substring(dot + 1);
-			if (!intPart.isEmpty() && fracPart.length() == 3) {
-				s = s.replace(".", "");
-			}
 		}
 		try {
 			return Double.parseDouble(s) * mult;
