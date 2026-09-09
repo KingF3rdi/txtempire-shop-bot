@@ -17,6 +17,10 @@ DATABASE_PATH = DATA_DIR / "shop.db"
 SHOP_API_URL = os.getenv("SHOP_API_URL", "")
 BOT_API_KEY = os.getenv("BOT_API_KEY", "")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+# Discord-Webhook-Relay für Login-/Zahlungs-Codes (Bot-Host kann
+# *.workers.dev nicht direkt erreichen — Worker liest den Channel per Cron
+# über die Discord-API aus statt eines direkten HTTP-Calls vom Bot).
+SHOP_RELAY_WEBHOOK_URL = os.getenv("SHOP_RELAY_WEBHOOK_URL", "")
 
 # Embed accent color (blue-ish, not purple)
 EMBED_COLOR = 0x2B6CB0

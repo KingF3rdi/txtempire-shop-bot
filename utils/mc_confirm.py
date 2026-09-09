@@ -366,65 +366,20 @@ async def handle_mc_payment(
     """Verarbeitet eine erkannte Ingame-Zahlung (DB + Discord-Log)."""
     settings = await bot.db.ensure_guild(guild_id)
 
-    # --- NEU: Erst prüfen, ob eine offene WEBSITE-Bestellung zu IGN+Betrag passt ---
-    # (unabhängig davon, ob der Discord-Account per /link verknüpft ist)
+    # --- Website-Bestellung per Ingame-Zahlung: läuft über den Discord-
+    # Relay-Webhook (der Bot-Host kann die Website-API nicht direkt
+    # erreichen), best-effort und ohne sofortiges Ergebnis. Die eigentliche
+    # Bestätigung passiert asynchron auf der Website-Seite (Cron liest den
+    # Relay-Channel), daher hier kein early return — die Ticket-Logik
+    # unten läuft in jedem Fall parallel weiter.
     from integrations.shop_api import shop_api
 
     if shop_api.enabled:
         try:
-            web_result = await shop_api.confirm_order_by_amount(ign, amount)
+            await shop_api.confirm_order_by_amount(ign, amount)
         except Exception as exc:
-            print(f"[MC-Payment] Website-Order-Check fehlgeschlagen: {exc}")
-            web_result = None
-        if web_result and web_result.get("matched"):
-            event_id = await bot.db.log_mc_payment(
-                guild_id, ign=ign, amount=amount, raw_text=raw_text
-            )
-            await _post_mc_payment_log(
-                bot,
-                guild_id=guild_id,
-                ign=ign,
-                amount=amount,
-                raw_text=raw_text,
-                reason="auto_confirmed",
-                auto_confirmed=True,
-                event_id=event_id,
-            )
-            print(
-                f"[MC-Payment] Website-Bestellung #{web_result.get('order_id')} "
-                f"automatisch bestätigt (IGN {ign}, {amount})."
-            )
-
-            # Download zusätzlich per DM zustellen (Website hat ihn schon freigeschaltet)
-            discord_id = web_result.get("discord_id")
-            download_url = web_result.get("download_url")
-            product_name = web_result.get("product_name") or "dein Pack"
-            if discord_id:
-                try:
-                    buyer = await bot.fetch_user(int(discord_id))
-                    embed = discord.Embed(
-                        title="✅ Website-Kauf bestätigt",
-                        description=(
-                            f"Deine Ingame-Zahlung für **{product_name}** wurde bestätigt!\n\n"
-                            + (f"📥 [Download]({download_url})" if download_url else
-                               "Den Download findest du auch jederzeit unter „Meine Downloads“ auf der Website.")
-                        ),
-                        color=discord.Color.green(),
-                    )
-                    await buyer.send(embed=embed)
-                except discord.HTTPException as exc:
-                    print(f"[MC-Payment] DM-Zustellung fehlgeschlagen (Discord-ID {discord_id}): {exc}")
-                except Exception as exc:
-                    print(f"[MC-Payment] DM-Zustellung fehlgeschlagen (Discord-ID {discord_id}): {exc}")
-
-            return {
-                "ok": True,
-                "auto_confirmed": True,
-                "reason": "website_order_confirmed",
-                "event_id": event_id,
-                "website_order_id": web_result.get("order_id"),
-            }
-    # --- Ende Website-Check, ab hier unverändert die bisherige Ticket-Logik ---
+            print(f"[MC-Payment] Website-Order-Relay fehlgeschlagen: {exc}")
+    # --- Ende Website-Relay, ab hier unverändert die bisherige Ticket-Logik ---
 
     link = await bot.db.get_mc_link_by_ign(guild_id, ign)
     user_id: int | None = int(link["user_id"]) if link else None
