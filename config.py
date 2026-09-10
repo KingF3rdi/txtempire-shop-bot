@@ -137,6 +137,17 @@ GPUTWEAKS_PRICE_LIFETIME = float(
     os.getenv("GPUTWEAKS_PRICE_LIFETIME", "0") or "0"
 )
 
+# Pack AI — Texturepack Studio Lizenzkeys (License-API + Discord-Ticket)
+PACKAI_LICENSE_API_URL = (
+    os.getenv("PACKAI_LICENSE_API_URL") or os.getenv("LICENSE_API_URL") or "http://127.0.0.1:8787"
+).strip().rstrip("/")
+PACKAI_LICENSE_API_SECRET = (
+    os.getenv("PACKAI_LICENSE_API_SECRET") or os.getenv("LICENSE_API_SECRET") or ""
+).strip()
+PACKAI_PRICE_14D = float(os.getenv("PACKAI_PRICE_14D", "4.99") or "4.99")
+PACKAI_PRICE_30D = float(os.getenv("PACKAI_PRICE_30D", "9.99") or "9.99")
+PACKAI_PRICE_LIFETIME = float(os.getenv("PACKAI_PRICE_LIFETIME", "29.99") or "29.99")
+
 # Minecraft Account-Link + Chat-Watcher Mod API
 # Bot-Hosting/Pterodactyl setzt SERVER_PORT (= freigegebener Port, z.B. 26026).
 # Der Prozess MUSS genau auf SERVER_PORT lauschen, sonst ist er von außen unerreichbar.

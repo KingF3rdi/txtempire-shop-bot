@@ -40,6 +40,7 @@ class ShopBot(commands.Bot):
             "cogs.mc_link",
             "cogs.mousetweaks_keys",
             "cogs.gputweaks_keys",
+            "cogs.packai_keys",
             "cogs.tweak_vouch_setup",
             "cogs.custom_pack",
             "cogs.spawner_shop",
@@ -98,6 +99,10 @@ class ShopBot(commands.Bot):
 
         self.add_view(GputweaksKeyPanelView(self))
         self.add_view(GputweaksKeyTicketView(self))
+        from cogs.packai_keys import PackAiKeyPanelView, PackAiKeyTicketView
+
+        self.add_view(PackAiKeyPanelView(self))
+        self.add_view(PackAiKeyTicketView(self))
         from cogs.custom_pack import CustomPackPanelView, CustomPackTicketView
 
         self.add_view(CustomPackPanelView(self))
