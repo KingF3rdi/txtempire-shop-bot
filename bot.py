@@ -42,6 +42,7 @@ class ShopBot(commands.Bot):
             "cogs.gputweaks_keys",
             "cogs.tweak_vouch_setup",
             "cogs.custom_pack",
+            "cogs.spawner_shop",
             "cogs.tweak_panel",
             "cogs.website_backfill",
             ):
@@ -101,6 +102,10 @@ class ShopBot(commands.Bot):
 
         self.add_view(CustomPackPanelView(self))
         self.add_view(CustomPackTicketView(self))
+        from cogs.spawner_shop import SpawnerPanelView, SpawnerTicketView
+
+        self.add_view(SpawnerPanelView(self))
+        self.add_view(SpawnerTicketView(self))
         from cogs.tweak_panel import TweakShopPanelView
 
         self.add_view(TweakShopPanelView(self))
