@@ -29,6 +29,10 @@ EMBED_ERROR = 0xE53E3E
 EMBED_WARN = 0xD69E2E
 
 DEFAULT_PAYEE = "TxtEmpire"
+
+# Zweite Zahlungsmethode: PayPal, fester Preis pro Pack statt der Shop-Währung
+PAYPAL_EMAIL = os.getenv("PAYPAL_EMAIL", "k1ngf3rdi@gmail.com")
+PAYPAL_PRICE_PER_PACK = float(os.getenv("PAYPAL_PRICE_PER_PACK", "0.19") or "0.19")
 PAYMENT_NOTICE = "Das gesamte Geld geht an TxtEmpire."
 
 # File-Scanner Limits

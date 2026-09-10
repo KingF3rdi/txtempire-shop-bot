@@ -141,6 +141,17 @@ def payment_info_embed(
         value=f"```\n{config.mc_pay_command(float(order['total']))}\n```",
         inline=False,
     )
+    pack_qty = int(order.get("pack_qty") or 0)
+    if pack_qty > 0:
+        paypal_total = round(pack_qty * config.PAYPAL_PRICE_PER_PACK, 2)
+        embed.add_field(
+            name=f"Alternative: PayPal ({config.PAYPAL_PRICE_PER_PACK:.2f} €/Pack)",
+            value=(
+                f"**{paypal_total:.2f} €** an `{config.PAYPAL_EMAIL}` "
+                "(Freunde/Familie), danach ebenfalls **Payment beweisen**."
+            ),
+            inline=False,
+        )
     if float(order.get("volume_discount_amount") or 0) > 0:
         pct = float(order.get("volume_discount_pct") or 0)
         qty = int(order.get("pack_qty") or 0)
