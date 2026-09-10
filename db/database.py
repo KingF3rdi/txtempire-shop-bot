@@ -3293,22 +3293,28 @@ class Database:
         return [dict(r) for r in rows]
 
     async def get_shop_bestsellers(self, guild_id: int) -> list[dict[str, Any]]:
-        """Aggregiert alle abgeschlossenen Shop-Bestellungen nach Produkt-
-        name+Kategorie - für Website-Backfill der echten Bestseller."""
+        """Alle aktiven Discord-nativen Shop-Items (ohne Website-Herkunft,
+        also ohne api_id) mit ihrer echten Verkaufszahl - auch nie verkaufte
+        (Stückzahl 0) - für den vollständigen Website-Produkt-Backfill."""
         rows = await self.fetchall(
             """
-            SELECT oi.name_snapshot AS name,
-                   oi.category_id AS category_id,
-                   SUM(oi.qty) AS total_qty,
-                   MAX(oi.price_snapshot) AS price
-            FROM order_items oi
-            JOIN orders o ON o.id = oi.order_id
-            WHERE o.guild_id = ? AND o.status = 'completed'
-              AND COALESCE(o.order_kind, 'shop') = 'shop'
-            GROUP BY oi.name_snapshot, oi.category_id
+            SELECT i.id AS item_id,
+                   i.name AS name,
+                   i.description AS description,
+                   i.category_id AS category_id,
+                   i.price AS price,
+                   COALESCE((
+                       SELECT SUM(oi.qty)
+                       FROM order_items oi
+                       JOIN orders o ON o.id = oi.order_id
+                       WHERE oi.item_id = i.id AND o.guild_id = ? AND o.status = 'completed'
+                         AND COALESCE(o.order_kind, 'shop') = 'shop'
+                   ), 0) AS total_qty
+            FROM items i
+            WHERE i.guild_id = ? AND i.active = 1 AND i.api_id IS NULL
             ORDER BY total_qty DESC
             """,
-            (guild_id,),
+            (guild_id, guild_id),
         )
         return [dict(r) for r in rows]
 

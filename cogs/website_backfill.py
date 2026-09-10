@@ -1,5 +1,6 @@
 """Einmaliger Nachtrag: bestehende (vor dem Website-Sync entstandene)
-Vouches und Bestseller nachträglich an die Website melden."""
+Vouches sowie den kompletten Discord-nativen Produktkatalog (inkl. nie
+verkaufter Items) nachträglich an die Website melden."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -29,7 +30,7 @@ class WebsiteBackfillCog(commands.Cog):
 
     @app_commands.command(
         name="websitebackfill",
-        description="Bestehende Vouches + Bestseller nachträglich an die Website melden (einmalig)",
+        description="Bestehende Vouches + kompletten Produktkatalog nachträglich an die Website melden (einmalig)",
     )
     @app_commands.default_permissions(administrator=True)
     async def website_backfill(self, interaction: discord.Interaction) -> None:
@@ -86,6 +87,7 @@ class WebsiteBackfillCog(commands.Cog):
                 product_name=str(row["name"]),
                 price=float(row["price"] or 0),
                 sales_count=int(row["total_qty"] or 0),
+                description=str(row.get("description") or ""),
             )
             if ok:
                 products_sent += 1
