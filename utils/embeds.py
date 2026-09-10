@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import discord
 
+import config
 from config import DEFAULT_PAYEE, EMBED_COLOR, EMBED_ERROR, EMBED_SUCCESS, EMBED_WARN, PAYMENT_NOTICE
 
 
@@ -134,6 +135,11 @@ def payment_info_embed(
         name="Bestellung",
         value=order_ref(order),
         inline=True,
+    )
+    embed.add_field(
+        name="Ingame-Zahlungsbefehl (kopieren)",
+        value=f"```\n{config.mc_pay_command(float(order['total']))}\n```",
+        inline=False,
     )
     if float(order.get("volume_discount_amount") or 0) > 0:
         pct = float(order.get("volume_discount_pct") or 0)

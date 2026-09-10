@@ -146,3 +146,12 @@ def mc_link_command(code: str) -> str:
     return f"/msg {MC_LINK_IGN} !link {code.strip().upper()}"
 
 
+def mc_pay_command(amount: float) -> str:
+    """Ingame-Befehl zum Bezahlen (EssentialsX /pay), fertig zum Kopieren."""
+    if float(amount).is_integer():
+        amount_text = str(int(amount))
+    else:
+        amount_text = f"{float(amount):.2f}".rstrip("0").rstrip(".")
+    return f"/pay {MC_LINK_IGN} {amount_text}"
+
+
