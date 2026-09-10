@@ -24,7 +24,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any, Optional
 
 import discord
-import requests
+import httpx
 from discord import app_commands
 from discord.ext import commands
 
@@ -77,21 +77,21 @@ def _api_configured() -> bool:
 def _create_license_key(plan: str, created_by: str, note: str = "") -> tuple[bool, str, str]:
     """Returns (ok, key_or_error, raw_body)."""
     try:
-        r = requests.post(
-            f"{_api_base()}/admin/create",
-            json={
-                "plan": plan,
-                "count": 1,
-                "created_by": created_by,
-                "note": note,
-            },
-            headers={
-                "X-PackAI-Secret": _api_secret(),
-                "Content-Type": "application/json",
-            },
-            timeout=20,
-        )
-    except requests.RequestException as e:
+        with httpx.Client(timeout=20.0) as client:
+            r = client.post(
+                f"{_api_base()}/admin/create",
+                json={
+                    "plan": plan,
+                    "count": 1,
+                    "created_by": created_by,
+                    "note": note,
+                },
+                headers={
+                    "X-PackAI-Secret": _api_secret(),
+                    "Content-Type": "application/json",
+                },
+            )
+    except httpx.HTTPError as e:
         return False, str(e), ""
     body = r.text[:800]
     if r.status_code != 200:
@@ -104,6 +104,12 @@ def _create_license_key(plan: str, created_by: str, note: str = "") -> tuple[boo
     if not keys:
         return False, "API lieferte keinen Key", body
     return True, str(keys[0]), body
+
+
+def _health_check() -> tuple[int, str]:
+    with httpx.Client(timeout=8.0) as client:
+        r = client.get(f"{_api_base()}/health")
+    return r.status_code, r.text[:400]
 
 
 def _paypal_block(price: float) -> str:
@@ -865,28 +871,23 @@ class PackAiKeysCog(commands.Cog):
     async def status(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
-            r = await asyncio.to_thread(
-                lambda: __import__("requests").get(f"{_api_base()}/health", timeout=8)
-            )
-            body = r.text[:400]
-            code = r.status_code
+            code, body = await asyncio.to_thread(_health_check)
         except Exception as e:
             await interaction.followup.send(
                 embed=error_embed("Offline", f"`{_api_base()}`\n{e}"),
                 ephemeral=True,
             )
             return
-        await interaction.followup.send(
-            embed=success_embed(
+        if code == 200:
+            embed = success_embed(
                 "License-API",
                 f"URL: `{_api_base()}`\nSecret: "
                 + ("✅ gesetzt" if _api_configured() else "⚠️ fehlt")
                 + f"\nStatus: `{code}`\n```{body}```",
             )
-            if code == 200
-            else error_embed("API Fehler", f"`{code}`\n```{body}```"),
-            ephemeral=True,
-        )
+        else:
+            embed = error_embed("API Fehler", f"`{code}`\n```{body}```")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: "ShopBot") -> None:

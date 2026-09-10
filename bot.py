@@ -47,7 +47,13 @@ class ShopBot(commands.Bot):
             "cogs.tweak_panel",
             "cogs.website_backfill",
             ):
-            await self.load_extension(ext)
+            try:
+                await self.load_extension(ext)
+            except Exception as e:
+                print(f"WARNUNG: Extension {ext} nicht geladen: {e!r}")
+                import traceback
+
+                traceback.print_exc()
 
         # Persistent views
         from utils.panels import register_slot_panel_views, register_category_panel_views
