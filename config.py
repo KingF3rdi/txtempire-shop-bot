@@ -33,6 +33,12 @@ DEFAULT_PAYEE = "TxtEmpire"
 # Zweite Zahlungsmethode: PayPal, fester Preis pro Pack statt der Shop-Währung
 PAYPAL_EMAIL = os.getenv("PAYPAL_EMAIL", "k1ngf3rdi@gmail.com")
 PAYPAL_PRICE_PER_PACK = float(os.getenv("PAYPAL_PRICE_PER_PACK", "0.19") or "0.19")
+
+
+def paypal_price_text(pack_qty: int = 1) -> str:
+    """IRL-Preis-Hinweis für PayPal, z.B. '(≈ 0.57 € PayPal)' bei 3 Packs."""
+    total = pack_qty * PAYPAL_PRICE_PER_PACK
+    return f"(≈ {total:.2f} € PayPal)"
 PAYMENT_NOTICE = "Das gesamte Geld geht an TxtEmpire."
 
 # File-Scanner Limits

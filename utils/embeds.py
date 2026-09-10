@@ -31,13 +31,16 @@ def order_ref(order: dict) -> str:
     return f"#{n}"
 
 
-def format_price(amount: float) -> str:
+def format_price(amount: float, pack_qty: int = 0) -> str:
     from utils.price import format_compact_number
 
     a = float(amount)
-    if abs(a) >= 1000:
-        return f"{format_compact_number(a)} €"
-    return f"{a:.2f} €"
+    text = (
+        f"{format_compact_number(a)} €" if abs(a) >= 1000 else f"{a:.2f} €"
+    )
+    if pack_qty > 0:
+        text += f" {config.paypal_price_text(pack_qty)}"
+    return text
 
 
 def cart_embed(items: list[dict], total: float) -> discord.Embed:
@@ -50,9 +53,10 @@ def cart_embed(items: list[dict], total: float) -> discord.Embed:
     pack_qty = 0
     for row in items:
         sub = float(row["price"]) * int(row["qty"])
-        pack_qty += int(row["qty"])
+        qty = int(row["qty"])
+        pack_qty += qty
         lines.append(
-            f"- **{row['name']}** x {row['qty']} - {format_price(sub)}"
+            f"- **{row['name']}** x {qty} - {format_price(sub, pack_qty=qty)}"
         )
     embed.description = "\n".join(lines)
     from utils.volume_discount import apply_volume_discount
@@ -69,10 +73,16 @@ def cart_embed(items: list[dict], total: float) -> discord.Embed:
             inline=False,
         )
         embed.add_field(
-            name="Gesamtpreis", value=format_price(new_total), inline=False
+            name="Gesamtpreis",
+            value=format_price(new_total, pack_qty=pack_qty),
+            inline=False,
         )
     else:
-        embed.add_field(name="Gesamtpreis", value=format_price(total), inline=False)
+        embed.add_field(
+            name="Gesamtpreis",
+            value=format_price(total, pack_qty=pack_qty),
+            inline=False,
+        )
         if pack_qty < 5:
             embed.add_field(
                 name="Tipp",
@@ -89,7 +99,7 @@ def _order_item_lines(items: list[dict]) -> list[str]:
         name = row.get("name_snapshot") or row.get("name") or "Item"
         price = float(row.get("price_snapshot", row.get("price", 0)))
         qty = int(row.get("qty") or 1)
-        lines.append(f"- **{name}** x {qty} - {format_price(price * qty)}")
+        lines.append(f"- **{name}** x {qty} - {format_price(price * qty, pack_qty=qty)}")
     return lines
 
 

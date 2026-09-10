@@ -728,6 +728,49 @@ class TicketOrderView(discord.ui.View):
         await action_show_staff_cart(self.bot, interaction)
 
     @discord.ui.button(
+        label="Mit PayPal zahlen",
+        style=discord.ButtonStyle.secondary,
+        custom_id="ticket:paypal",
+        emoji="💳",
+        row=0,
+    )
+    async def paypal(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        import config
+
+        order = await get_order_for_interaction(self.bot, interaction)
+        if not order:
+            await interaction.response.send_message(
+                embed=error_embed("Keine Bestellung", "Kein Order für dieses Ticket."),
+                ephemeral=True,
+            )
+            return
+        pack_qty = int(order.get("pack_qty") or 0) or sum(
+            int(i.get("qty") or 1)
+            for i in await self.bot.db.get_order_items(int(order["id"]))
+        )
+        if pack_qty <= 0:
+            await interaction.response.send_message(
+                embed=warn_embed(
+                    "Keine PayPal-Zahlung möglich",
+                    "PayPal gilt nur für Pack-Käufe, nicht für Credits/Premium.",
+                ),
+                ephemeral=True,
+            )
+            return
+        total = round(pack_qty * config.PAYPAL_PRICE_PER_PACK, 2)
+        await interaction.response.send_message(
+            embed=success_embed(
+                "💳 Mit PayPal zahlen",
+                f"Sende **{total:.2f} €** per PayPal (Freunde/Familie) an "
+                f"`{config.PAYPAL_EMAIL}`.\n\nDanach **Payment beweisen** (IGN + Bild) "
+                "wie gewohnt — Staff bestätigt manuell.",
+            ),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
         label="Payment beweisen",
         style=discord.ButtonStyle.primary,
         custom_id="ticket:proof",

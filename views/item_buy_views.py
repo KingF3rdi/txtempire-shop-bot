@@ -28,7 +28,7 @@ def build_item_buy_embed(
         else bool(int(item.get("is_new") or 0))
     )
     desc_parts = [
-        f"**{item['name']}** — **{format_price(price)}**",
+        f"**{item['name']}** — **{format_price(price, pack_qty=1)}**",
     ]
     if is_new:
         desc_parts.append("🆕 **Neu im Shop**")
@@ -147,7 +147,7 @@ async def handle_item_direct_buy(
     await interaction.followup.send(
         embed=success_embed(
             "Ticket erstellt",
-            f"**{row['name']}** für **{format_price(float(row['price']))}**\n"
+            f"**{row['name']}** für **{format_price(float(row['price']), pack_qty=1)}**\n"
             f"Dein Ticket: {channel.mention}\n\n**{PAYMENT_NOTICE}**",
         ),
         ephemeral=True,
