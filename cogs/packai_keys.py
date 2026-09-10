@@ -670,16 +670,41 @@ class PackAiKeyTicketView(discord.ui.View):
 # ── Cog ──────────────────────────────────────────────────────────────────
 
 class PackAiKeysCog(commands.Cog):
+    """Slash: /packai panel|setup|gen|plans|buy"""
+
+    packai = app_commands.Group(
+        name="packai",
+        description="Pack AI Lizenzkeys & Kauf-Panel",
+    )
+
     def __init__(self, bot: "ShopBot") -> None:
         self.bot = bot
 
-    async def cog_load(self) -> None:
-        await _ensure_tables(self.bot)
+    @packai.command(name="plans", description="Zeigt Pack-AI Pläne, Tokens und PayPal")
+    async def plans(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        settings = await _get_settings(self.bot, interaction.guild.id)
+        lines = []
+        for tier in TIER_ORDER:
+            price = _price_for(settings, tier)
+            price_txt = format_price(price) if price > 0 else "Anfrage"
+            lines.append(f"**{TIER_LABELS[tier]}** — {price_txt}")
+        email = getattr(config, "PAYPAL_EMAIL", "") or "—"
+        await interaction.response.send_message(
+            embed=base_embed(
+                "Pack AI Pläne",
+                "\n".join(lines)
+                + f"\n\n**PayPal:** `{email}`\n"
+                "_Friends & Family · danach Ticket / Staff bestätigt Key_",
+            ),
+            ephemeral=True,
+        )
 
-    @app_commands.command(
-        name="packaisetup",
-        description="Preise für Pack-AI-Keys setzen (Staff)",
-    )
+    @packai.command(name="buy", description="Pack AI kaufen (öffnet Plan-Auswahl)")
+    async def buy(self, interaction: discord.Interaction) -> None:
+        await handle_buy_packai(self.bot, interaction)
+
+    @packai.command(name="setup", description="Preise für Pack-AI-Keys setzen (Staff)")
     @app_commands.describe(
         price_14d="Preis 14 Tage / 50 Tokens",
         price_30d="Preis 30 Tage / 200 Tokens",
@@ -688,7 +713,7 @@ class PackAiKeysCog(commands.Cog):
         clear_support_role="Support-Rolle entfernen",
     )
     @app_commands.default_permissions(manage_guild=True)
-    async def packaisetup(
+    async def setup_cmd(
         self,
         interaction: discord.Interaction,
         price_14d: Optional[float] = None,
@@ -698,6 +723,11 @@ class PackAiKeysCog(commands.Cog):
         clear_support_role: bool = False,
     ) -> None:
         assert interaction.guild is not None
+        if not await _is_packai_staff(self.bot, interaction):
+            await interaction.response.send_message(
+                embed=error_embed("Nur Staff"), ephemeral=True
+            )
+            return
         fields: dict[str, Any] = {}
         if price_14d is not None:
             fields["price_14d"] = price_14d
@@ -726,36 +756,41 @@ class PackAiKeysCog(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(
-        name="packaipanel",
-        description="Kauf-Panel für Pack AI posten (Staff)",
-    )
+    @packai.command(name="panel", description="Kauf-Panel für Pack AI posten (Staff)")
     @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
     @app_commands.default_permissions(manage_guild=True)
-    async def packaipanel(
+    async def panel(
         self,
         interaction: discord.Interaction,
         channel: discord.TextChannel | None = None,
     ) -> None:
         assert interaction.guild is not None
-        target = channel or interaction.channel
-        if not isinstance(target, discord.TextChannel):
+        if not await _is_packai_staff(self.bot, interaction):
             await interaction.response.send_message(
-                embed=error_embed("Ungültiger Channel"), ephemeral=True
+                embed=error_embed("Nur Staff"), ephemeral=True
             )
             return
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
+            await interaction.response.send_message(
+                embed=error_embed("Kein Channel"), ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
         settings = await _get_settings(self.bot, interaction.guild.id)
-        await target.send(
+        msg = await target.send(
             embed=_panel_embed(settings), view=PackAiKeyPanelView(self.bot)
         )
-        await interaction.response.send_message(
-            embed=success_embed("Panel gepostet", target.mention), ephemeral=True
+        await interaction.followup.send(
+            embed=success_embed(
+                "Pack-AI-Panel gepostet", f"In {target.mention}: {msg.jump_url}"
+            ),
+            ephemeral=True,
         )
 
-    @app_commands.command(
-        name="packaigen",
-        description="Pack-AI-Key sofort erzeugen (Staff, ohne Ticket)",
-    )
+    @packai.command(name="gen", description="Pack-AI-Key sofort erzeugen (Staff)")
     @app_commands.describe(
         plan="14d / 30d / lifetime",
         user="Optional: Key per DM senden",
@@ -769,7 +804,7 @@ class PackAiKeysCog(commands.Cog):
         ]
     )
     @app_commands.default_permissions(manage_guild=True)
-    async def packaigen(
+    async def gen(
         self,
         interaction: discord.Interaction,
         plan: app_commands.Choice[str],
@@ -783,7 +818,14 @@ class PackAiKeysCog(commands.Cog):
             return
         if not _api_configured():
             await interaction.response.send_message(
-                embed=error_embed("PACKAI_LICENSE_API_SECRET fehlt"), ephemeral=True
+                embed=error_embed(
+                    "API fehlt",
+                    "In `.env` setzen:\n"
+                    "`PACKAI_LICENSE_API_URL`\n"
+                    "`PACKAI_LICENSE_API_SECRET`\n"
+                    "Dann License-Server starten & Bot neu starten.",
+                ),
+                ephemeral=True,
             )
             return
         await interaction.response.defer(ephemeral=True)
@@ -819,6 +861,37 @@ class PackAiKeysCog(commands.Cog):
                     embed=warn_embed("DM fehlgeschlagen", user.mention), ephemeral=True
                 )
 
+    @packai.command(name="status", description="Prüft Pack-AI License-API")
+    async def status(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            r = await asyncio.to_thread(
+                lambda: __import__("requests").get(f"{_api_base()}/health", timeout=8)
+            )
+            body = r.text[:400]
+            code = r.status_code
+        except Exception as e:
+            await interaction.followup.send(
+                embed=error_embed("Offline", f"`{_api_base()}`\n{e}"),
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            embed=success_embed(
+                "License-API",
+                f"URL: `{_api_base()}`\nSecret: "
+                + ("✅ gesetzt" if _api_configured() else "⚠️ fehlt")
+                + f"\nStatus: `{code}`\n```{body}```",
+            )
+            if code == 200
+            else error_embed("API Fehler", f"`{code}`\n```{body}```"),
+            ephemeral=True,
+        )
+
 
 async def setup(bot: "ShopBot") -> None:
+    await _ensure_tables(bot)
     await bot.add_cog(PackAiKeysCog(bot))
+    print(
+        "[PackAI] Cog geladen — Slash: /packai plans|buy|panel|setup|gen|status"
+    )
