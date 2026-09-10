@@ -890,7 +890,8 @@ class PackAiKeysCog(commands.Cog):
             embed = error_embed("API Fehler", f"`{code}`\n```{body}```")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # Zusätzlich Gruppe /packai … (wie /gtkey …)
+    # Gruppe /packai … — Callbacks der Top-Level-Commands nutzen
+    # (self.packaigen ist ein Command-Objekt, nicht direkt aufrufbar)
     packai = app_commands.Group(
         name="packai",
         description="Pack AI Lizenzkeys & Kauf-Panel",
@@ -898,11 +899,11 @@ class PackAiKeysCog(commands.Cog):
 
     @packai.command(name="plans", description="Pläne / Tokens / PayPal")
     async def packai_plans(self, interaction: discord.Interaction) -> None:
-        await self.packaiplans(interaction)
+        await self.packaiplans.callback(self, interaction)  # type: ignore[misc]
 
     @packai.command(name="buy", description="Pack AI kaufen")
     async def packai_buy(self, interaction: discord.Interaction) -> None:
-        await self.packaibuy(interaction)
+        await self.packaibuy.callback(self, interaction)  # type: ignore[misc]
 
     @packai.command(name="panel", description="Kauf-Panel posten (Staff)")
     @app_commands.describe(channel="Ziel-Channel")
@@ -912,7 +913,7 @@ class PackAiKeysCog(commands.Cog):
         interaction: discord.Interaction,
         channel: discord.TextChannel | None = None,
     ) -> None:
-        await self.packaipanel(interaction, channel)
+        await self.packaipanel.callback(self, interaction, channel)  # type: ignore[misc]
 
     @packai.command(name="setup", description="Preise setzen (Staff)")
     @app_commands.describe(
@@ -928,11 +929,14 @@ class PackAiKeysCog(commands.Cog):
         price_30d: Optional[float] = None,
         price_lifetime: Optional[float] = None,
     ) -> None:
-        await self.packaisetup(
+        await self.packaisetup.callback(  # type: ignore[misc]
+            self,
             interaction,
-            price_14d=price_14d,
-            price_30d=price_30d,
-            price_lifetime=price_lifetime,
+            price_14d,
+            price_30d,
+            price_lifetime,
+            None,
+            False,
         )
 
     @packai.command(name="gen", description="Key erzeugen (Staff)")
@@ -952,11 +956,11 @@ class PackAiKeysCog(commands.Cog):
         user: discord.User | None = None,
         note: str = "",
     ) -> None:
-        await self.packaigen(interaction, plan, user, note)
+        await self.packaigen.callback(self, interaction, plan, user, note)  # type: ignore[misc]
 
     @packai.command(name="status", description="License-API Status")
     async def packai_status(self, interaction: discord.Interaction) -> None:
-        await self.packaistatus(interaction)
+        await self.packaistatus.callback(self, interaction)  # type: ignore[misc]
 
 
 async def setup(bot: "ShopBot") -> None:
