@@ -148,15 +148,21 @@ MC_API_KEY = os.getenv("MC_API_KEY", "").strip()
 MC_LINK_CODE_TTL_MINUTES = int(os.getenv("MC_LINK_CODE_TTL_MINUTES", "10") or "10")
 MC_LINK_IGN = (os.getenv("MC_LINK_IGN", "TxTEmpire") or "TxTEmpire").strip()
 
-# Pack AI — Texturepack Studio (License-API auf demselben Port wie MC-API)
-# Bot: http://127.0.0.1:SERVER_PORT  ·  PackAI.exe: http://ÖFFENTLICHE-IP:SERVER_PORT
-PACKAI_LICENSE_API_URL = (
-    os.getenv("PACKAI_LICENSE_API_URL")
-    or os.getenv("LICENSE_API_URL")
-    or f"http://127.0.0.1:{MC_API_PORT}"
-).strip().rstrip("/")
-PACKAI_LICENSE_API_SECRET = (
-    os.getenv("PACKAI_LICENSE_API_SECRET") or os.getenv("LICENSE_API_SECRET") or ""
+# Pack AI — Texturepack Studio (offline HMAC-Keys + Discord-Webhook)
+# PACKAI_LICENSE_SECRET MUSS mit kLicenseSecret in PackAI.exe übereinstimmen.
+PACKAI_LICENSE_SECRET = (
+    os.getenv("PACKAI_LICENSE_SECRET")
+    or os.getenv("PACKAI_LICENSE_API_SECRET")
+    or os.getenv("LICENSE_API_SECRET")
+    or ""
+).strip()
+# Rückwärtskompatibel (nicht mehr für API-Server genutzt)
+PACKAI_LICENSE_API_SECRET = PACKAI_LICENSE_SECRET
+PACKAI_LICENSE_API_URL = (os.getenv("PACKAI_LICENSE_API_URL") or "").strip()
+PACKAI_WEBHOOK_URL = (
+    os.getenv("PACKAI_WEBHOOK_URL")
+    or os.getenv("DISCORD_WEBHOOK_URL")
+    or ""
 ).strip()
 PACKAI_PRICE_14D = float(os.getenv("PACKAI_PRICE_14D", "4.99") or "4.99")
 PACKAI_PRICE_30D = float(os.getenv("PACKAI_PRICE_30D", "9.99") or "9.99")
