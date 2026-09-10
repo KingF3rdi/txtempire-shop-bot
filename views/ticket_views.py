@@ -402,15 +402,22 @@ async def action_confirm_order(
             "Käufer nicht auf dem Server — Rollen konnten nicht vergeben werden."
         )
 
-    buyer: discord.abc.User = member or interaction.user
-    if member is None:
+    buyer: discord.abc.User | None = member
+    if buyer is None:
         try:
             buyer = await bot.fetch_user(int(order["user_id"]))
         except discord.HTTPException:
-            buyer = interaction.user
+            buyer = None
 
     order = await bot.db.get_order(int(order["id"])) or order
-    success = purchase_success_embed(order, order_items, buyer, role_result)
+    if buyer is not None:
+        success = purchase_success_embed(order, order_items, buyer, role_result)
+    else:
+        success = success_embed(
+            "Erfolgreicher Kauf",
+            f"Bestellung **{order_ref(order)}** wurde bestätigt "
+            "(Käufer-Profil konnte nicht geladen werden).",
+        )
 
     extra_parts: list[str] = []
     if credits_granted is not None:
@@ -482,7 +489,7 @@ async def action_confirm_order(
 
     await interaction.followup.send(embed=success)
 
-    if not non_product:
+    if not non_product and buyer is not None:
         # Wenn Pack-DM schon Sterne geschickt hat, keine zweite Vouch-DM
         had_pack_dm = bool(
             delivery_info.get("dm_sent") or delivery_info.get("files_sent")
