@@ -1,6 +1,21 @@
-"""Optionale Anbindung an die TxTEmpire Website-Shop-API."""
+"""Optionale Anbindung an die TxTEmpire Website-Shop-API.
+
+Der Bot-Host (bot-hosting.net) blockiert ausgehende Verbindungen zu
+*.workers.dev (bestätigt per /nettest), Discord selbst ist aber erreichbar.
+Deshalb laufen fast alle Bot->Website-Ereignisse (Vouches, Verkäufe,
+Umsatz, Produkte, Login-/Zahlungs-Codes) als Discord-Nachricht
+"WSAUTH|<json>" über einen Webhook-Relay-Channel statt per direktem HTTP-
+Call — der Worker liest den Channel per Cron über die Discord-Bot-API aus
+(siehe backend/index.js, processRelayMessages/handleRelayEvent).
+
+Nur fetch_catalog/fetch_pending_vouches/submit_vouch brauchen weiterhin
+eine synchrone Antwort und gehen (aktuell noch nicht funktionsfähig) über
+direktes HTTP an SHOP_API_URL.
+"""
 
 from __future__ import annotations
+
+import json
 
 import httpx
 
@@ -11,7 +26,25 @@ class ShopApiClient:
     def __init__(self) -> None:
         self.api_url = (config.SHOP_API_URL or "").rstrip("/")
         self.api_key = config.BOT_API_KEY or ""
+        self.relay_webhook_url = config.SHOP_RELAY_WEBHOOK_URL or ""
         self.enabled = bool(self.api_url and self.api_key)
+
+    async def _post_relay_event(self, event_type: str, **fields) -> bool:
+        """Postet ein Ereignis in den Discord-Relay-Webhook statt direkt an
+        die Website-API. Fire-and-forget: kein Rückgabewert vom Worker,
+        nur ob der Post rausging."""
+        if not self.relay_webhook_url:
+            return False
+        try:
+            content = "WSAUTH|" + json.dumps({"type": event_type, **fields})
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    self.relay_webhook_url, json={"content": content}
+                )
+                return resp.status_code < 400
+        except Exception as exc:
+            print(f"[Shop API] Relay-Event ({event_type}) fehlgeschlagen: {exc}")
+            return False
 
     async def fetch_catalog(self) -> dict | None:
         if not self.enabled:
@@ -42,29 +75,15 @@ class ShopApiClient:
         rating: int | None = None,
         source: str = "ticket",
     ) -> bool:
-        if not self.enabled:
-            return False
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{self.api_url}/api/bot/vouches/sync",
-                    headers={
-                        "X-Bot-Api-Key": self.api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "giver_name": giver_name,
-                        "message": message,
-                        "is_positive": is_positive,
-                        "external_id": external_id,
-                        "rating": rating,
-                        "source": source,
-                    },
-                )
-                return resp.status_code < 400
-        except Exception as exc:
-            print(f"[Shop API] Vouch sync fehlgeschlagen: {exc}")
-            return False
+        return await self._post_relay_event(
+            "vouch",
+            giver_name=giver_name,
+            message=message,
+            is_positive=is_positive,
+            external_id=external_id,
+            rating=rating,
+            source=source,
+        )
 
     async def fetch_pending_vouches(self, discord_id: str) -> list[dict] | None:
         if not self.enabled:
@@ -122,42 +141,14 @@ class ShopApiClient:
         """Zählt einen abgeschlossenen Discord-Shop-Kauf (+1 verkauft) und
         rechnet den Betrag zum Umsatz dazu (Discord-Shop-Währung 1:1 als
         Euro übernommen, auf ausdrücklichen Wunsch trotz fehlendem Kurs)."""
-        if not self.enabled:
-            return False
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{self.api_url}/api/bot/sales/sync",
-                    headers={
-                        "X-Bot-Api-Key": self.api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json={"amount": amount},
-                )
-                return resp.status_code < 400
-        except Exception as exc:
-            print(f"[Shop API] Sale sync fehlgeschlagen: {exc}")
-            return False
+        return await self._post_relay_event("sale", amount=amount)
 
     async def sync_revenue(self, amount: float) -> bool:
         """Zählt zusätzlichen Umsatz ohne Pack-Zählung dazu (z.B. Lizenzkey-
         Verkäufe - Discord-Shop-Währung 1:1 als Euro übernommen)."""
-        if not self.enabled or amount <= 0:
+        if amount <= 0:
             return False
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{self.api_url}/api/bot/revenue/sync",
-                    headers={
-                        "X-Bot-Api-Key": self.api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json={"amount": amount},
-                )
-                return resp.status_code < 400
-        except Exception as exc:
-            print(f"[Shop API] Revenue sync fehlgeschlagen: {exc}")
-            return False
+        return await self._post_relay_event("revenue", amount=amount)
 
     async def upsert_product(
         self,
@@ -167,33 +158,17 @@ class ShopApiClient:
         price: float = 0,
         sales_count: int = 0,
         description: str = "",
-    ) -> dict | None:
+    ) -> bool:
         """Legt ein Discord-natives Produkt (Name+Kategorie als Identität)
         auf der Website an oder aktualisiert seine Verkaufszahl."""
-        if not self.enabled:
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{self.api_url}/api/bot/products/upsert",
-                    headers={
-                        "X-Bot-Api-Key": self.api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "category_name": category_name,
-                        "product_name": product_name,
-                        "price": price,
-                        "sales_count": sales_count,
-                        "description": description,
-                    },
-                )
-                if resp.status_code >= 400:
-                    return None
-                return resp.json()
-        except Exception as exc:
-            print(f"[Shop API] Product upsert fehlgeschlagen: {exc}")
-            return None
+        return await self._post_relay_event(
+            "product_upsert",
+            category_name=category_name,
+            product_name=product_name,
+            price=price,
+            sales_count=sales_count,
+            description=description,
+        )
 
     async def sync_purchase(
         self,
@@ -204,52 +179,17 @@ class ShopApiClient:
     ) -> bool:
         """Schaltet einen Website-Download frei, nachdem der Bot einen Kauf
         (Rollen-/Pack-Lieferung) abgeschlossen hat."""
-        if not self.enabled:
-            return False
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                payload: dict = {"discord_id": discord_id, "product_id": product_id}
-                if download_url:
-                    payload["download_url"] = download_url
-                resp = await client.post(
-                    f"{self.api_url}/api/bot/purchases/sync",
-                    headers={
-                        "X-Bot-Api-Key": self.api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                return resp.status_code < 400
-        except Exception as exc:
-            print(f"[Shop API] Purchase sync fehlgeschlagen: {exc}")
-            return False
-
-    async def _post_relay_event(self, event_type: str, **fields) -> bool:
-        """Postet ein Ereignis in den Discord-Relay-Webhook statt direkt an
-        die Website-API — der Bot-Host kann *.workers.dev nicht erreichen,
-        aber Discord schon. Der Worker liest den Channel per Cron aus.
-        Fire-and-forget: kein Rückgabewert vom Worker, nur ob der Post
-        rausging."""
-        if not config.SHOP_RELAY_WEBHOOK_URL:
-            return False
-        try:
-            import json as _json
-
-            content = "WSAUTH|" + _json.dumps({"type": event_type, **fields})
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    config.SHOP_RELAY_WEBHOOK_URL, json={"content": content}
-                )
-                return resp.status_code < 400
-        except Exception as exc:
-            print(f"[Shop API] Relay-Event ({event_type}) fehlgeschlagen: {exc}")
-            return False
+        return await self._post_relay_event(
+            "purchase",
+            discord_id=discord_id,
+            product_id=product_id,
+            download_url=download_url,
+        )
 
     async def confirm_ingame_login(self, code: str) -> bool:
         """Bestätigt einen Website-Ingame-Login-Code (Nutzer hat ihn per PN
         an den Bot ingame geschickt, die Mod hat den Whisper per Discord-
-        Webhook gemeldet). Läuft über den Relay-Webhook, da der Bot-Host
-        die Website-API nicht direkt erreichen kann."""
+        Webhook gemeldet)."""
         return await self._post_relay_event("ingame_login", code=code)
 
     async def confirm_order_by_amount(
@@ -258,9 +198,8 @@ class ShopApiClient:
         amount: float,
     ) -> dict | None:
         """Meldet eine Ingame-Zahlung, die zu keinem Discord-Ticket passt,
-        als möglichen Website-Bestellungs-Treffer — über den Relay-Webhook
-        (fire-and-forget, kein sofortiges Match-Ergebnis mehr, da der
-        Bot-Host die Website-API nicht direkt erreichen kann)."""
+        als möglichen Website-Bestellungs-Treffer (fire-and-forget, kein
+        sofortiges Match-Ergebnis mehr)."""
         ok = await self._post_relay_event(
             "payment_confirm", ign=minecraft_username, amount=amount
         )

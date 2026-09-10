@@ -38,9 +38,9 @@ class WebsiteBackfillCog(commands.Cog):
                 embed=error_embed("Nur Staff"), ephemeral=True
             )
             return
-        if not shop_api.enabled:
+        if not shop_api.relay_webhook_url:
             await interaction.response.send_message(
-                embed=error_embed("Website-API deaktiviert", "SHOP_API_URL/BOT_API_KEY prüfen."),
+                embed=error_embed("Relay deaktiviert", "SHOP_RELAY_WEBHOOK_URL prüfen."),
                 ephemeral=True,
             )
             return
@@ -73,8 +73,7 @@ class WebsiteBackfillCog(commands.Cog):
             else:
                 vouches_failed += 1
 
-        products_created = 0
-        products_updated = 0
+        products_sent = 0
         products_failed = 0
         category_cache: dict[int | None, str] = {}
         for row in await self.bot.db.get_shop_bestsellers(guild_id):
@@ -82,26 +81,23 @@ class WebsiteBackfillCog(commands.Cog):
             if category_id not in category_cache:
                 cat = await self.bot.db.get_category(int(category_id)) if category_id else None
                 category_cache[category_id] = str(cat["name"]) if cat else "Sonstiges"
-            result = await shop_api.upsert_product(
+            ok = await shop_api.upsert_product(
                 category_name=category_cache[category_id],
                 product_name=str(row["name"]),
                 price=float(row["price"] or 0),
                 sales_count=int(row["total_qty"] or 0),
             )
-            if result is None:
-                products_failed += 1
-            elif result.get("created"):
-                products_created += 1
+            if ok:
+                products_sent += 1
             else:
-                products_updated += 1
+                products_failed += 1
 
         await interaction.followup.send(
             embed=success_embed(
                 "Website-Backfill abgeschlossen",
-                f"**Vouches:** {vouches_synced} übernommen"
+                f"**Vouches:** {vouches_synced} gemeldet (Relay verarbeitet asynchron per Cron)"
                 + (f", {vouches_failed} fehlgeschlagen" if vouches_failed else "")
-                + f"\n**Produkte:** {products_created} neu angelegt, "
-                f"{products_updated} aktualisiert"
+                + f"\n**Produkte:** {products_sent} gemeldet (Relay verarbeitet asynchron per Cron)"
                 + (f", {products_failed} fehlgeschlagen" if products_failed else ""),
             ),
         )

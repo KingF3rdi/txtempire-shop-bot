@@ -15,7 +15,7 @@ async def sync_website_purchases(
       Umsatz dazu (Discord-Shop-Währung 1:1 als Euro übernommen).
     - Schaltet zusätzlich für jedes Item mit Website-Herkunft (api_id) den
       zugehörigen Download auf der Website frei."""
-    if not shop_api.enabled:
+    if not shop_api.relay_webhook_url:
         return
     await shop_api.sync_sale(total)
     seen: set[int] = set()

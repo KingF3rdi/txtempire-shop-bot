@@ -216,7 +216,7 @@ async def _mark_confirmed(bot: "ShopBot", key_id: int, license_key: str, staff_i
         (license_key, staff_id, key_id),
     )
     await bot.db.db.commit()
-    if shop_api.enabled:
+    if shop_api.relay_webhook_url:
         row = await bot.db.fetchone("SELECT price FROM mt_keys WHERE id = ?", (key_id,))
         if row and float(row["price"] or 0) > 0:
             asyncio.create_task(shop_api.sync_revenue(float(row["price"])))

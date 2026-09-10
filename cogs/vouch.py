@@ -138,7 +138,7 @@ async def _submit_local_vouch(
         bot, channel, int(order["guild_id"])
     )
 
-    if shop_api.enabled:
+    if shop_api.relay_webhook_url:
         stars = _stars(rating)
         await shop_api.sync_vouch(
             giver_name=str(interaction.user),

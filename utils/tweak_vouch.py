@@ -154,7 +154,7 @@ class TweakVouchMessageModal(discord.ui.Modal, title="Tweaks Vouch"):
             rating=self.rating,
             message=text,
         )
-        if shop_api.enabled:
+        if shop_api.relay_webhook_url:
             # external_id ist website-weit UNIQUE über alle Vouch-Quellen;
             # negativ gespiegelt, um Kollisionen mit orders.id (Ticket-Vouches) zu vermeiden.
             await shop_api.sync_vouch(
