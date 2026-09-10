@@ -133,6 +133,13 @@ class ShopBot(commands.Bot):
                 self.tree.copy_global_to(guild=guild)
                 await self.tree.sync(guild=guild)
                 print(f"Slash-Commands synced für Guild {config.GUILD_ID}")
+                packai_cmds = [
+                    c.name
+                    for c in self.tree.get_commands(guild=guild)
+                    if "packai" in c.name.lower()
+                    or getattr(c, "name", "") == "packai"
+                ]
+                print(f"[PackAI] Guild-Commands: {packai_cmds or '(noch nicht sichtbar — ggf. Cache)'}")
                 # Global sync damit /vouch auch per DM funktioniert
                 await self.tree.sync()
                 print("Slash-Commands global synced (DM: /vouch)")

@@ -673,44 +673,16 @@ class PackAiKeyTicketView(discord.ui.View):
         )
 
 
-# ── Cog ──────────────────────────────────────────────────────────────────
+# ── Slash-Commands (Top-Level wie /gtkeypanel — erscheinen zuverlässig) ──
 
 class PackAiKeysCog(commands.Cog):
-    """Slash: /packai panel|setup|gen|plans|buy"""
-
-    packai = app_commands.Group(
-        name="packai",
-        description="Pack AI Lizenzkeys & Kauf-Panel",
-    )
-
     def __init__(self, bot: "ShopBot") -> None:
         self.bot = bot
 
-    @packai.command(name="plans", description="Zeigt Pack-AI Pläne, Tokens und PayPal")
-    async def plans(self, interaction: discord.Interaction) -> None:
-        assert interaction.guild is not None
-        settings = await _get_settings(self.bot, interaction.guild.id)
-        lines = []
-        for tier in TIER_ORDER:
-            price = _price_for(settings, tier)
-            price_txt = format_price(price) if price > 0 else "Anfrage"
-            lines.append(f"**{TIER_LABELS[tier]}** — {price_txt}")
-        email = getattr(config, "PAYPAL_EMAIL", "") or "—"
-        await interaction.response.send_message(
-            embed=base_embed(
-                "Pack AI Pläne",
-                "\n".join(lines)
-                + f"\n\n**PayPal:** `{email}`\n"
-                "_Friends & Family · danach Ticket / Staff bestätigt Key_",
-            ),
-            ephemeral=True,
-        )
-
-    @packai.command(name="buy", description="Pack AI kaufen (öffnet Plan-Auswahl)")
-    async def buy(self, interaction: discord.Interaction) -> None:
-        await handle_buy_packai(self.bot, interaction)
-
-    @packai.command(name="setup", description="Preise für Pack-AI-Keys setzen (Staff)")
+    @app_commands.command(
+        name="packaisetup",
+        description="Preise für Pack-AI-Keys setzen (Staff)",
+    )
     @app_commands.describe(
         price_14d="Preis 14 Tage / 50 Tokens",
         price_30d="Preis 30 Tage / 200 Tokens",
@@ -719,7 +691,7 @@ class PackAiKeysCog(commands.Cog):
         clear_support_role="Support-Rolle entfernen",
     )
     @app_commands.default_permissions(manage_guild=True)
-    async def setup_cmd(
+    async def packaisetup(
         self,
         interaction: discord.Interaction,
         price_14d: Optional[float] = None,
@@ -729,11 +701,6 @@ class PackAiKeysCog(commands.Cog):
         clear_support_role: bool = False,
     ) -> None:
         assert interaction.guild is not None
-        if not await _is_packai_staff(self.bot, interaction):
-            await interaction.response.send_message(
-                embed=error_embed("Nur Staff"), ephemeral=True
-            )
-            return
         fields: dict[str, Any] = {}
         if price_14d is not None:
             fields["price_14d"] = price_14d
@@ -762,20 +729,18 @@ class PackAiKeysCog(commands.Cog):
             ephemeral=True,
         )
 
-    @packai.command(name="panel", description="Kauf-Panel für Pack AI posten (Staff)")
+    @app_commands.command(
+        name="packaipanel",
+        description="Kauf-Panel für Pack AI posten (Staff)",
+    )
     @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
     @app_commands.default_permissions(manage_guild=True)
-    async def panel(
+    async def packaipanel(
         self,
         interaction: discord.Interaction,
         channel: discord.TextChannel | None = None,
     ) -> None:
         assert interaction.guild is not None
-        if not await _is_packai_staff(self.bot, interaction):
-            await interaction.response.send_message(
-                embed=error_embed("Nur Staff"), ephemeral=True
-            )
-            return
         target = channel
         if target is None and isinstance(interaction.channel, discord.TextChannel):
             target = interaction.channel
@@ -796,7 +761,10 @@ class PackAiKeysCog(commands.Cog):
             ephemeral=True,
         )
 
-    @packai.command(name="gen", description="Pack-AI-Key sofort erzeugen (Staff)")
+    @app_commands.command(
+        name="packaigen",
+        description="Pack-AI-Key sofort erzeugen (Staff)",
+    )
     @app_commands.describe(
         plan="14d / 30d / lifetime",
         user="Optional: Key per DM senden",
@@ -810,7 +778,7 @@ class PackAiKeysCog(commands.Cog):
         ]
     )
     @app_commands.default_permissions(manage_guild=True)
-    async def gen(
+    async def packaigen(
         self,
         interaction: discord.Interaction,
         plan: app_commands.Choice[str],
@@ -867,8 +835,41 @@ class PackAiKeysCog(commands.Cog):
                     embed=warn_embed("DM fehlgeschlagen", user.mention), ephemeral=True
                 )
 
-    @packai.command(name="status", description="Prüft Pack-AI License-API")
-    async def status(self, interaction: discord.Interaction) -> None:
+    @app_commands.command(
+        name="packaiplans",
+        description="Zeigt Pack-AI Pläne, Tokens und PayPal",
+    )
+    async def packaiplans(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        settings = await _get_settings(self.bot, interaction.guild.id)
+        lines = []
+        for tier in TIER_ORDER:
+            price = _price_for(settings, tier)
+            price_txt = format_price(price) if price > 0 else "Anfrage"
+            lines.append(f"**{TIER_LABELS[tier]}** — {price_txt}")
+        email = getattr(config, "PAYPAL_EMAIL", "") or "—"
+        await interaction.response.send_message(
+            embed=base_embed(
+                "Pack AI Pläne",
+                "\n".join(lines)
+                + f"\n\n**PayPal:** `{email}`\n"
+                "_Friends & Family · danach Ticket / Staff bestätigt Key_",
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="packaibuy",
+        description="Pack AI kaufen (öffnet Plan-Auswahl)",
+    )
+    async def packaibuy(self, interaction: discord.Interaction) -> None:
+        await handle_buy_packai(self.bot, interaction)
+
+    @app_commands.command(
+        name="packaistatus",
+        description="Prüft Pack-AI License-API",
+    )
+    async def packaistatus(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
             code, body = await asyncio.to_thread(_health_check)
@@ -889,10 +890,79 @@ class PackAiKeysCog(commands.Cog):
             embed = error_embed("API Fehler", f"`{code}`\n```{body}```")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    # Zusätzlich Gruppe /packai … (wie /gtkey …)
+    packai = app_commands.Group(
+        name="packai",
+        description="Pack AI Lizenzkeys & Kauf-Panel",
+    )
+
+    @packai.command(name="plans", description="Pläne / Tokens / PayPal")
+    async def packai_plans(self, interaction: discord.Interaction) -> None:
+        await self.packaiplans(interaction)
+
+    @packai.command(name="buy", description="Pack AI kaufen")
+    async def packai_buy(self, interaction: discord.Interaction) -> None:
+        await self.packaibuy(interaction)
+
+    @packai.command(name="panel", description="Kauf-Panel posten (Staff)")
+    @app_commands.describe(channel="Ziel-Channel")
+    @app_commands.default_permissions(manage_guild=True)
+    async def packai_panel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        await self.packaipanel(interaction, channel)
+
+    @packai.command(name="setup", description="Preise setzen (Staff)")
+    @app_commands.describe(
+        price_14d="Preis 14 Tage",
+        price_30d="Preis 30 Tage",
+        price_lifetime="Preis Lifetime",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def packai_setup(
+        self,
+        interaction: discord.Interaction,
+        price_14d: Optional[float] = None,
+        price_30d: Optional[float] = None,
+        price_lifetime: Optional[float] = None,
+    ) -> None:
+        await self.packaisetup(
+            interaction,
+            price_14d=price_14d,
+            price_30d=price_30d,
+            price_lifetime=price_lifetime,
+        )
+
+    @packai.command(name="gen", description="Key erzeugen (Staff)")
+    @app_commands.describe(plan="Plan", user="DM an User", note="Notiz")
+    @app_commands.choices(
+        plan=[
+            app_commands.Choice(name="14 Tage (50 Tokens)", value="14d"),
+            app_commands.Choice(name="30 Tage (200 Tokens)", value="30d"),
+            app_commands.Choice(name="Lifetime (2000 Tokens)", value="lifetime"),
+        ]
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def packai_gen(
+        self,
+        interaction: discord.Interaction,
+        plan: app_commands.Choice[str],
+        user: discord.User | None = None,
+        note: str = "",
+    ) -> None:
+        await self.packaigen(interaction, plan, user, note)
+
+    @packai.command(name="status", description="License-API Status")
+    async def packai_status(self, interaction: discord.Interaction) -> None:
+        await self.packaistatus(interaction)
+
 
 async def setup(bot: "ShopBot") -> None:
     await _ensure_tables(bot)
     await bot.add_cog(PackAiKeysCog(bot))
     print(
-        "[PackAI] Cog geladen — Slash: /packai plans|buy|panel|setup|gen|status"
+        "[PackAI] Cog geladen — /packaipanel /packaisetup /packaigen "
+        "/packaiplans /packaibuy /packaistatus (+ Gruppe /packai)"
     )
