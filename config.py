@@ -137,20 +137,8 @@ GPUTWEAKS_PRICE_LIFETIME = float(
     os.getenv("GPUTWEAKS_PRICE_LIFETIME", "0") or "0"
 )
 
-# Pack AI — Texturepack Studio Lizenzkeys (License-API + Discord-Ticket)
-PACKAI_LICENSE_API_URL = (
-    os.getenv("PACKAI_LICENSE_API_URL") or os.getenv("LICENSE_API_URL") or "http://127.0.0.1:8787"
-).strip().rstrip("/")
-PACKAI_LICENSE_API_SECRET = (
-    os.getenv("PACKAI_LICENSE_API_SECRET") or os.getenv("LICENSE_API_SECRET") or ""
-).strip()
-PACKAI_PRICE_14D = float(os.getenv("PACKAI_PRICE_14D", "4.99") or "4.99")
-PACKAI_PRICE_30D = float(os.getenv("PACKAI_PRICE_30D", "9.99") or "9.99")
-PACKAI_PRICE_LIFETIME = float(os.getenv("PACKAI_PRICE_LIFETIME", "29.99") or "29.99")
-
 # Minecraft Account-Link + Chat-Watcher Mod API
 # Bot-Hosting/Pterodactyl setzt SERVER_PORT (= freigegebener Port, z.B. 26026).
-# Der Prozess MUSS genau auf SERVER_PORT lauschen, sonst ist er von außen unerreichbar.
 MC_API_HOST = os.getenv("MC_API_HOST", "0.0.0.0")
 if os.getenv("SERVER_PORT"):
     MC_API_PORT = int(os.getenv("SERVER_PORT") or "8765")
@@ -158,8 +146,21 @@ else:
     MC_API_PORT = int(os.getenv("MC_API_PORT") or "8765")
 MC_API_KEY = os.getenv("MC_API_KEY", "").strip()
 MC_LINK_CODE_TTL_MINUTES = int(os.getenv("MC_LINK_CODE_TTL_MINUTES", "10") or "10")
-# Ingame-Account, dem User den Link-Code per /msg schicken
 MC_LINK_IGN = (os.getenv("MC_LINK_IGN", "TxTEmpire") or "TxTEmpire").strip()
+
+# Pack AI — Texturepack Studio (License-API auf demselben Port wie MC-API)
+# Bot: http://127.0.0.1:SERVER_PORT  ·  PackAI.exe: http://ÖFFENTLICHE-IP:SERVER_PORT
+PACKAI_LICENSE_API_URL = (
+    os.getenv("PACKAI_LICENSE_API_URL")
+    or os.getenv("LICENSE_API_URL")
+    or f"http://127.0.0.1:{MC_API_PORT}"
+).strip().rstrip("/")
+PACKAI_LICENSE_API_SECRET = (
+    os.getenv("PACKAI_LICENSE_API_SECRET") or os.getenv("LICENSE_API_SECRET") or ""
+).strip()
+PACKAI_PRICE_14D = float(os.getenv("PACKAI_PRICE_14D", "4.99") or "4.99")
+PACKAI_PRICE_30D = float(os.getenv("PACKAI_PRICE_30D", "9.99") or "9.99")
+PACKAI_PRICE_LIFETIME = float(os.getenv("PACKAI_PRICE_LIFETIME", "29.99") or "29.99")
 
 
 def mc_link_command(code: str) -> str:
