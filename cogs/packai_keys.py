@@ -4,14 +4,12 @@ packai_keys.py
 
 Verkauf von Pack-AI-Lizenzkeys (Tokens: 14d / 30d / Lifetime) über den Shop-Bot.
 
-Flow:
-  - Panel „Pack AI kaufen“ → Laufzeit wählen → privates Ticket
-  - Ticket zeigt PayPal-Adresse + Betrag + Payee-Details
-  - Staff ✅ Bestätigen → Key über Pack-AI License-API erzeugen → DM an Käufer
+Keys sind offline signiert (HMAC) — kein License-Server nötig.
+Aktivierung in PackAI.exe + optional Discord-Webhook-Bestätigung.
 
 .env:
-  PACKAI_LICENSE_API_URL=http://127.0.0.1:8787
-  PACKAI_LICENSE_API_SECRET=...
+  PACKAI_LICENSE_SECRET=...   # gleich wie in license_client.hpp
+  PACKAI_WEBHOOK_URL=https://discord.com/api/webhooks/...
   PACKAI_PRICE_14D=4.99
   PACKAI_PRICE_30D=9.99
   PACKAI_PRICE_LIFETIME=29.99
@@ -21,16 +19,17 @@ Flow:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 import discord
-import requests
+import httpx
 from discord import app_commands
 from discord.ext import commands
 
 import config
 from integrations.shop_api import shop_api
-from utils import tweak_vouch
+from utils import packai_licensing, tweak_vouch
 from utils.embeds import (
     base_embed,
     error_embed,
@@ -59,51 +58,54 @@ TIER_LABELS = {
 TIER_TOKENS = {TIER_14D: 50, TIER_30D: 200, TIER_LIFETIME: 2000}
 
 
-def _api_base() -> str:
-    url = (getattr(config, "PACKAI_LICENSE_API_URL", "") or "").strip().rstrip("/")
-    if url:
-        return url
-    return "http://127.0.0.1:8787"
+def _secret_configured() -> bool:
+    return packai_licensing.licensing_configured()
 
 
-def _api_secret() -> str:
-    return (getattr(config, "PACKAI_LICENSE_API_SECRET", "") or "").strip()
+def _webhook_url() -> str:
+    return (
+        (getattr(config, "PACKAI_WEBHOOK_URL", "") or "").strip()
+        or (getattr(config, "DISCORD_WEBHOOK_URL", "") or "").strip()
+        or (getattr(config, "SHOP_RELAY_WEBHOOK_URL", "") or "").strip()
+    )
 
 
-def _api_configured() -> bool:
-    return bool(_api_secret()) and _api_secret() != "change-me"
+def _post_webhook(title: str, description: str, color: int = 0xC8A24A) -> None:
+    url = _webhook_url()
+    if not url:
+        return
+    embed = {
+        "title": title,
+        "description": description,
+        "color": color,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "Pack AI License"},
+    }
+    try:
+        httpx.post(url, json={"embeds": [embed]}, timeout=8.0)
+    except Exception:
+        pass
 
 
 def _create_license_key(plan: str, created_by: str, note: str = "") -> tuple[bool, str, str]:
-    """Returns (ok, key_or_error, raw_body)."""
+    """Returns (ok, key_or_error, detail). Offline — kein API-Server."""
+    if not _secret_configured():
+        return False, "PACKAI_LICENSE_SECRET fehlt in .env", ""
     try:
-        r = requests.post(
-            f"{_api_base()}/admin/create",
-            json={
-                "plan": plan,
-                "count": 1,
-                "created_by": created_by,
-                "note": note,
-            },
-            headers={
-                "X-PackAI-Secret": _api_secret(),
-                "Content-Type": "application/json",
-            },
-            timeout=20,
-        )
-    except requests.RequestException as e:
+        key = packai_licensing.generate_license_key(plan)
+    except Exception as e:
         return False, str(e), ""
-    body = r.text[:800]
-    if r.status_code != 200:
-        return False, f"HTTP {r.status_code}: {body}", body
-    try:
-        data = r.json()
-    except Exception:
-        return False, body, body
-    keys = data.get("keys") or []
-    if not keys:
-        return False, "API lieferte keinen Key", body
-    return True, str(keys[0]), body
+    ok, meta, err = packai_licensing.verify_own_key(key)
+    if not ok:
+        return False, err or "Selbstcheck fehlgeschlagen", ""
+    _post_webhook(
+        "Pack AI — Key erstellt",
+        f"**Plan:** {TIER_LABELS.get(plan, plan)}\n"
+        f"**Von:** {created_by}\n"
+        f"**Notiz:** {note or '—'}\n"
+        f"**Key:** `{key[:22]}…`",
+    )
+    return True, key, str(meta)
 
 
 def _paypal_block(price: float) -> str:
@@ -576,12 +578,11 @@ class PackAiKeyTicketView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        if not _api_configured():
+        if not _secret_configured():
             await interaction.response.send_message(
                 embed=error_embed(
-                    "API nicht eingerichtet",
-                    "PACKAI_LICENSE_API_SECRET / PACKAI_LICENSE_API_URL in .env setzen "
-                    "und License-Server starten.",
+                    "Secret fehlt",
+                    "PACKAI_LICENSE_SECRET in .env setzen (gleich wie in PackAI.exe).",
                 ),
                 ephemeral=True,
             )
@@ -596,7 +597,7 @@ class PackAiKeyTicketView(discord.ui.View):
         )
         if not ok:
             await interaction.followup.send(
-                embed=error_embed("Key-API Fehler", key_or_err[:900]),
+                embed=error_embed("Key Fehler", key_or_err[:900]),
             )
             return
 
@@ -667,14 +668,11 @@ class PackAiKeyTicketView(discord.ui.View):
         )
 
 
-# ── Cog ──────────────────────────────────────────────────────────────────
+# ── Slash-Commands (Top-Level wie /gtkeypanel — erscheinen zuverlässig) ──
 
 class PackAiKeysCog(commands.Cog):
     def __init__(self, bot: "ShopBot") -> None:
         self.bot = bot
-
-    async def cog_load(self) -> None:
-        await _ensure_tables(self.bot)
 
     @app_commands.command(
         name="packaisetup",
@@ -720,8 +718,9 @@ class PackAiKeysCog(commands.Cog):
                 f"30d (200 Tokens): **{format_price(_price_for(settings, TIER_30D))}**\n"
                 f"Lifetime (2000): **{format_price(_price_for(settings, TIER_LIFETIME))}**\n\n"
                 f"PayPal: `{email}`\n"
-                f"API: `{_api_base()}` · "
-                + ("✅ Secret gesetzt" if _api_configured() else "⚠️ Secret fehlt"),
+                f"Modus: **Offline + Webhook** · "
+                + ("✅ Secret gesetzt" if _secret_configured() else "⚠️ Secret fehlt")
+                + (" · ✅ Webhook" if _webhook_url() else " · ⚠️ kein Webhook"),
             ),
             ephemeral=True,
         )
@@ -738,23 +737,29 @@ class PackAiKeysCog(commands.Cog):
         channel: discord.TextChannel | None = None,
     ) -> None:
         assert interaction.guild is not None
-        target = channel or interaction.channel
-        if not isinstance(target, discord.TextChannel):
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
             await interaction.response.send_message(
-                embed=error_embed("Ungültiger Channel"), ephemeral=True
+                embed=error_embed("Kein Channel"), ephemeral=True
             )
             return
+        await interaction.response.defer(ephemeral=True)
         settings = await _get_settings(self.bot, interaction.guild.id)
-        await target.send(
+        msg = await target.send(
             embed=_panel_embed(settings), view=PackAiKeyPanelView(self.bot)
         )
-        await interaction.response.send_message(
-            embed=success_embed("Panel gepostet", target.mention), ephemeral=True
+        await interaction.followup.send(
+            embed=success_embed(
+                "Pack-AI-Panel gepostet", f"In {target.mention}: {msg.jump_url}"
+            ),
+            ephemeral=True,
         )
 
     @app_commands.command(
         name="packaigen",
-        description="Pack-AI-Key sofort erzeugen (Staff, ohne Ticket)",
+        description="Pack-AI-Key sofort erzeugen (Staff)",
     )
     @app_commands.describe(
         plan="14d / 30d / lifetime",
@@ -781,9 +786,16 @@ class PackAiKeysCog(commands.Cog):
                 embed=error_embed("Nur Staff"), ephemeral=True
             )
             return
-        if not _api_configured():
+        if not _secret_configured():
             await interaction.response.send_message(
-                embed=error_embed("PACKAI_LICENSE_API_SECRET fehlt"), ephemeral=True
+                embed=error_embed(
+                    "Secret fehlt",
+                    "In `.env` setzen:\n"
+                    "`PACKAI_LICENSE_SECRET=...`\n"
+                    "Optional: `PACKAI_WEBHOOK_URL=...`\n"
+                    "Dann Bot neu starten.",
+                ),
+                ephemeral=True,
             )
             return
         await interaction.response.defer(ephemeral=True)
@@ -795,7 +807,7 @@ class PackAiKeysCog(commands.Cog):
         )
         if not ok:
             await interaction.followup.send(
-                embed=error_embed("API Fehler", key_or_err[:900]), ephemeral=True
+                embed=error_embed("Key Fehler", key_or_err[:900]), ephemeral=True
             )
             return
         await interaction.followup.send(
@@ -819,6 +831,139 @@ class PackAiKeysCog(commands.Cog):
                     embed=warn_embed("DM fehlgeschlagen", user.mention), ephemeral=True
                 )
 
+    @app_commands.command(
+        name="packaiplans",
+        description="Zeigt Pack-AI Pläne, Tokens und PayPal",
+    )
+    async def packaiplans(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        settings = await _get_settings(self.bot, interaction.guild.id)
+        lines = []
+        for tier in TIER_ORDER:
+            price = _price_for(settings, tier)
+            price_txt = format_price(price) if price > 0 else "Anfrage"
+            lines.append(f"**{TIER_LABELS[tier]}** — {price_txt}")
+        email = getattr(config, "PAYPAL_EMAIL", "") or "—"
+        await interaction.response.send_message(
+            embed=base_embed(
+                "Pack AI Pläne",
+                "\n".join(lines)
+                + f"\n\n**PayPal:** `{email}`\n"
+                "_Friends & Family · danach Ticket / Staff bestätigt Key_",
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="packaibuy",
+        description="Pack AI kaufen (öffnet Plan-Auswahl)",
+    )
+    async def packaibuy(self, interaction: discord.Interaction) -> None:
+        await handle_buy_packai(self.bot, interaction)
+
+    @app_commands.command(
+        name="packaistatus",
+        description="Pack-AI Lizenz / Webhook Status",
+    )
+    async def packaistatus(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        secret_ok = _secret_configured()
+        wh = _webhook_url()
+        sample = ""
+        if secret_ok:
+            # Nur verify eines frischen Keys — kein Webhook-Spam: direkt generate
+            try:
+                key = packai_licensing.generate_license_key("14d")
+                ok, _, err = packai_licensing.verify_own_key(key)
+                sample = f"\nSelftest: {'✅ OK ' + key[:26] + '…' if ok else '⚠️ ' + (err or '?')}"
+            except Exception as e:
+                sample = f"\nSelftest: ⚠️ {e}"
+        embed = (success_embed if secret_ok else warn_embed)(
+            "Pack AI Offline-Lizenz",
+            f"Secret: {'✅ gesetzt' if secret_ok else '⚠️ PACKAI_LICENSE_SECRET fehlt'}\n"
+            f"Webhook: {'✅ gesetzt' if wh else '⚠️ PACKAI_WEBHOOK_URL fehlt'}"
+            f"{sample}\n\n"
+            "Kein License-Server nötig — Keys lokal signiert, Bestätigung per Webhook.",
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # Gruppe /packai … — Callbacks der Top-Level-Commands nutzen
+    # (self.packaigen ist ein Command-Objekt, nicht direkt aufrufbar)
+    packai = app_commands.Group(
+        name="packai",
+        description="Pack AI Lizenzkeys & Kauf-Panel",
+    )
+
+    @packai.command(name="plans", description="Pläne / Tokens / PayPal")
+    async def packai_plans(self, interaction: discord.Interaction) -> None:
+        await self.packaiplans.callback(self, interaction)  # type: ignore[misc]
+
+    @packai.command(name="buy", description="Pack AI kaufen")
+    async def packai_buy(self, interaction: discord.Interaction) -> None:
+        await self.packaibuy.callback(self, interaction)  # type: ignore[misc]
+
+    @packai.command(name="panel", description="Kauf-Panel posten (Staff)")
+    @app_commands.describe(channel="Ziel-Channel")
+    @app_commands.default_permissions(manage_guild=True)
+    async def packai_panel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        await self.packaipanel.callback(self, interaction, channel)  # type: ignore[misc]
+
+    @packai.command(name="setup", description="Preise setzen (Staff)")
+    @app_commands.describe(
+        price_14d="Preis 14 Tage",
+        price_30d="Preis 30 Tage",
+        price_lifetime="Preis Lifetime",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def packai_setup(
+        self,
+        interaction: discord.Interaction,
+        price_14d: Optional[float] = None,
+        price_30d: Optional[float] = None,
+        price_lifetime: Optional[float] = None,
+    ) -> None:
+        await self.packaisetup.callback(  # type: ignore[misc]
+            self,
+            interaction,
+            price_14d,
+            price_30d,
+            price_lifetime,
+            None,
+            False,
+        )
+
+    @packai.command(name="gen", description="Key erzeugen (Staff)")
+    @app_commands.describe(plan="Plan", user="DM an User", note="Notiz")
+    @app_commands.choices(
+        plan=[
+            app_commands.Choice(name="14 Tage (50 Tokens)", value="14d"),
+            app_commands.Choice(name="30 Tage (200 Tokens)", value="30d"),
+            app_commands.Choice(name="Lifetime (2000 Tokens)", value="lifetime"),
+        ]
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def packai_gen(
+        self,
+        interaction: discord.Interaction,
+        plan: app_commands.Choice[str],
+        user: discord.User | None = None,
+        note: str = "",
+    ) -> None:
+        await self.packaigen.callback(self, interaction, plan, user, note)  # type: ignore[misc]
+
+    @packai.command(name="status", description="Lizenz / Webhook Status")
+    async def packai_status(self, interaction: discord.Interaction) -> None:
+        await self.packaistatus.callback(self, interaction)  # type: ignore[misc]
+
 
 async def setup(bot: "ShopBot") -> None:
+    await _ensure_tables(bot)
     await bot.add_cog(PackAiKeysCog(bot))
+    print(
+        "[PackAI] Cog geladen — /packaipanel /packaisetup /packaigen "
+        "/packaiplans /packaibuy /packaistatus (+ Gruppe /packai)"
+    )

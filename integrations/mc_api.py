@@ -79,6 +79,10 @@ class McApiServer:
         app.router.add_post("/mc/v1/link", self.link)
         app.router.add_post("/mc/v1/payment", self.payment)
         app.router.add_post("/mc/v1/chat", self.chat)
+        # Pack AI License-API auf demselben Port (für Bot + PackAI.exe)
+        from integrations import packai_license_api
+
+        packai_license_api.register_routes(app)
         return app
 
     async def start(self) -> None:
@@ -93,6 +97,10 @@ class McApiServer:
         await self._site.start()
         print(
             f"[MC-API] Listening on http://{config.MC_API_HOST}:{config.MC_API_PORT}"
+        )
+        print(
+            f"[PackAI-API] Bot lokal: http://127.0.0.1:{int(config.MC_API_PORT)} "
+            f"(PACKAI_LICENSE_API_URL) · PackAI.exe: öffentliche IP:{int(config.MC_API_PORT)}"
         )
 
     async def stop(self) -> None:
