@@ -9,13 +9,17 @@ dieser andere Spieler das über den Ingame-Mod selbst erlaubt hat
 gar nichts kaufen.
 
 Ablauf:
-  1. Ziel-Spieler aktiviert im Mod `/duelinvsee on` -> meldet sich am
-     Bot-API-Endpunkt `/mc/v1/duelinvsee/optin` (integrations/mc_api.py).
+  1. Ziel-Spieler stimmt zu — entweder im Mod (`/duelinvsee on`, meldet sich
+     am Bot-API-Endpunkt `/mc/v1/duelinvsee/optin`) ODER direkt hier im
+     Discord mit `/duelinvsee-optin` (setzt dieselbe Zustimmungs-Flag über
+     seinen verknüpften Minecraft-Account).
   2. Käufer nutzt hier `/duelinvsee gegner:<IGN>`, zahlt Credits, bekommt
      einen Live-Link zur Website.
   3. Der Mod des Ziel-Spielers fragt alle 10s per Heartbeat beim Bot nach,
      ob gerade jemand zusieht, und pusht bei Bedarf sein eigenes Inventar
-     direkt an die Website.
+     direkt an die Website. Ohne laufenden Mod passiert das nicht — die
+     Discord-Zustimmung allein liefert keine Inventardaten, sie erlaubt nur
+     den Kauf.
 """
 from __future__ import annotations
 
@@ -26,7 +30,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
-from utils.duel_invsee_store import create_watch, ensure_tables, is_opted_in
+from utils.duel_invsee_store import create_watch, ensure_tables, is_opted_in, set_opt_in
 from utils.embeds import error_embed, format_price, success_embed
 
 IGN_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
@@ -89,6 +93,51 @@ class DuelInvseeCog(commands.Cog):
                 f"Live-Inventar von **{ign}**: {url}\n\n"
                 f"Aktualisiert alle 10s, sobald **{ign}** online ist und sein Mod sich meldet. "
                 f"Gültig für **{config.DUEL_INVSEE_WATCH_MINUTES} Minuten**.",
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="duelinvsee-optin",
+        description="Erlaube oder verbiete anderen, dein Inventar per Duel Invsee zu kaufen",
+    )
+    @app_commands.choices(
+        status=[
+            app_commands.Choice(name="An — andere können mein Inventar kaufen", value="an"),
+            app_commands.Choice(name="Aus", value="aus"),
+        ]
+    )
+    async def duelinvsee_optin_cmd(
+        self, interaction: discord.Interaction, status: app_commands.Choice[str]
+    ) -> None:
+        assert interaction.guild is not None
+        guild_id = interaction.guild.id
+
+        link = await self.bot.db.get_mc_link(guild_id, interaction.user.id)
+        ign = str(link["ign"]) if link and link.get("ign") else None
+        if not ign:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Kein Minecraft-Account verknüpft",
+                    "Verknüpfe zuerst deinen Account mit `/link`, damit wir wissen, "
+                    "welcher Minecraft-Name dir gehört.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        enabled = status.value == "an"
+        await set_opt_in(self.bot, guild_id, ign, enabled)
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Gespeichert",
+                (
+                    f"Duel Invsee für **{ign}** ist jetzt **an** — andere können dein Inventar "
+                    f"per `/duelinvsee` kaufen, solange dein Ingame-Mod läuft und du das nicht "
+                    f"wieder ausschaltest."
+                    if enabled
+                    else f"Duel Invsee für **{ign}** ist jetzt **aus**."
+                ),
             ),
             ephemeral=True,
         )
