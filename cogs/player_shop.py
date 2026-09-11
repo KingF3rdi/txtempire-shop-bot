@@ -20,6 +20,19 @@ Provisions-Anteil: /spieler auszahlung legt pro Spieler/Creator einen
 Prozentsatz + Ingame-Namen fest — kein automatischer Auszahlungsweg, aber
 Ticket und Bestätigung zeigen Staff den fälligen Betrag + fertigen /pay-Befehl.
 
+Weitere Extras:
+  - /spieler verifizieren markiert einen Spieler mit einem 🎖️-Badge überall,
+    wo er im Panel/Listen auftaucht.
+  - /spieler stats zeigt Umsatz/Käufe/Provision pro Spieler oder gesamt.
+  - /spieler gruppenrabatt gibt Trägern einer Rolle automatisch Rabatt,
+    sobald N andere Rollen-Träger dasselbe Item bereits bestätigt gekauft
+    haben (Klan-/Gilden-Rabatt).
+  - /spieler tauschwert lässt Käufer beim Kaufen einen früheren bestätigten
+    Kauf gegen einen %-Rabatt eintauschen (einmalig pro altem Kauf,
+    Ablehnung des neuen Tickets gibt den alten Kauf wieder frei).
+  - /spieler salelog meldet automatisch (alle 10 Min. Sweep), wenn ein Sale
+    abgelaufen ist, in einen konfigurierten Channel.
+
 Ablauf: Panel (gesamt via /spielerpanel oder pro Spieler via
 /spielerpanel spieler:X) mit "Kaufen"-Button -> ggf. Spieler wählen ->
 Item wählen -> Modal (Ingame-Name [+ Notiz]) -> privates Ticket mit beiden
@@ -37,7 +50,7 @@ from typing import TYPE_CHECKING, Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import config
 from utils.delivery import deliver_packs
@@ -64,6 +77,7 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             name TEXT NOT NULL,
             payout_percent REAL NOT NULL DEFAULT 0,
             payout_recipient TEXT NOT NULL DEFAULT '',
+            verified INTEGER NOT NULL DEFAULT 0,
             sort_order INTEGER NOT NULL DEFAULT 99,
             UNIQUE(guild_id, name)
         );
@@ -76,6 +90,7 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             price REAL NOT NULL,
             sale_price REAL,
             sale_until TEXT,
+            sale_notified INTEGER NOT NULL DEFAULT 0,
             pack_dm_text TEXT NOT NULL DEFAULT '',
             pack_link TEXT NOT NULL DEFAULT '',
             pack_file TEXT NOT NULL DEFAULT '',
@@ -87,6 +102,11 @@ async def _ensure_tables(bot: "ShopBot") -> None:
         CREATE TABLE IF NOT EXISTS player_shop_settings (
             guild_id INTEGER PRIMARY KEY,
             staff_role_id INTEGER,
+            sale_log_channel_id INTEGER,
+            trade_in_percent REAL NOT NULL DEFAULT 0,
+            group_role_id INTEGER,
+            group_discount_percent REAL NOT NULL DEFAULT 0,
+            group_threshold INTEGER NOT NULL DEFAULT 3,
             next_ticket_number INTEGER NOT NULL DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS player_shop_tickets (
@@ -94,6 +114,7 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             guild_id INTEGER NOT NULL,
             ticket_number INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
+            item_id INTEGER,
             player_name TEXT NOT NULL,
             item_name TEXT NOT NULL,
             kind TEXT NOT NULL,
@@ -107,6 +128,9 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             keybinds_text TEXT NOT NULL DEFAULT '',
             payout_percent REAL NOT NULL DEFAULT 0,
             payout_recipient TEXT NOT NULL DEFAULT '',
+            discount_note TEXT NOT NULL DEFAULT '',
+            traded_in INTEGER NOT NULL DEFAULT 0,
+            traded_in_ticket_id INTEGER,
             status TEXT NOT NULL DEFAULT 'pending',
             ticket_channel_id INTEGER,
             created_by INTEGER,
@@ -121,14 +145,25 @@ async def _ensure_tables(bot: "ShopBot") -> None:
         ("shop_player_items", "preview_file", "TEXT NOT NULL DEFAULT ''"),
         ("shop_player_items", "sale_price", "REAL"),
         ("shop_player_items", "sale_until", "TEXT"),
+        ("shop_player_items", "sale_notified", "INTEGER NOT NULL DEFAULT 0"),
         ("shop_player_items", "keybinds_text", "TEXT NOT NULL DEFAULT ''"),
         ("shop_players", "payout_percent", "REAL NOT NULL DEFAULT 0"),
         ("shop_players", "payout_recipient", "TEXT NOT NULL DEFAULT ''"),
+        ("shop_players", "verified", "INTEGER NOT NULL DEFAULT 0"),
+        ("player_shop_settings", "sale_log_channel_id", "INTEGER"),
+        ("player_shop_settings", "trade_in_percent", "REAL NOT NULL DEFAULT 0"),
+        ("player_shop_settings", "group_role_id", "INTEGER"),
+        ("player_shop_settings", "group_discount_percent", "REAL NOT NULL DEFAULT 0"),
+        ("player_shop_settings", "group_threshold", "INTEGER NOT NULL DEFAULT 3"),
+        ("player_shop_tickets", "item_id", "INTEGER"),
         ("player_shop_tickets", "preview_file", "TEXT NOT NULL DEFAULT ''"),
         ("player_shop_tickets", "keybinds_text", "TEXT NOT NULL DEFAULT ''"),
         ("player_shop_tickets", "note", "TEXT NOT NULL DEFAULT ''"),
         ("player_shop_tickets", "payout_percent", "REAL NOT NULL DEFAULT 0"),
         ("player_shop_tickets", "payout_recipient", "TEXT NOT NULL DEFAULT ''"),
+        ("player_shop_tickets", "discount_note", "TEXT NOT NULL DEFAULT ''"),
+        ("player_shop_tickets", "traded_in", "INTEGER NOT NULL DEFAULT 0"),
+        ("player_shop_tickets", "traded_in_ticket_id", "INTEGER"),
     ):
         try:
             await bot.db.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
@@ -142,6 +177,17 @@ async def _get_staff_role_id(bot: "ShopBot", guild_id: int) -> Optional[int]:
         "SELECT staff_role_id FROM player_shop_settings WHERE guild_id = ?", (guild_id,)
     )
     return int(row["staff_role_id"]) if row and row["staff_role_id"] else None
+
+
+async def _get_settings(bot: "ShopBot", guild_id: int) -> dict:
+    await bot.db.db.execute(
+        "INSERT OR IGNORE INTO player_shop_settings (guild_id) VALUES (?)", (guild_id,)
+    )
+    await bot.db.db.commit()
+    row = await bot.db.fetchone(
+        "SELECT * FROM player_shop_settings WHERE guild_id = ?", (guild_id,)
+    )
+    return dict(row) if row else {}
 
 
 async def _set_staff_role_id(bot: "ShopBot", guild_id: int, role_id: int) -> None:
@@ -206,6 +252,94 @@ async def list_player_items(bot: "ShopBot", guild_id: int, player_id: int) -> li
     return [dict(r) for r in rows]
 
 
+async def _group_discount_info(
+    bot: "ShopBot", guild: discord.Guild, member: discord.abc.User, item: dict
+) -> tuple[float, str]:
+    """Gruppen-/Clan-Rabatt: ab N bestätigten Käufen desselben Items durch Träger
+    einer konfigurierten Rolle bekommen weitere Träger dieser Rolle einen Rabatt."""
+    settings = await _get_settings(bot, guild.id)
+    role_id = settings.get("group_role_id")
+    discount_pct = float(settings.get("group_discount_percent") or 0)
+    threshold = int(settings.get("group_threshold") or 3)
+    if not role_id or discount_pct <= 0:
+        return 0.0, ""
+    if not isinstance(member, discord.Member) or not any(r.id == int(role_id) for r in member.roles):
+        return 0.0, ""
+    row = await bot.db.fetchone(
+        "SELECT COUNT(DISTINCT user_id) AS c FROM player_shop_tickets "
+        "WHERE guild_id = ? AND item_id = ? AND status = 'confirmed'",
+        (guild.id, item["id"]),
+    )
+    count = int(row["c"]) if row else 0
+    if count < threshold:
+        return 0.0, ""
+    role = guild.get_role(int(role_id))
+    role_name = role.name if role else "Gruppe"
+    return discount_pct, f"Gruppen-Rabatt ({role_name}, {count}+ Käufe): -{discount_pct:g}%"
+
+
+async def _eligible_trade_ins(bot: "ShopBot", guild_id: int, user_id: int) -> list[dict]:
+    rows = await bot.db.fetchall(
+        """
+        SELECT id, player_name, item_name, price FROM player_shop_tickets
+        WHERE guild_id = ? AND user_id = ? AND status = 'confirmed' AND traded_in = 0
+        ORDER BY confirmed_at DESC
+        """,
+        (guild_id, user_id),
+    )
+    return [dict(r) for r in rows]
+
+
+async def _notify_expired_sales(bot: "ShopBot") -> int:
+    """Meldet abgelaufene Sales einmalig im konfigurierten Log-Channel (falls gesetzt)."""
+    rows = await bot.db.fetchall(
+        "SELECT * FROM shop_player_items WHERE sale_price IS NOT NULL AND sale_until IS NOT NULL AND sale_notified = 0"
+    )
+    now = datetime.now(timezone.utc)
+    notified = 0
+    for r in rows:
+        item = dict(r)
+        try:
+            until = datetime.strptime(item["sale_until"], _SALE_TIME_FMT).replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+        if now < until:
+            continue
+
+        await bot.db.db.execute(
+            "UPDATE shop_player_items SET sale_notified = 1 WHERE id = ?", (item["id"],)
+        )
+        await bot.db.db.commit()
+        notified += 1
+
+        guild_id = int(item["guild_id"])
+        settings = await _get_settings(bot, guild_id)
+        channel_id = settings.get("sale_log_channel_id")
+        if not channel_id:
+            continue
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            continue
+        channel = guild.get_channel(int(channel_id))
+        if not isinstance(channel, discord.TextChannel):
+            continue
+        player = await get_player(bot, guild_id, int(item["player_id"]))
+        player_name = player["name"] if player else "?"
+        try:
+            await channel.send(
+                embed=warn_embed(
+                    "Sale abgelaufen",
+                    f"**{item['name']}** ({player_name}) — Sale-Preis war "
+                    f"{format_price(float(item['sale_price']))}, jetzt wieder "
+                    f"{format_price(float(item['price']))}.\n"
+                    f"Verlängern: `/spieleritem sale item:{item['id']} preis:… dauer:…`",
+                )
+            )
+        except discord.HTTPException:
+            pass
+    return notified
+
+
 async def get_player_item(bot: "ShopBot", guild_id: int, item_id: int) -> Optional[dict]:
     row = await bot.db.fetchone(
         "SELECT * FROM shop_player_items WHERE id = ? AND guild_id = ?", (item_id, guild_id)
@@ -252,13 +386,18 @@ def _item_line(item: dict) -> str:
 
 # ── UI: Panel, Spieler-/Item-Auswahl, IGN-Modal, Ticket-Buttons ─────────
 
+def _player_badge(player: dict) -> str:
+    return " 🎖️" if int(player.get("verified") or 0) else ""
+
+
 def _panel_embed(players: list[dict]) -> discord.Embed:
-    body = "\n".join(f"• **{p['name']}**" for p in players) or "_Noch keine Spieler konfiguriert._"
+    body = "\n".join(f"• **{p['name']}**{_player_badge(p)}" for p in players) or "_Noch keine Spieler konfiguriert._"
     return base_embed(
         "🎮 Settings & Modpacks",
         "Settings und Modpacks von unseren Spielern — wähle einen Spieler, dann das "
         "gewünschte Settings/Modpack.\n\n"
         f"{body}\n\n"
+        "🎖️ = vom Team verifizierter Spieler\n\n"
         f"Jedes Settings/Modpack kostet zusätzlich zum Shop-Preis immer auch nur "
         f"**{config.PLAYER_ITEM_PAYPAL_PRICE:.2f} € per PayPal**.",
     )
@@ -267,8 +406,8 @@ def _panel_embed(players: list[dict]) -> discord.Embed:
 def _player_panel_embed(player: dict, items: list[dict]) -> discord.Embed:
     body = "\n".join(_item_line(i) for i in items) or "_Noch keine Settings/Modpacks hinterlegt._"
     return base_embed(
-        f"🎮 {player['name']}",
-        f"Settings, Modpacks & mehr von **{player['name']}**.\n\n"
+        f"🎮 {player['name']}{_player_badge(player)}",
+        f"Settings, Modpacks & mehr von **{player['name']}**{_player_badge(player)}.\n\n"
         f"{body}\n\n"
         f"Jedes Settings/Modpack kostet zusätzlich zum Shop-Preis immer auch nur "
         f"**{config.PLAYER_ITEM_PAYPAL_PRICE:.2f} € per PayPal**.",
@@ -276,12 +415,15 @@ def _player_panel_embed(player: dict, items: list[dict]) -> discord.Embed:
 
 
 class PlayerItemIGNModal(discord.ui.Modal):
-    def __init__(self, bot: "ShopBot", item_id: int, kind: str) -> None:
+    def __init__(
+        self, bot: "ShopBot", item_id: int, kind: str, old_ticket_id: Optional[int] = None,
+    ) -> None:
         super().__init__(
             title="Termin anfragen" if kind == "coaching" else "Minecraft-Name"
         )
         self.bot = bot
         self.item_id = item_id
+        self.old_ticket_id = old_ticket_id
         self.ign = discord.ui.TextInput(
             label="Dein Minecraft-Name (für /pay)", max_length=32, required=True,
         )
@@ -316,7 +458,37 @@ class PlayerItemIGNModal(discord.ui.Modal):
             return
         await _create_player_item_ticket(
             self.bot, interaction, player=player, item=item, ign=ign,
-            note=str(self.note.value).strip(),
+            note=str(self.note.value).strip(), old_ticket_id=self.old_ticket_id,
+        )
+
+
+class PlayerTradeInSelect(discord.ui.Select):
+    def __init__(self, bot: "ShopBot", item_id: int, kind: str, eligible: list[dict], trade_in_pct: float) -> None:
+        self.bot = bot
+        self.item_id = item_id
+        self.kind = kind
+        options = [
+            discord.SelectOption(label="Ohne Eintausch", value="none", emoji="➡️"),
+        ]
+        for t in eligible[:24]:
+            options.append(
+                discord.SelectOption(
+                    label=f"{t['item_name']} ({t['player_name']})"[:100],
+                    value=str(t["id"]),
+                    description=f"{format_price(float(t['price']))} · -{trade_in_pct:g}% Rabatt"[:100],
+                )
+            )
+        super().__init__(
+            placeholder="Alten Kauf eintauschen? (optional)",
+            options=options,
+            custom_id="playershop:tradein",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        value = self.values[0]
+        old_ticket_id = None if value == "none" else int(value)
+        await interaction.response.send_modal(
+            PlayerItemIGNModal(self.bot, self.item_id, self.kind, old_ticket_id)
         )
 
 
@@ -342,8 +514,28 @@ class PlayerItemSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
         item_id = int(self.values[0])
         kind = self._kinds.get(item_id, "settings")
+
+        settings = await _get_settings(self.bot, interaction.guild.id)
+        trade_in_pct = float(settings.get("trade_in_percent") or 0)
+        eligible = (
+            await _eligible_trade_ins(self.bot, interaction.guild.id, interaction.user.id)
+            if trade_in_pct > 0
+            else []
+        )
+        if eligible:
+            view = discord.ui.View(timeout=180)
+            view.add_item(PlayerTradeInSelect(self.bot, item_id, kind, eligible, trade_in_pct))
+            await interaction.response.edit_message(
+                content=(
+                    f"Du hast frühere bestätigte Käufe — möchtest du einen eintauschen "
+                    f"(**{trade_in_pct:g}%** seines Preises als Rabatt)?"
+                ),
+                view=view,
+            )
+            return
         await interaction.response.send_modal(PlayerItemIGNModal(self.bot, item_id, kind))
 
 
@@ -351,7 +543,12 @@ class PlayerSelect(discord.ui.Select):
     def __init__(self, bot: "ShopBot", players: list[dict]) -> None:
         self.bot = bot
         options = [
-            discord.SelectOption(label=p["name"][:100], value=str(p["id"]))
+            discord.SelectOption(
+                label=p["name"][:100],
+                value=str(p["id"]),
+                emoji="🎖️" if int(p.get("verified") or 0) else None,
+                description="Verifizierter Spieler" if int(p.get("verified") or 0) else None,
+            )
             for p in players[:25]
         ]
         super().__init__(
@@ -454,6 +651,7 @@ async def _create_player_item_ticket(
     item: dict,
     ign: str,
     note: str = "",
+    old_ticket_id: Optional[int] = None,
 ) -> None:
     guild = interaction.guild
     assert guild is not None
@@ -496,21 +694,58 @@ async def _create_player_item_ticket(
     price, on_sale = _effective_price(item)
     payout_percent = float(player.get("payout_percent") or 0)
     payout_recipient = (player.get("payout_recipient") or "").strip()
+
+    discount_notes: list[str] = []
+    group_pct, group_note = await _group_discount_info(bot, guild, interaction.user, item)
+    if group_pct > 0:
+        price = max(0.0, round(price * (1 - group_pct / 100), 2))
+        discount_notes.append(group_note)
+
+    old_ticket: Optional[dict] = None
+    trade_in_pct = 0.0
+    if old_ticket_id:
+        row = await bot.db.fetchone(
+            """
+            SELECT * FROM player_shop_tickets
+            WHERE id = ? AND guild_id = ? AND user_id = ? AND status = 'confirmed' AND traded_in = 0
+            """,
+            (old_ticket_id, guild.id, interaction.user.id),
+        )
+        old_ticket = dict(row) if row else None
+    if old_ticket is not None:
+        ps_settings = await _get_settings(bot, guild.id)
+        trade_in_pct = float(ps_settings.get("trade_in_percent") or 0)
+        if trade_in_pct > 0:
+            credit = round(float(old_ticket["price"]) * trade_in_pct / 100, 2)
+            price = max(0.0, round(price - credit, 2))
+            discount_notes.append(
+                f"Eintausch ({old_ticket['item_name']}, {trade_in_pct:g}%): -{format_price(credit)}"
+            )
+            await bot.db.db.execute(
+                "UPDATE player_shop_tickets SET traded_in = 1 WHERE id = ?", (old_ticket["id"],)
+            )
+            await bot.db.db.commit()
+        else:
+            old_ticket = None
+
+    discount_note = " · ".join(discount_notes)
     ticket_number = await _next_ticket_number(bot, guild.id)
     cur = await bot.db.db.execute(
         """
         INSERT INTO player_shop_tickets
-            (guild_id, ticket_number, user_id, player_name, item_name, kind,
+            (guild_id, ticket_number, user_id, item_id, player_name, item_name, kind,
              price, ign, note, pack_dm_text, pack_link, pack_file, preview_file,
-             keybinds_text, payout_percent, payout_recipient, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+             keybinds_text, payout_percent, payout_recipient, discount_note,
+             traded_in_ticket_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
         """,
         (
-            guild.id, ticket_number, interaction.user.id, player["name"], item["name"],
+            guild.id, ticket_number, interaction.user.id, item.get("id"), player["name"], item["name"],
             item["kind"], price, ign, note,
             item.get("pack_dm_text") or "", item.get("pack_link") or "",
             item.get("pack_file") or "", item.get("preview_file") or "",
-            item.get("keybinds_text") or "", payout_percent, payout_recipient,
+            item.get("keybinds_text") or "", payout_percent, payout_recipient, discount_note,
+            old_ticket["id"] if old_ticket else None,
         ),
     )
     await bot.db.db.commit()
@@ -535,8 +770,9 @@ async def _create_player_item_ticket(
     await bot.db.db.commit()
 
     sale_note = " 🔥 (Sale)" if on_sale else ""
+    discount_line = f"\n🏷️ **Rabatt:** {discount_note}" if discount_note else ""
     pay_line = (
-        f"**Zahlung 1 — Shop-Währung ({format_price(price)}{sale_note}):**\n"
+        f"**Zahlung 1 — Shop-Währung ({format_price(price)}{sale_note}):**{discount_line}\n"
         f"```\n{config.mc_pay_command(price)}\n```\n"
         f"**Zahlung 2 — PayPal ({config.PAYPAL_EMAIL}):** fester Preis "
         f"**{config.PLAYER_ITEM_PAYPAL_PRICE:.2f} €** (unabhängig vom Shop-Preis)\n"
@@ -694,7 +930,16 @@ class PlayerItemTicketView(discord.ui.View):
             return
         await interaction.response.defer()
         await _mark_ticket(self.bot, int(row["id"]), "rejected", interaction.user.id)
-        await interaction.followup.send(embed=warn_embed("Abgelehnt", f"Abgelehnt von {interaction.user.mention}."))
+        trade_in_note = ""
+        if row.get("traded_in_ticket_id"):
+            await self.bot.db.db.execute(
+                "UPDATE player_shop_tickets SET traded_in = 0 WHERE id = ?", (row["traded_in_ticket_id"],)
+            )
+            await self.bot.db.db.commit()
+            trade_in_note = "\n_Eingetauschter alter Kauf wurde wieder freigegeben._"
+        await interaction.followup.send(
+            embed=warn_embed("Abgelehnt", f"Abgelehnt von {interaction.user.mention}.{trade_in_note}")
+        )
 
     @discord.ui.button(
         label="Schließen", style=discord.ButtonStyle.secondary, custom_id="playeritemticket:close", emoji="🔒",
@@ -714,6 +959,11 @@ class PlayerItemTicketView(discord.ui.View):
         await interaction.response.defer()
         if row["status"] == "pending":
             await _mark_ticket(self.bot, int(row["id"]), "rejected", interaction.user.id)
+            if row.get("traded_in_ticket_id"):
+                await self.bot.db.db.execute(
+                    "UPDATE player_shop_tickets SET traded_in = 0 WHERE id = ?", (row["traded_in_ticket_id"],)
+                )
+                await self.bot.db.db.commit()
         await interaction.followup.send(
             embed=warn_embed(
                 "Ticket wird geschlossen",
@@ -747,6 +997,23 @@ class PlayerShopPanelView(discord.ui.View):
 class PlayerShopCog(commands.Cog):
     def __init__(self, bot: "ShopBot") -> None:
         self.bot = bot
+        self.sale_reminder_loop.start()
+
+    def cog_unload(self) -> None:
+        self.sale_reminder_loop.cancel()
+
+    @tasks.loop(minutes=10)
+    async def sale_reminder_loop(self) -> None:
+        try:
+            n = await _notify_expired_sales(self.bot)
+            if n:
+                print(f"[PlayerShop] {n} abgelaufene Sale(s) gemeldet")
+        except Exception as e:
+            print(f"[PlayerShop] Sale-Reminder fehlgeschlagen: {e!r}")
+
+    @sale_reminder_loop.before_loop
+    async def before_sale_reminder_loop(self) -> None:
+        await self.bot.wait_until_ready()
 
     player_group = app_commands.Group(
         name="spieler", description="Spieler für Settings/Modpack-Shop verwalten (Staff)",
@@ -860,7 +1127,7 @@ class PlayerShopCog(commands.Cog):
                 if float(p.get("payout_percent") or 0) > 0 and p.get("payout_recipient")
                 else ""
             )
-            lines.append(f"**{p['name']}**{payout}")
+            lines.append(f"**{p['name']}**{_player_badge(p)}{payout}")
             if items:
                 lines.extend(f"  {_item_line(i)}" for i in items)
             else:
@@ -879,6 +1146,92 @@ class PlayerShopCog(commands.Cog):
             embed=success_embed("Gespeichert", f"Settings/Modpack-Support-Rolle ist jetzt {rolle.mention}."),
             ephemeral=True,
         )
+
+    @player_group.command(name="verifizieren", description="Spieler als vom Team verifiziert markieren/entfernen")
+    @app_commands.describe(name="Name des Spielers (tippen zum Suchen)", status="Verifiziert oder nicht")
+    @app_commands.choices(
+        status=[
+            app_commands.Choice(name="Verifiziert (🎖️)", value=1),
+            app_commands.Choice(name="Nicht verifiziert", value=0),
+        ],
+    )
+    async def player_verify(
+        self, interaction: discord.Interaction, name: str, status: app_commands.Choice[int],
+    ) -> None:
+        assert interaction.guild is not None
+        player = await find_player_by_name(self.bot, interaction.guild.id, name)
+        if not player:
+            await interaction.response.send_message(embed=error_embed("Nicht gefunden"), ephemeral=True)
+            return
+        await self.bot.db.db.execute(
+            "UPDATE shop_players SET verified = ? WHERE id = ?", (status.value, player["id"])
+        )
+        await self.bot.db.db.commit()
+        msg = f"**{player['name']}** ist jetzt {'🎖️ verifiziert' if status.value else 'nicht mehr verifiziert'}."
+        await interaction.response.send_message(embed=success_embed("Gespeichert", msg), ephemeral=True)
+
+    @player_verify.autocomplete("name")
+    async def player_verify_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return await self._player_ac(interaction, current)
+
+    @player_group.command(name="stats", description="Umsatz-Statistik anzeigen (Spieler oder gesamt)")
+    @app_commands.describe(name="Nur diesen Spieler zeigen (optional, tippen zum Suchen)")
+    async def player_stats(self, interaction: discord.Interaction, name: Optional[str] = None) -> None:
+        assert interaction.guild is not None
+        params: list = [interaction.guild.id]
+        where = "guild_id = ? AND status = 'confirmed'"
+        title = "Statistik — Alle Spieler"
+        if name:
+            player = await find_player_by_name(self.bot, interaction.guild.id, name)
+            if not player:
+                await interaction.response.send_message(embed=error_embed("Spieler nicht gefunden"), ephemeral=True)
+                return
+            where += " AND player_name = ?"
+            params.append(player["name"])
+            title = f"Statistik — {player['name']}"
+
+        rows = await self.bot.db.fetchall(
+            f"""
+            SELECT player_name, item_name, price, payout_percent
+            FROM player_shop_tickets WHERE {where}
+            """,
+            tuple(params),
+        )
+        rows = [dict(r) for r in rows]
+        if not rows:
+            await interaction.response.send_message(
+                embed=base_embed(title, "_Noch keine bestätigten Käufe._"), ephemeral=True,
+            )
+            return
+
+        total_revenue = sum(float(r["price"]) for r in rows)
+        total_payout = sum(float(r["price"]) * float(r["payout_percent"]) / 100 for r in rows)
+        per_item: dict[str, list[float]] = {}
+        for r in rows:
+            key = f"{r['player_name']} · {r['item_name']}"
+            per_item.setdefault(key, []).append(float(r["price"]))
+        top = sorted(per_item.items(), key=lambda kv: sum(kv[1]), reverse=True)[:10]
+        top_lines = "\n".join(
+            f"• **{k}** — {len(v)}× · {format_price(sum(v))}" for k, v in top
+        )
+
+        body = (
+            f"**Bestätigte Käufe:** {len(rows)}\n"
+            f"**Gesamtumsatz:** {format_price(total_revenue)}\n"
+            f"**Davon Provision (fällig/ausgezahlt):** {format_price(total_payout)}\n\n"
+            f"**Top-Items**\n{top_lines}"
+        )
+        await interaction.response.send_message(
+            embed=base_embed(title, body[:4000]), ephemeral=True,
+        )
+
+    @player_stats.autocomplete("name")
+    async def player_stats_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return await self._player_ac(interaction, current)
 
     @player_group.command(
         name="auszahlung",
@@ -920,6 +1273,80 @@ class PlayerShopCog(commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         return await self._player_ac(interaction, current)
+
+    @player_group.command(
+        name="tauschwert",
+        description="Eintausch-Rabatt aktivieren: alter bestätigter Kauf = % Rabatt auf neuen Kauf (0 = aus)",
+    )
+    @app_commands.describe(prozent="Wie viel % des alten Kaufpreises als Rabatt angerechnet werden (0 = aus)")
+    async def player_trade_in(
+        self, interaction: discord.Interaction, prozent: app_commands.Range[float, 0, 100],
+    ) -> None:
+        assert interaction.guild is not None
+        await self.bot.db.db.execute(
+            "INSERT INTO player_shop_settings (guild_id, trade_in_percent) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET trade_in_percent = excluded.trade_in_percent",
+            (interaction.guild.id, float(prozent)),
+        )
+        await self.bot.db.db.commit()
+        msg = (
+            f"Eintausch-Rabatt ist jetzt **{prozent:g}%**."
+            if prozent > 0
+            else "Eintausch-Rabatt ist jetzt deaktiviert."
+        )
+        await interaction.response.send_message(embed=success_embed("Gespeichert", msg), ephemeral=True)
+
+    @player_group.command(
+        name="gruppenrabatt",
+        description="Rabatt für Rollen-Träger, sobald N Käufe desselben Items bestätigt sind (0% = aus)",
+    )
+    @app_commands.describe(
+        rolle="Rolle, die den Gruppen-Rabatt bekommt",
+        prozent="Rabatt in %, z.B. 15 (0 = deaktivieren)",
+        ab_kaeufen="Ab wie vielen bestätigten Käufen des gleichen Items der Rabatt greift (Standard 3)",
+    )
+    async def player_group_discount(
+        self,
+        interaction: discord.Interaction,
+        rolle: discord.Role,
+        prozent: app_commands.Range[float, 0, 100],
+        ab_kaeufen: app_commands.Range[int, 1, 100] = 3,
+    ) -> None:
+        assert interaction.guild is not None
+        await self.bot.db.db.execute(
+            """
+            INSERT INTO player_shop_settings (guild_id, group_role_id, group_discount_percent, group_threshold)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                group_role_id = excluded.group_role_id,
+                group_discount_percent = excluded.group_discount_percent,
+                group_threshold = excluded.group_threshold
+            """,
+            (interaction.guild.id, rolle.id, float(prozent), int(ab_kaeufen)),
+        )
+        await self.bot.db.db.commit()
+        if prozent > 0:
+            msg = f"Träger von {rolle.mention} bekommen **{prozent:g}%** Rabatt, sobald **{ab_kaeufen}** Käufe desselben Items bestätigt sind."
+        else:
+            msg = "Gruppen-Rabatt ist jetzt deaktiviert."
+        await interaction.response.send_message(embed=success_embed("Gespeichert", msg), ephemeral=True)
+
+    @player_group.command(
+        name="salelog", description="Channel setzen, in dem abgelaufene Sales gemeldet werden",
+    )
+    @app_commands.describe(channel="Ziel-Channel (leer = deaktivieren)")
+    async def player_sale_log(
+        self, interaction: discord.Interaction, channel: discord.TextChannel | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        await self.bot.db.db.execute(
+            "INSERT INTO player_shop_settings (guild_id, sale_log_channel_id) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET sale_log_channel_id = excluded.sale_log_channel_id",
+            (interaction.guild.id, channel.id if channel else None),
+        )
+        await self.bot.db.db.commit()
+        msg = f"Sale-Ablauf-Meldungen gehen jetzt in {channel.mention}." if channel else "Sale-Ablauf-Meldungen sind jetzt deaktiviert."
+        await interaction.response.send_message(embed=success_embed("Gespeichert", msg), ephemeral=True)
 
     @item_group.command(name="hinzufuegen", description="Settings/Modpack/Coaching für einen Spieler anlegen")
     @app_commands.describe(
@@ -1172,7 +1599,7 @@ class PlayerShopCog(commands.Cog):
 
         until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
         await self.bot.db.db.execute(
-            "UPDATE shop_player_items SET sale_price = ?, sale_until = ? WHERE id = ?",
+            "UPDATE shop_player_items SET sale_price = ?, sale_until = ?, sale_notified = 0 WHERE id = ?",
             (sale_price, until.strftime(_SALE_TIME_FMT), item),
         )
         await self.bot.db.db.commit()
