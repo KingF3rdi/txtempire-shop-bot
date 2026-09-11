@@ -620,10 +620,10 @@ class MonetizationCog(commands.Cog):
                 vip_paypal_price = excluded.vip_paypal_price,
                 vip_days = excluded.vip_days
             """,
-            (interaction.guild.id, rolle.id, price, paypal_price, int(tage)),
+            (interaction.guild.id, rolle.id, price, paypal_preis, int(tage)),
         )
         await self.bot.db.db.commit()
-        paypal_note = f" oder {paypal_price:.2f} € PayPal" if paypal_price is not None else ""
+        paypal_note = f" oder {paypal_preis:.2f} € PayPal" if paypal_preis is not None else ""
         await interaction.response.send_message(
             embed=success_embed(
                 "VIP eingerichtet",
