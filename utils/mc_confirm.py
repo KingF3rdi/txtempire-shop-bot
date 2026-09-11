@@ -17,6 +17,7 @@ from utils.embeds import (
     success_embed,
     warn_embed,
 )
+from utils.product_channels import grant_purchase_channels
 from utils.roles import grant_purchase_roles
 from views.ticket_views import enrich_order_item_roles, _delete_channel_later
 
@@ -195,6 +196,7 @@ async def confirm_order_by_id(
             if isinstance(ch, discord.TextChannel):
                 channel = ch
 
+        channel_result: dict = {"granted": [], "skipped": [], "failed": []}
         if member and not non_product:
             role_result = await grant_purchase_roles(
                 member,
@@ -203,6 +205,7 @@ async def confirm_order_by_id(
                 pack_qty=int(order.get("pack_qty") or 0)
                 or sum(int(i.get("qty") or 1) for i in order_items),
             )
+            channel_result = await grant_purchase_channels(member, order_items)
             if channel is not None:
                 delivery_info = await deliver_packs(
                     member, channel, order_items, bot=bot
@@ -226,7 +229,9 @@ async def confirm_order_by_id(
 
         order = await bot.db.get_order(order_id) or order
         if buyer is not None:
-            success = purchase_success_embed(order, order_items, buyer, role_result)
+            success = purchase_success_embed(
+                order, order_items, buyer, role_result, channel_result
+            )
         else:
             success = success_embed(
                 "Kauf bestätigt (Auto)",

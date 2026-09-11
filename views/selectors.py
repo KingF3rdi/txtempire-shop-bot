@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Union
 
 import discord
 from discord import app_commands
@@ -13,6 +13,10 @@ if TYPE_CHECKING:
     from bot import ShopBot
 
 RoleCallback = Callable[[discord.Interaction, Optional[discord.Role]], Awaitable[None]]
+# discord.ui.ChannelSelect.values resolves to partial AppCommandChannel/-Thread
+# objects (has .id/.mention/.name/.resolve()), NOT real GuildChannel instances.
+PartialChannel = Union[app_commands.AppCommandChannel, app_commands.AppCommandThread]
+ChannelCallback = Callable[[discord.Interaction, Optional[PartialChannel]], Awaitable[None]]
 
 
 async def delete_later(message: discord.Message, delay: float = 12.0) -> None:
@@ -63,6 +67,56 @@ class RolePickView(SafeView):
         )
         role = select.values[0] if select.values else None
         await self.on_pick(interaction, role)
+        if self.stop_on_pick:
+            self.stop()
+
+    async def _clear(self, interaction: discord.Interaction) -> None:
+        await self.on_pick(interaction, None)
+        if self.stop_on_pick:
+            self.stop()
+
+
+class ChannelPickView(SafeView):
+    """Native Discord Channel-Select mit Suche (z.B. für Settings-Panel)."""
+
+    def __init__(
+        self,
+        *,
+        on_pick: ChannelCallback,
+        channel_types: list[discord.ChannelType],
+        allow_clear: bool = True,
+        placeholder: str = "Channel suchen / auswählen…",
+        timeout: float = 180,
+        stop_on_pick: bool = True,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.on_pick = on_pick
+        self.allow_clear = allow_clear
+        self.stop_on_pick = stop_on_pick
+
+        select = discord.ui.ChannelSelect(
+            placeholder=placeholder,
+            channel_types=channel_types,
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        select.callback = self._channel_chosen  # type: ignore[method-assign]
+        self.add_item(select)
+
+        if allow_clear:
+            clear_btn = discord.ui.Button(
+                label="Keinen Channel", style=discord.ButtonStyle.secondary, row=1
+            )
+            clear_btn.callback = self._clear  # type: ignore[method-assign]
+            self.add_item(clear_btn)
+
+    async def _channel_chosen(self, interaction: discord.Interaction) -> None:
+        select: discord.ui.ChannelSelect = next(
+            c for c in self.children if isinstance(c, discord.ui.ChannelSelect)
+        )
+        channel = select.values[0] if select.values else None
+        await self.on_pick(interaction, channel)
         if self.stop_on_pick:
             self.stop()
 

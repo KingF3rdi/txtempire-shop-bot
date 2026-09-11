@@ -294,6 +294,49 @@ class SetupCog(commands.Cog):
     ) -> list[app_commands.Choice[int]]:
         return await self._cat_ac(interaction, current)
 
+    @category.command(
+        name="setchannel",
+        description="Channel einer Kategorie verknüpfen (wird nach Kauf freigeschaltet)",
+    )
+    @app_commands.describe(
+        category="Kategorie (tippen zum Suchen)",
+        channel="Channel, der nach Kauf freigeschaltet wird (leer = entfernen)",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def category_setchannel(
+        self,
+        interaction: discord.Interaction,
+        category: int,
+        channel: Optional[discord.TextChannel] = None,
+    ) -> None:
+        cat = await self.bot.db.get_category(category)
+        if not cat or cat["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message(
+                embed=error_embed("Nicht gefunden"), ephemeral=True
+            )
+            return
+        await self.bot.db.update_category(
+            category, channel_id=channel.id if channel else None
+        )
+        if channel:
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Channel gesetzt", f"**{cat['name']}** → {channel.mention}"
+                ),
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                embed=success_embed("Channel entfernt", f"**{cat['name']}**"),
+                ephemeral=True,
+            )
+
+    @category_setchannel.autocomplete("category")
+    async def category_setchannel_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[int]]:
+        return await self._cat_ac(interaction, current)
+
     item = ManageGuildGroup(
         name="item",
         description="Items verwalten",
@@ -508,6 +551,49 @@ class SetupCog(commands.Cog):
 
     @item_setrole.autocomplete("item")
     async def item_setrole_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[int]]:
+        return await self.item_setpack_ac(interaction, current)
+
+    @item.command(
+        name="setchannel",
+        description="Channel eines Items verknüpfen (wird nach Kauf freigeschaltet)",
+    )
+    @app_commands.describe(
+        item="Item (tippen zum Suchen)",
+        channel="Channel, der nach Kauf freigeschaltet wird (leer = entfernen)",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def item_setchannel(
+        self,
+        interaction: discord.Interaction,
+        item: int,
+        channel: Optional[discord.TextChannel] = None,
+    ) -> None:
+        row = await self.bot.db.get_item(item)
+        if not row or row["guild_id"] != interaction.guild_id:
+            await interaction.response.send_message(
+                embed=error_embed("Nicht gefunden"), ephemeral=True
+            )
+            return
+        await self.bot.db.update_item(item, channel_id=channel.id if channel else None)
+        if channel:
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Channel gesetzt",
+                    f"**{row['name']}** → {channel.mention}\n"
+                    "Wird automatisch freigeschaltet, wenn Staff den Kauf bestätigt.",
+                ),
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                embed=success_embed("Channel entfernt", f"**{row['name']}**"),
+                ephemeral=True,
+            )
+
+    @item_setchannel.autocomplete("item")
+    async def item_setchannel_ac(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[int]]:
         return await self.item_setpack_ac(interaction, current)

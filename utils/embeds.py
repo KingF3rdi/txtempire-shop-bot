@@ -258,9 +258,17 @@ def order_cart_panel_embed(
             inline=True,
         )
     if guild is not None:
+        from utils.product_channels import collect_autochannel_mentions
         from utils.roles import collect_autorole_mentions
 
         role_lines = collect_autorole_mentions(guild, items)
+        channel_lines = collect_autochannel_mentions(items)
+        if channel_lines:
+            embed.add_field(
+                name="Channel nach Bestätigung",
+                value="\n".join(channel_lines),
+                inline=False,
+            )
         pack_qty = int(order.get("pack_qty") or 0)
         if pack_qty <= 0:
             pack_qty = sum(int(i.get("qty") or 1) for i in items)
@@ -294,6 +302,7 @@ def purchase_success_embed(
     items: list[dict],
     buyer: discord.abc.User,
     role_result: dict | None = None,
+    channel_result: dict | None = None,
 ) -> discord.Embed:
     """Panel nach erfolgreicher Staff-Bestätigung."""
     embed = success_embed(
@@ -328,6 +337,19 @@ def purchase_success_embed(
             embed.add_field(
                 name="Rollen-Fehler",
                 value="\n".join(f"- {f}" for f in role_result["failed"]),
+                inline=False,
+            )
+    if channel_result:
+        if channel_result.get("granted"):
+            embed.add_field(
+                name="Channel freigeschaltet",
+                value=", ".join(f"`#{n}`" for n in channel_result["granted"]),
+                inline=False,
+            )
+        if channel_result.get("failed"):
+            embed.add_field(
+                name="Channel-Fehler",
+                value="\n".join(f"- {f}" for f in channel_result["failed"]),
                 inline=False,
             )
     if order.get("ign"):

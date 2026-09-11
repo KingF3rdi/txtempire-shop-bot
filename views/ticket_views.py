@@ -18,6 +18,7 @@ from utils.embeds import (
     success_embed,
     warn_embed,
 )
+from utils.product_channels import grant_purchase_channels
 from utils.roles import grant_purchase_roles
 
 if TYPE_CHECKING:
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 
 
 async def enrich_order_item_roles(bot: ShopBot, order_items: list[dict]) -> list[dict]:
-    """Aktualisiert Item-/Kategorie-Rollen aus der live DB vor der Vergabe."""
+    """Aktualisiert Item-/Kategorie-Rollen und -Channel aus der live DB vor der Vergabe."""
     enriched: list[dict] = []
     for item in order_items:
         row = dict(item)
@@ -35,6 +36,8 @@ async def enrich_order_item_roles(bot: ShopBot, order_items: list[dict]) -> list
             if live:
                 if live.get("role_id"):
                     row["item_role_id"] = live["role_id"]
+                if live.get("channel_id"):
+                    row["item_channel_id"] = live["channel_id"]
                 if live.get("api_id"):
                     row["api_id"] = live["api_id"]
                 cat_id = live.get("category_id") or row.get("category_id")
@@ -42,10 +45,14 @@ async def enrich_order_item_roles(bot: ShopBot, order_items: list[dict]) -> list
                     cat = await bot.db.get_category(int(cat_id))
                     if cat and cat.get("role_id"):
                         row["category_role_id"] = cat["role_id"]
-        elif row.get("category_id") and not row.get("category_role_id"):
+                    if cat and cat.get("channel_id"):
+                        row["category_channel_id"] = cat["channel_id"]
+        elif row.get("category_id"):
             cat = await bot.db.get_category(int(row["category_id"]))
-            if cat and cat.get("role_id"):
+            if cat and not row.get("category_role_id") and cat.get("role_id"):
                 row["category_role_id"] = cat["role_id"]
+            if cat and not row.get("category_channel_id") and cat.get("channel_id"):
+                row["category_channel_id"] = cat["channel_id"]
         enriched.append(row)
     return enriched
 
@@ -377,6 +384,7 @@ async def action_confirm_order(
         )
 
     role_result: dict = {"granted": [], "skipped": [], "failed": []}
+    channel_result: dict = {"granted": [], "skipped": [], "failed": []}
     delivery_info: dict = {}
     non_product = order_kind in ("credits", "scan_premium", "snipe_premium")
     if member and not non_product:
@@ -387,6 +395,7 @@ async def action_confirm_order(
             pack_qty=int(order.get("pack_qty") or 0)
             or sum(int(i.get("qty") or 1) for i in order_items),
         )
+        channel_result = await grant_purchase_channels(member, order_items)
         channel = interaction.channel
         if isinstance(channel, discord.TextChannel):
             delivery_info = await deliver_packs(
@@ -411,7 +420,9 @@ async def action_confirm_order(
 
     order = await bot.db.get_order(int(order["id"])) or order
     if buyer is not None:
-        success = purchase_success_embed(order, order_items, buyer, role_result)
+        success = purchase_success_embed(
+            order, order_items, buyer, role_result, channel_result
+        )
     else:
         success = success_embed(
             "Erfolgreicher Kauf",

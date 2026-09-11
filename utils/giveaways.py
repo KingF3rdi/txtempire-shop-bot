@@ -8,6 +8,7 @@ import discord
 
 from utils.embeds import base_embed, format_price, success_embed
 from utils.packs import resolve_pack_path
+from utils.product_channels import grant_purchase_channels
 from utils.roles import grant_purchase_roles
 
 if TYPE_CHECKING:
@@ -52,6 +53,8 @@ def item_to_order_snapshot(item: dict) -> dict:
         "pack_file": item.get("pack_file") or "",
         "item_role_id": item.get("role_id"),
         "category_role_id": None,
+        "item_channel_id": item.get("channel_id"),
+        "category_channel_id": None,
         "price_snapshot": float(item.get("price") or 0),
     }
 
@@ -63,6 +66,8 @@ async def enrich_item_roles(bot: ShopBot, item: dict) -> dict:
         cat = await bot.db.get_category(int(cat_id))
         if cat and cat.get("role_id"):
             snap["category_role_id"] = cat["role_id"]
+        if cat and cat.get("channel_id"):
+            snap["category_channel_id"] = cat["channel_id"]
     return snap
 
 
@@ -114,6 +119,7 @@ async def deliver_giveaway_prize(
     settings = await bot.db.ensure_guild(guild.id)
     snap = await enrich_item_roles(bot, item)
     role_result = await grant_purchase_roles(member, settings, [snap])
+    await grant_purchase_channels(member, [snap])
 
     name = snap["name_snapshot"]
     dm_text = (snap.get("pack_dm_text") or "").strip()

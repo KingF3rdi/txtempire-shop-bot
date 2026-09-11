@@ -15,12 +15,26 @@ if TYPE_CHECKING:
     from bot import ShopBot
 
 
-def _settings_summary(settings: dict) -> str:
+def _settings_summary(settings: dict, guild: discord.Guild | None = None) -> str:
+    def _role(key: str) -> str:
+        rid = settings.get(key)
+        if not rid:
+            return "—"
+        role = guild.get_role(int(rid)) if guild else None
+        return role.mention if role else f"`{rid}`"
+
+    def _channel(key: str) -> str:
+        cid = settings.get(key)
+        if not cid:
+            return "—"
+        ch = guild.get_channel(int(cid)) if guild else None
+        return ch.mention if ch else f"`{cid}`"
+
     return (
-        f"**Staff-Rolle:** `{settings.get('staff_role_id') or '—'}`\n"
-        f"**Customer-Rolle:** `{settings.get('customer_role_id') or '—'}`\n"
-        f"**Ticket-Kategorie:** `{settings.get('ticket_category_id') or '—'}`\n"
-        f"**Vouch-Channel:** `{settings.get('vouch_channel_id') or '—'}`\n"
+        f"**Staff-Rolle:** {_role('staff_role_id')}\n"
+        f"**Customer-Rolle:** {_role('customer_role_id')}\n"
+        f"**Ticket-Kategorie:** {_channel('ticket_category_id')}\n"
+        f"**Vouch-Channel:** {_channel('vouch_channel_id')}\n"
         f"**Ticket-Limit:** `{settings.get('max_open_tickets') or 1}`\n"
         f"**Zahlungsempfänger:** {settings.get('payee_a_label') or 'TxtEmpire'}\n"
         f"{settings.get('payee_a_details') or '_keine Details_'}"
@@ -201,13 +215,125 @@ class AdminPanelView(discord.ui.View):
     ) -> None:
         await interaction.response.send_modal(PayeeModal(self.bot, self.guild_id))
 
-    @discord.ui.button(label="Einstellungen", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Staff-Rolle", style=discord.ButtonStyle.secondary, row=2)
+    async def staff_role(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        from views.selectors import RolePickView
+
+        async def on_pick(inter: discord.Interaction, role: discord.Role | None) -> None:
+            await self.bot.db.update_guild_settings(
+                self.guild_id, staff_role_id=role.id if role else None
+            )
+            await inter.response.send_message(
+                embed=success_embed(
+                    "Staff-Rolle gesetzt" if role else "Staff-Rolle entfernt",
+                    role.mention if role else "—",
+                ),
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            content="Staff-Rolle wählen (Suche im Dropdown):",
+            view=RolePickView(on_pick=on_pick),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Customer-Rolle", style=discord.ButtonStyle.secondary, row=2)
+    async def customer_role(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        from views.selectors import RolePickView
+
+        async def on_pick(inter: discord.Interaction, role: discord.Role | None) -> None:
+            await self.bot.db.update_guild_settings(
+                self.guild_id, customer_role_id=role.id if role else None
+            )
+            await inter.response.send_message(
+                embed=success_embed(
+                    "Customer-Rolle gesetzt" if role else "Customer-Rolle entfernt",
+                    role.mention if role else "—",
+                ),
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            content="Customer-Rolle wählen (nach Kauf vergeben):",
+            view=RolePickView(on_pick=on_pick),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Ticket-Kategorie", style=discord.ButtonStyle.secondary, row=3)
+    async def ticket_category(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        from views.selectors import ChannelPickView
+
+        async def on_pick(
+            inter: discord.Interaction, channel: app_commands.AppCommandChannel | None
+        ) -> None:
+            await self.bot.db.update_guild_settings(
+                self.guild_id, ticket_category_id=channel.id if channel else None
+            )
+            await inter.response.send_message(
+                embed=success_embed(
+                    "Ticket-Kategorie gesetzt" if channel else "Ticket-Kategorie entfernt",
+                    channel.mention if channel else "—",
+                ),
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            content="Discord-Kategorie für Order-Tickets wählen:",
+            view=ChannelPickView(
+                on_pick=on_pick, channel_types=[discord.ChannelType.category]
+            ),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Vouch-Channel", style=discord.ButtonStyle.secondary, row=3)
+    async def vouch_channel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        from views.selectors import ChannelPickView
+
+        async def on_pick(
+            inter: discord.Interaction, channel: app_commands.AppCommandChannel | None
+        ) -> None:
+            await self.bot.db.update_guild_settings(
+                self.guild_id, vouch_channel_id=channel.id if channel else None
+            )
+            if channel is not None:
+                resolved = channel.resolve() if hasattr(channel, "resolve") else channel
+                if isinstance(resolved, discord.TextChannel):
+                    from utils.vouch_channel_perms import lock_vouch_channel_defaults
+
+                    await lock_vouch_channel_defaults(resolved)
+            await inter.response.send_message(
+                embed=success_embed(
+                    "Vouch-Channel gesetzt" if channel else "Vouch-Channel entfernt",
+                    channel.mention if channel else "—",
+                ),
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            content="Channel für `/vouch`-Posts wählen:",
+            view=ChannelPickView(
+                on_pick=on_pick, channel_types=[discord.ChannelType.text]
+            ),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Einstellungen", style=discord.ButtonStyle.secondary, row=3)
     async def show_settings(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         settings = await self.bot.db.ensure_guild(self.guild_id)
         await interaction.response.send_message(
-            embed=base_embed("Einstellungen", _settings_summary(settings)),
+            embed=base_embed(
+                "Einstellungen", _settings_summary(settings, interaction.guild)
+            ),
             ephemeral=True,
         )
 
@@ -261,6 +387,42 @@ class CategoryActionsView(discord.ui.View):
         await interaction.response.send_message(
             content="Kauf-Rolle für die Kategorie wählen (Suche im Dropdown):",
             view=RolePickView(on_pick=on_pick),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Kauf-Channel", style=discord.ButtonStyle.secondary)
+    async def set_channel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        from views.selectors import ChannelPickView
+
+        async def on_pick(
+            inter: discord.Interaction, channel: app_commands.AppCommandChannel | None
+        ) -> None:
+            await self.bot.db.update_category(
+                int(self.cat["id"]), channel_id=channel.id if channel else None
+            )
+            self.cat["channel_id"] = channel.id if channel else None
+            if channel:
+                await inter.response.send_message(
+                    embed=success_embed(
+                        "Channel gesetzt",
+                        f"**{self.cat['name']}** → {channel.mention}\n"
+                        "Käufer bekommen ihn nach Bestätigung freigeschaltet.",
+                    ),
+                    ephemeral=True,
+                )
+            else:
+                await inter.response.send_message(
+                    embed=success_embed("Channel entfernt", f"**{self.cat['name']}**"),
+                    ephemeral=True,
+                )
+
+        await interaction.response.send_message(
+            content="Channel für die Kategorie wählen (wird nach Kauf freigeschaltet):",
+            view=ChannelPickView(
+                on_pick=on_pick, channel_types=[discord.ChannelType.text]
+            ),
             ephemeral=True,
         )
 
@@ -351,6 +513,42 @@ class ItemActionsView(discord.ui.View):
         await interaction.response.send_message(
             content="Artikel-Autorole wählen (Suche im Dropdown):",
             view=RolePickView(on_pick=on_pick),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Channel", style=discord.ButtonStyle.secondary)
+    async def set_channel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        from views.selectors import ChannelPickView
+
+        async def on_pick(
+            inter: discord.Interaction, channel: app_commands.AppCommandChannel | None
+        ) -> None:
+            await self.bot.db.update_item(
+                int(self.item["id"]), channel_id=channel.id if channel else None
+            )
+            self.item["channel_id"] = channel.id if channel else None
+            if channel:
+                await inter.response.send_message(
+                    embed=success_embed(
+                        "Channel gesetzt",
+                        f"**{self.item['name']}** → {channel.mention}\n"
+                        "Käufer bekommen ihn nach Bestätigung freigeschaltet.",
+                    ),
+                    ephemeral=True,
+                )
+            else:
+                await inter.response.send_message(
+                    embed=success_embed("Channel entfernt", f"**{self.item['name']}**"),
+                    ephemeral=True,
+                )
+
+        await interaction.response.send_message(
+            content="Channel für das Item wählen (wird nach Kauf freigeschaltet):",
+            view=ChannelPickView(
+                on_pick=on_pick, channel_types=[discord.ChannelType.text]
+            ),
             ephemeral=True,
         )
 
@@ -789,7 +987,7 @@ class AdminPanelCog(commands.Cog):
         embed = base_embed(
             "Admin Panel",
             f"**Kategorien:** {len(cats)} · **Items:** {len(items)}\n\n"
-            + _settings_summary(settings),
+            + _settings_summary(settings, interaction.guild),
         )
         view = AdminPanelView(self.bot, interaction.guild.id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)

@@ -343,6 +343,10 @@ class Database:
             ("guild_settings", "snipe_credits_14", "REAL"),
             ("guild_settings", "snipe_credits_30", "REAL"),
             ("guild_settings", "snipe_credits_lifetime", "REAL"),
+            ("categories", "channel_id", "INTEGER"),
+            ("items", "channel_id", "INTEGER"),
+            ("order_items", "item_channel_id", "INTEGER"),
+            ("order_items", "category_channel_id", "INTEGER"),
         ):
             try:
                 await self.db.execute(
@@ -1270,7 +1274,8 @@ class Database:
             """
             SELECT c.item_id, c.qty, i.name, i.price, i.category_id,
                    i.pack_dm_text, i.pack_link, i.pack_file, i.role_id AS item_role_id,
-                   cat.role_id AS category_role_id, cat.name AS category_name
+                   cat.role_id AS category_role_id, cat.name AS category_name,
+                   i.channel_id AS item_channel_id, cat.channel_id AS category_channel_id
             FROM carts c
             JOIN items i ON i.id = c.item_id
             JOIN categories cat ON cat.id = i.category_id
@@ -1365,8 +1370,9 @@ class Database:
                 """
                 INSERT INTO order_items
                   (order_id, item_id, category_id, name_snapshot, price_snapshot, qty,
-                   pack_dm_text, pack_link, pack_file, item_role_id, category_role_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   pack_dm_text, pack_link, pack_file, item_role_id, category_role_id,
+                   item_channel_id, category_channel_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order_id,
@@ -1380,6 +1386,8 @@ class Database:
                     r.get("pack_file") or "",
                     r.get("item_role_id"),
                     r.get("category_role_id"),
+                    r.get("item_channel_id"),
+                    r.get("category_channel_id"),
                 ),
             )
         await self.db.commit()
@@ -3474,6 +3482,8 @@ class Database:
             "pack_file": item.get("pack_file") or "",
             "item_role_id": item.get("role_id"),
             "category_role_id": cat.get("role_id") if cat else None,
+            "item_channel_id": item.get("channel_id"),
+            "category_channel_id": cat.get("channel_id") if cat else None,
             "category_name": (cat.get("name") if cat else "") or "",
         }
 
