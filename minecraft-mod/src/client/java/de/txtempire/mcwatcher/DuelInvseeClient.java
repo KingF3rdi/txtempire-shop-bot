@@ -111,7 +111,7 @@ public final class DuelInvseeClient {
 		if (reportTask != null) {
 			return;
 		}
-		reportTask = SCHEDULER.scheduleAtFixedRate(DuelInvseeClient::tick, 0L, 10L, TimeUnit.SECONDS);
+		reportTask = SCHEDULER.scheduleAtFixedRate(DuelInvseeClient::tick, 0L, 15L, TimeUnit.SECONDS);
 	}
 
 	private static synchronized void stopReporting() {
@@ -151,11 +151,19 @@ public final class DuelInvseeClient {
 		addItem(items, "armor", 3, player.getItemBySlot(EquipmentSlot.FEET));
 		addItem(items, "offhand", 0, player.getItemBySlot(EquipmentSlot.OFFHAND));
 
-		JsonObject payload = new JsonObject();
-		payload.add("items", items);
+		// Zwei unabhängige Ziele, dieselben Item-Daten: die Website (Live-Seite,
+		// per Token) und der Bot (rendert ein Bild, schickt/aktualisiert es per
+		// DM beim Käufer). Jede JsonObject-Hülle bekommt ihre eigenen
+		// Zusatzfelder, das gemeinsame JsonArray wird nicht verändert.
+		JsonObject websitePayload = new JsonObject();
+		websitePayload.add("items", items);
 		// buyer_ign/opponent_ign werden von ApiClient.postDuelInvseeSnapshot ergänzt:
 		// aus Sicht der Website ist "opponent" immer der, dessen Inventar gemeldet wird (wir selbst).
-		api.postDuelInvseeSnapshot(token, selfIgn, "", payload);
+		api.postDuelInvseeSnapshot(token, selfIgn, "", websitePayload);
+
+		JsonObject reportPayload = new JsonObject();
+		reportPayload.add("items", items);
+		api.postDuelInvseeReport(selfIgn, reportPayload);
 	}
 
 	private static void addItem(JsonArray out, String group, int slot, ItemStack stack) {

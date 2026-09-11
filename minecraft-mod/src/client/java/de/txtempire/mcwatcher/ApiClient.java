@@ -110,6 +110,22 @@ public final class ApiClient {
 		});
 	}
 
+	/**
+	 * Meldet das eigene Inventar an den Bot (nicht die Website) — der Bot
+	 * rendert daraus ein Bild und schickt/aktualisiert es in der DM des
+	 * Käufers. Läuft parallel zu {@link #postDuelInvseeSnapshot}.
+	 */
+	public void postDuelInvseeReport(String ign, JsonObject itemsPayload) {
+		itemsPayload.addProperty("ign", ign);
+		if (config.guildId != null && !config.guildId.isBlank() && !"0".equals(config.guildId)) {
+			try {
+				itemsPayload.addProperty("guild_id", Long.parseLong(config.guildId.trim()));
+			} catch (NumberFormatException ignored) {
+			}
+		}
+		pool.execute(() -> sendNowWithKey("/mc/v1/duelinvsee/report", itemsPayload.toString(), config.duelInvseeKey));
+	}
+
 	/** Pusht einen Inventar-Snapshot direkt an die Website (eigener Key, eigener Host). */
 	public void postDuelInvseeSnapshot(String token, String selfIgn, String opponentIgn, JsonObject itemsPayload) {
 		if (config.duelInvseeWebsiteUrl == null || config.duelInvseeWebsiteUrl.isBlank()) {

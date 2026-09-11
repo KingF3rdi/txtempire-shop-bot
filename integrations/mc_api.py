@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 import config
-from utils.duel_invsee_store import find_active_watch_token, set_opt_in
+from utils.duel_invsee_store import find_active_watch_token, find_active_watches, set_opt_in
 from utils.mc_confirm import handle_mc_link_redeem, handle_mc_payment
 
 if TYPE_CHECKING:
@@ -96,6 +96,7 @@ class McApiServer:
         app.router.add_post("/mc/v1/chat", self.chat)
         app.router.add_post("/mc/v1/duelinvsee/optin", self.duelinvsee_optin)
         app.router.add_post("/mc/v1/duelinvsee/heartbeat", self.duelinvsee_heartbeat)
+        app.router.add_post("/mc/v1/duelinvsee/report", self.duelinvsee_report)
         # Pack AI License-API auf demselben Port (für Bot + PackAI.exe)
         from integrations import packai_license_api
 
@@ -217,7 +218,7 @@ class McApiServer:
         return web.json_response({"ok": True, "ign": ign, "enabled": enabled})
 
     async def duelinvsee_heartbeat(self, request: web.Request) -> web.Response:
-        """Vom Ingame-Mod alle ~10s aufgerufen (nur solange der Spieler selbst
+        """Vom Ingame-Mod alle ~15s aufgerufen (nur solange der Spieler selbst
         opted-in ist): meldet zurück, ob GERADE jemand für diesen IGN bezahlt
         hat zuzusehen, und mit welchem Token der Mod sein Inventar dann direkt
         an die Website pushen soll."""
@@ -237,6 +238,41 @@ class McApiServer:
         if token:
             return web.json_response({"ok": True, "watching": True, "token": token})
         return web.json_response({"ok": True, "watching": False})
+
+    async def duelinvsee_report(self, request: web.Request) -> web.Response:
+        """Vom Ingame-Mod aufgerufen (nur wenn die Heartbeat-Antwort watching=true
+        war): liefert das Inventar direkt an den Bot, der daraus ein Bild rendert
+        und es dem/den Käufer(n) per DM schickt (erste Nachricht neu, danach per
+        Edit auf demselben Bild — kein Nachrichten-Spam). Läuft parallel zum
+        Website-Push, den der Mod separat macht."""
+        if not _duelinvsee_auth_ok(request):
+            raise web.HTTPUnauthorized(text='{"ok":false,"reason":"unauthorized"}')
+        self._touch_watcher("duelinvsee_report")
+        data = await _read_json(request)
+        ign = str(data.get("ign") or "").strip()
+        guild_id = _guild_id(data)
+        if not IGN_RE.match(ign):
+            return web.json_response({"ok": False, "reason": "bad_ign"}, status=400)
+        if not guild_id:
+            return web.json_response(
+                {"ok": False, "reason": "guild_id_required"}, status=400
+            )
+        items = data.get("items")
+        if not isinstance(items, list):
+            return web.json_response({"ok": False, "reason": "bad_items"}, status=400)
+
+        watches = await find_active_watches(self.bot, guild_id, ign)
+        if not watches:
+            return web.json_response({"ok": True, "notified": 0})
+
+        from utils.duel_invsee_dm import send_or_update_watch_dm
+
+        notified = 0
+        for watch in watches:
+            ok = await send_or_update_watch_dm(self.bot, watch, ign=ign, items=items)
+            if ok:
+                notified += 1
+        return web.json_response({"ok": True, "notified": notified})
 
     async def chat(self, request: web.Request) -> web.Response:
         """Generischer Chat-Event: Mod schickt Klartext, Bot parst Link/Payment."""

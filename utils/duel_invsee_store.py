@@ -10,10 +10,19 @@ from __future__ import annotations
 
 import secrets
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from bot import ShopBot
+
+
+async def _ensure_column(bot: "ShopBot", table: str, column: str, ddl: str) -> None:
+    try:
+        await bot.db.db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+        await bot.db.db.commit()
+    except Exception as e:
+        if "duplicate column" not in str(e).lower():
+            raise
 
 
 async def ensure_tables(bot: "ShopBot") -> None:
@@ -38,6 +47,9 @@ async def ensure_tables(bot: "ShopBot") -> None:
         """
     )
     await bot.db.db.commit()
+    # DM-Tracking nachgerüstet — bestehende Tabellen bekommen die Spalten hier dazu.
+    await _ensure_column(bot, "duel_invsee_watches", "dm_channel_id", "dm_channel_id INTEGER")
+    await _ensure_column(bot, "duel_invsee_watches", "dm_message_id", "dm_message_id INTEGER")
 
 
 async def is_opted_in(bot: "ShopBot", guild_id: int, ign: str) -> bool:
@@ -86,3 +98,25 @@ async def find_active_watch_token(bot: "ShopBot", guild_id: int, ign: str) -> Op
         (guild_id, ign.strip(), int(time.time())),
     )
     return str(row["token"]) if row else None
+
+
+async def find_active_watches(bot: "ShopBot", guild_id: int, ign: str) -> list[dict[str, Any]]:
+    """Alle noch gültigen Watches für diesen IGN — normalerweise einer, aber
+    mehrere Käufer könnten parallel denselben Gegner beobachten."""
+    rows = await bot.db.fetchall(
+        """
+        SELECT id, buyer_discord_id, token, dm_channel_id, dm_message_id
+        FROM duel_invsee_watches
+        WHERE guild_id = ? AND lower(opponent_ign) = lower(?) AND expires_at > ?
+        """,
+        (guild_id, ign.strip(), int(time.time())),
+    )
+    return [dict(r) for r in rows]
+
+
+async def set_watch_dm(bot: "ShopBot", watch_id: int, channel_id: int, message_id: int) -> None:
+    await bot.db.db.execute(
+        "UPDATE duel_invsee_watches SET dm_channel_id = ?, dm_message_id = ? WHERE id = ?",
+        (channel_id, message_id, watch_id),
+    )
+    await bot.db.db.commit()
