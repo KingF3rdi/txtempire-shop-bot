@@ -44,6 +44,7 @@ class ShopBot(commands.Bot):
             "cogs.tweak_vouch_setup",
             "cogs.custom_pack",
             "cogs.spawner_shop",
+            "cogs.player_shop",
             "cogs.tweak_panel",
             "cogs.website_backfill",
             ):
@@ -117,6 +118,10 @@ class ShopBot(commands.Bot):
 
         self.add_view(SpawnerPanelView(self))
         self.add_view(SpawnerTicketView(self))
+        from cogs.player_shop import PlayerShopPanelView, PlayerItemTicketView
+
+        self.add_view(PlayerShopPanelView(self))
+        self.add_view(PlayerItemTicketView(self))
         from cogs.tweak_panel import TweakShopPanelView
 
         self.add_view(TweakShopPanelView(self))

@@ -39,6 +39,13 @@ def paypal_price_text(pack_qty: int = 1) -> str:
     """IRL-Preis-Hinweis für PayPal, z.B. '(≈ 0.57 € PayPal)' bei 3 Packs."""
     total = pack_qty * PAYPAL_PRICE_PER_PACK
     return f"(≈ {total:.2f} € PayPal)"
+
+
+# Settings/Modpacks von Spielern (Spieler-Shop): fester PayPal-Preis pro Item,
+# unabhängig vom Shop-Währungspreis (anders als PAYPAL_PRICE_PER_PACK oben).
+PLAYER_ITEM_PAYPAL_PRICE = float(
+    os.getenv("PLAYER_ITEM_PAYPAL_PRICE", "1.00") or "1.00"
+)
 PAYMENT_NOTICE = "Das gesamte Geld geht an TxtEmpire."
 
 # File-Scanner Limits
