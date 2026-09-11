@@ -11,7 +11,6 @@ from aiohttp import web
 import config
 from utils.duel_invsee_store import find_active_watch_token, set_opt_in
 from utils.mc_confirm import handle_mc_link_redeem, handle_mc_payment
-from utils.mc_duel_invsee import handle_duel_invsee_charge
 
 if TYPE_CHECKING:
     from bot import ShopBot
@@ -95,7 +94,6 @@ class McApiServer:
         app.router.add_post("/mc/v1/link", self.link)
         app.router.add_post("/mc/v1/payment", self.payment)
         app.router.add_post("/mc/v1/chat", self.chat)
-        app.router.add_post("/mc/v1/duelinvsee/charge", self.duelinvsee_charge)
         app.router.add_post("/mc/v1/duelinvsee/optin", self.duelinvsee_optin)
         app.router.add_post("/mc/v1/duelinvsee/heartbeat", self.duelinvsee_heartbeat)
         # Pack AI License-API auf demselben Port (für Bot + PackAI.exe)
@@ -197,38 +195,6 @@ class McApiServer:
             raw_text=raw,
         )
         return web.json_response(result)
-
-    async def duelinvsee_charge(self, request: web.Request) -> web.Response:
-        """Vom Duell-Plugin aufgerufen: bucht den Duel-Invsee-Preis vom
-        verknüpften Discord-Account des Käufers ab (IGN -> Discord-Link).
-        Das Plugin selbst prüft vorher, dass Käufer und Ziel gerade
-        tatsächlich in einem laufenden Duell gegeneinander stehen."""
-        if not _auth_ok(request):
-            raise web.HTTPUnauthorized(text='{"ok":false,"reason":"unauthorized"}')
-        self._touch_watcher("duelinvsee_charge")
-        data = await _read_json(request)
-        ign = str(data.get("ign") or "").strip()
-        guild_id = _guild_id(data)
-        if not IGN_RE.match(ign):
-            return web.json_response({"ok": False, "reason": "bad_ign"}, status=400)
-        if not guild_id:
-            return web.json_response(
-                {"ok": False, "reason": "guild_id_required"}, status=400
-            )
-        try:
-            amount = float(data.get("amount"))
-        except (TypeError, ValueError):
-            return web.json_response({"ok": False, "reason": "bad_amount"}, status=400)
-        if amount <= 0:
-            return web.json_response({"ok": False, "reason": "bad_amount"}, status=400)
-
-        result = await handle_duel_invsee_charge(
-            self.bot, guild_id=guild_id, ign=ign, amount=amount
-        )
-        if result.get("ok"):
-            return web.json_response(result, status=200)
-        status = 404 if result.get("reason") == "ign_not_linked" else 402
-        return web.json_response(result, status=status)
 
     async def duelinvsee_optin(self, request: web.Request) -> web.Response:
         """Vom Ingame-Mod aufgerufen, wenn ein Spieler SELBST `/duelinvsee on`
