@@ -30,7 +30,7 @@ from discord.ext import commands
 import config
 from utils.delivery import deliver_packs
 from utils.embeds import base_embed, error_embed, format_price, success_embed, warn_embed
-from utils.packs import save_pack_attachment
+from utils.packs import resolve_preview_path, save_pack_attachment, save_preview_attachment
 from utils.price import parse_price
 from views.ticket_views import is_staff
 
@@ -62,6 +62,7 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             pack_dm_text TEXT NOT NULL DEFAULT '',
             pack_link TEXT NOT NULL DEFAULT '',
             pack_file TEXT NOT NULL DEFAULT '',
+            preview_file TEXT NOT NULL DEFAULT '',
             sort_order INTEGER NOT NULL DEFAULT 99,
             FOREIGN KEY (player_id) REFERENCES shop_players(id) ON DELETE CASCADE
         );
@@ -83,6 +84,7 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             pack_dm_text TEXT NOT NULL DEFAULT '',
             pack_link TEXT NOT NULL DEFAULT '',
             pack_file TEXT NOT NULL DEFAULT '',
+            preview_file TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'pending',
             ticket_channel_id INTEGER,
             created_by INTEGER,
@@ -92,6 +94,15 @@ async def _ensure_tables(bot: "ShopBot") -> None:
         """
     )
     await bot.db.db.commit()
+    # Additiv für Installs, bei denen die Tabellen schon ohne preview_file liefen.
+    for table in ("shop_player_items", "player_shop_tickets"):
+        try:
+            await bot.db.db.execute(
+                f"ALTER TABLE {table} ADD COLUMN preview_file TEXT NOT NULL DEFAULT ''"
+            )
+            await bot.db.db.commit()
+        except Exception:
+            pass
 
 
 async def _get_staff_role_id(bot: "ShopBot", guild_id: int) -> Optional[int]:
@@ -175,10 +186,11 @@ def _kind_label(kind: str) -> str:
 
 
 def _item_line(item: dict) -> str:
+    preview_mark = " 🖼️" if item.get("preview_file") else ""
     return (
         f"`{item['id']}` **{item['name']}** ({_kind_label(item['kind'])}) · "
         f"{format_price(float(item['price']))} · PayPal "
-        f"{config.PLAYER_ITEM_PAYPAL_PRICE:.2f} €"
+        f"{config.PLAYER_ITEM_PAYPAL_PRICE:.2f} €{preview_mark}"
     )
 
 
@@ -356,14 +368,14 @@ async def _create_player_item_ticket(
         """
         INSERT INTO player_shop_tickets
             (guild_id, ticket_number, user_id, player_name, item_name, kind,
-             price, ign, pack_dm_text, pack_link, pack_file, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+             price, ign, pack_dm_text, pack_link, pack_file, preview_file, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
         """,
         (
             guild.id, ticket_number, interaction.user.id, player["name"], item["name"],
             item["kind"], price, ign,
             item.get("pack_dm_text") or "", item.get("pack_link") or "",
-            item.get("pack_file") or "",
+            item.get("pack_file") or "", item.get("preview_file") or "",
         ),
     )
     await bot.db.db.commit()
@@ -405,10 +417,12 @@ async def _create_player_item_ticket(
         "das Pack wird dann automatisch per DM geliefert.",
     )
     mention = staff_role.mention if staff_role else "Staff"
+    preview_path = resolve_preview_path(item.get("preview_file"))
     await channel.send(
         content=f"{interaction.user.mention} {mention}",
         embed=embed,
         view=PlayerItemTicketView(bot),
+        file=discord.File(preview_path, filename=preview_path.name) if preview_path else discord.utils.MISSING,
     )
     await interaction.followup.send(
         embed=success_embed(
@@ -699,6 +713,7 @@ class PlayerShopCog(commands.Cog):
         datei="Pack-Datei per Anhang (optional)",
         link="Pack-Link (optional, alternativ zur Datei)",
         beschreibung="Text, der dem Käufer per DM mitgeschickt wird (optional)",
+        bild="Vorschau-Bild oder -Video (png/jpg/gif/webp/mp4/mov/webm, optional)",
     )
     @app_commands.choices(
         art=[
@@ -716,6 +731,7 @@ class PlayerShopCog(commands.Cog):
         datei: Optional[discord.Attachment] = None,
         link: str = "",
         beschreibung: str = "",
+        bild: Optional[discord.Attachment] = None,
     ) -> None:
         assert interaction.guild is not None
         player = await find_player_by_name(self.bot, interaction.guild.id, spieler)
@@ -757,12 +773,24 @@ class PlayerShopCog(commands.Cog):
             except ValueError as e:
                 pack_note = f"\nPack-Upload fehlgeschlagen: {e}"
 
+        preview_note = ""
+        if bild is not None:
+            try:
+                rel = await save_preview_attachment(item_id, bild)
+                await self.bot.db.db.execute(
+                    "UPDATE shop_player_items SET preview_file = ? WHERE id = ?", (rel, item_id)
+                )
+                await self.bot.db.db.commit()
+                preview_note = f"\nVorschau gespeichert: **{bild.filename}**"
+            except ValueError as e:
+                preview_note = f"\nVorschau-Upload fehlgeschlagen: {e}"
+
         await interaction.followup.send(
             embed=success_embed(
                 "Settings/Modpack angelegt",
                 f"ID `{item_id}` — **{name}** ({_kind_label(art.value)}) für **{player['name']}**\n"
                 f"{format_price(price)} · PayPal fest {config.PLAYER_ITEM_PAYPAL_PRICE:.2f} €"
-                f"{pack_note}",
+                f"{pack_note}{preview_note}",
             ),
             ephemeral=True,
         )
@@ -781,6 +809,7 @@ class PlayerShopCog(commands.Cog):
         datei="Neue Pack-Datei per Anhang (optional)",
         link="Neuer Pack-Link (optional)",
         beschreibung="Neuer DM-Text (optional)",
+        bild="Neues Vorschau-Bild oder -Video (optional)",
     )
     async def item_set(
         self,
@@ -791,6 +820,7 @@ class PlayerShopCog(commands.Cog):
         datei: Optional[discord.Attachment] = None,
         link: Optional[str] = None,
         beschreibung: Optional[str] = None,
+        bild: Optional[discord.Attachment] = None,
     ) -> None:
         assert interaction.guild is not None
         row = await get_player_item(self.bot, interaction.guild.id, item)
@@ -836,11 +866,24 @@ class PlayerShopCog(commands.Cog):
             except ValueError as e:
                 pack_note = f"\nPack-Upload fehlgeschlagen: {e}"
 
+        preview_note = ""
+        if bild is not None:
+            try:
+                rel = await save_preview_attachment(item, bild)
+                await self.bot.db.db.execute(
+                    "UPDATE shop_player_items SET preview_file = ? WHERE id = ?", (rel, item)
+                )
+                await self.bot.db.db.commit()
+                preview_note = f"\nVorschau aktualisiert: **{bild.filename}**"
+            except ValueError as e:
+                preview_note = f"\nVorschau-Upload fehlgeschlagen: {e}"
+
         fresh = await get_player_item(self.bot, interaction.guild.id, item) or row
         await interaction.followup.send(
             embed=success_embed(
                 "Aktualisiert",
-                f"ID `{item}` — **{fresh['name']}** · {format_price(float(fresh['price']))}{pack_note}",
+                f"ID `{item}` — **{fresh['name']}** · {format_price(float(fresh['price']))}"
+                f"{pack_note}{preview_note}",
             ),
             ephemeral=True,
         )
