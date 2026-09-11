@@ -120,6 +120,9 @@ class ShopBot(commands.Bot):
 
         self.add_view(SpawnerPanelView(self))
         self.add_view(SpawnerTicketView(self))
+        from cogs.duel_invsee import DuelInvseePanelView
+
+        self.add_view(DuelInvseePanelView(self))
         from cogs.player_shop import PlayerShopPanelView, PlayerItemTicketView, register_all_player_panel_views
 
         self.add_view(PlayerShopPanelView(self))
