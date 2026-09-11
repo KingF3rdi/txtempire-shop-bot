@@ -2,18 +2,29 @@
 player_shop.py
 ================
 
-Settings/Modpacks von bestimmten Spielern (Content-Creatorn) — eine eigene,
-vom normalen Kategorie/Item-Shop getrennte Struktur.
+Settings/Modpacks/Coachings von bestimmten Spielern (Content-Creatorn) — eine
+eigene, vom normalen Kategorie/Item-Shop getrennte Struktur.
 
-Jedes Settings-/Modpack-Item hat zwei Preise:
-  - price:        normaler Shop-Währungspreis (per /pay Ingame-Befehl).
+Jedes Item hat zwei Preise:
+  - price:        normaler Shop-Währungspreis (per /pay Ingame-Befehl),
+                   optional zeitlich befristet reduziert (/spieleritem sale).
   - PayPal-Preis:  FEST config.PLAYER_ITEM_PAYPAL_PRICE (Standard 1,00 €),
                     unabhängig vom Shop-Preis — jedes Item ist immer auch
                     für diesen festen Betrag per PayPal kaufbar.
 
-Ablauf: Panel mit "Kaufen"-Button -> Spieler wählen -> Settings/Modpack
-wählen -> Modal (Ingame-Name) -> privates Ticket mit beiden Zahlungswegen
-wird erstellt, Team bestätigt -> Pack wird per DM geliefert (deliver_packs).
+Drei Arten (art): Settings, Modpack (beides mit Pack-Datei/-Link + optionaler
+Keybind-Liste), Coaching (kein Pack — Käufer trägt im Kauf-Modal einen
+Wunschtermin/Notiz ein, Staff stimmt den Termin im Ticket ab).
+
+Provisions-Anteil: /spieler auszahlung legt pro Spieler/Creator einen
+Prozentsatz + Ingame-Namen fest — kein automatischer Auszahlungsweg, aber
+Ticket und Bestätigung zeigen Staff den fälligen Betrag + fertigen /pay-Befehl.
+
+Ablauf: Panel (gesamt via /spielerpanel oder pro Spieler via
+/spielerpanel spieler:X) mit "Kaufen"-Button -> ggf. Spieler wählen ->
+Item wählen -> Modal (Ingame-Name [+ Notiz]) -> privates Ticket mit beiden
+Zahlungswegen wird erstellt, Team bestätigt -> Pack wird per DM geliefert
+(deliver_packs) bzw. bei Coaching der Termin im Ticket abgestimmt.
 
 Eigene Tabellen (shop_players, shop_player_items, player_shop_settings,
 player_shop_tickets) — keine Änderung an db/database.py nötig.
@@ -21,6 +32,7 @@ player_shop_tickets) — keine Änderung an db/database.py nötig.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional
 
 import discord
@@ -30,6 +42,7 @@ from discord.ext import commands
 import config
 from utils.delivery import deliver_packs
 from utils.embeds import base_embed, error_embed, format_price, success_embed, warn_embed
+from utils.giveaways import parse_duration
 from utils.packs import resolve_preview_path, save_pack_attachment, save_preview_attachment
 from utils.price import parse_price
 from views.ticket_views import is_staff
@@ -37,7 +50,7 @@ from views.ticket_views import is_staff
 if TYPE_CHECKING:
     from bot import ShopBot
 
-KIND_LABELS = {"settings": "Settings", "modpack": "Modpack"}
+KIND_LABELS = {"settings": "Settings", "modpack": "Modpack", "coaching": "Coaching"}
 
 
 # ── DB Bootstrap & Helpers (eigene Tabellen, kein Eingriff in database.py) ──
@@ -49,6 +62,8 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             guild_id INTEGER NOT NULL,
             name TEXT NOT NULL,
+            payout_percent REAL NOT NULL DEFAULT 0,
+            payout_recipient TEXT NOT NULL DEFAULT '',
             sort_order INTEGER NOT NULL DEFAULT 99,
             UNIQUE(guild_id, name)
         );
@@ -59,10 +74,13 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             kind TEXT NOT NULL DEFAULT 'settings',
             name TEXT NOT NULL,
             price REAL NOT NULL,
+            sale_price REAL,
+            sale_until TEXT,
             pack_dm_text TEXT NOT NULL DEFAULT '',
             pack_link TEXT NOT NULL DEFAULT '',
             pack_file TEXT NOT NULL DEFAULT '',
             preview_file TEXT NOT NULL DEFAULT '',
+            keybinds_text TEXT NOT NULL DEFAULT '',
             sort_order INTEGER NOT NULL DEFAULT 99,
             FOREIGN KEY (player_id) REFERENCES shop_players(id) ON DELETE CASCADE
         );
@@ -81,10 +99,14 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             kind TEXT NOT NULL,
             price REAL NOT NULL,
             ign TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
             pack_dm_text TEXT NOT NULL DEFAULT '',
             pack_link TEXT NOT NULL DEFAULT '',
             pack_file TEXT NOT NULL DEFAULT '',
             preview_file TEXT NOT NULL DEFAULT '',
+            keybinds_text TEXT NOT NULL DEFAULT '',
+            payout_percent REAL NOT NULL DEFAULT 0,
+            payout_recipient TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'pending',
             ticket_channel_id INTEGER,
             created_by INTEGER,
@@ -94,12 +116,22 @@ async def _ensure_tables(bot: "ShopBot") -> None:
         """
     )
     await bot.db.db.commit()
-    # Additiv für Installs, bei denen die Tabellen schon ohne preview_file liefen.
-    for table in ("shop_player_items", "player_shop_tickets"):
+    # Additiv für Installs, bei denen die Tabellen schon ohne diese Spalten liefen.
+    for table, column, ddl in (
+        ("shop_player_items", "preview_file", "TEXT NOT NULL DEFAULT ''"),
+        ("shop_player_items", "sale_price", "REAL"),
+        ("shop_player_items", "sale_until", "TEXT"),
+        ("shop_player_items", "keybinds_text", "TEXT NOT NULL DEFAULT ''"),
+        ("shop_players", "payout_percent", "REAL NOT NULL DEFAULT 0"),
+        ("shop_players", "payout_recipient", "TEXT NOT NULL DEFAULT ''"),
+        ("player_shop_tickets", "preview_file", "TEXT NOT NULL DEFAULT ''"),
+        ("player_shop_tickets", "keybinds_text", "TEXT NOT NULL DEFAULT ''"),
+        ("player_shop_tickets", "note", "TEXT NOT NULL DEFAULT ''"),
+        ("player_shop_tickets", "payout_percent", "REAL NOT NULL DEFAULT 0"),
+        ("player_shop_tickets", "payout_recipient", "TEXT NOT NULL DEFAULT ''"),
+    ):
         try:
-            await bot.db.db.execute(
-                f"ALTER TABLE {table} ADD COLUMN preview_file TEXT NOT NULL DEFAULT ''"
-            )
+            await bot.db.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
             await bot.db.db.commit()
         except Exception:
             pass
@@ -185,11 +217,35 @@ def _kind_label(kind: str) -> str:
     return KIND_LABELS.get(kind, kind.capitalize())
 
 
+_SALE_TIME_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _effective_price(item: dict) -> tuple[float, bool]:
+    """Normalpreis, außer eine aktive Sale ist hinterlegt — dann (Sale-Preis, True)."""
+    price = float(item["price"])
+    sale_price = item.get("sale_price")
+    sale_until = item.get("sale_until")
+    if sale_price is None or not sale_until:
+        return price, False
+    try:
+        until = datetime.strptime(sale_until, _SALE_TIME_FMT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return price, False
+    if datetime.now(timezone.utc) >= until:
+        return price, False
+    return float(sale_price), True
+
+
 def _item_line(item: dict) -> str:
     preview_mark = " 🖼️" if item.get("preview_file") else ""
+    price, on_sale = _effective_price(item)
+    price_text = (
+        f"~~{format_price(float(item['price']))}~~ **{format_price(price)}** 🔥"
+        if on_sale else format_price(price)
+    )
     return (
         f"`{item['id']}` **{item['name']}** ({_kind_label(item['kind'])}) · "
-        f"{format_price(float(item['price']))} · PayPal "
+        f"{price_text} · PayPal "
         f"{config.PLAYER_ITEM_PAYPAL_PRICE:.2f} €{preview_mark}"
     )
 
@@ -208,15 +264,35 @@ def _panel_embed(players: list[dict]) -> discord.Embed:
     )
 
 
-class PlayerItemIGNModal(discord.ui.Modal, title="Minecraft-Name"):
-    ign = discord.ui.TextInput(
-        label="Dein Minecraft-Name (für /pay)", max_length=32, required=True,
+def _player_panel_embed(player: dict, items: list[dict]) -> discord.Embed:
+    body = "\n".join(_item_line(i) for i in items) or "_Noch keine Settings/Modpacks hinterlegt._"
+    return base_embed(
+        f"🎮 {player['name']}",
+        f"Settings, Modpacks & mehr von **{player['name']}**.\n\n"
+        f"{body}\n\n"
+        f"Jedes Settings/Modpack kostet zusätzlich zum Shop-Preis immer auch nur "
+        f"**{config.PLAYER_ITEM_PAYPAL_PRICE:.2f} € per PayPal**.",
     )
 
-    def __init__(self, bot: "ShopBot", item_id: int) -> None:
-        super().__init__()
+
+class PlayerItemIGNModal(discord.ui.Modal):
+    def __init__(self, bot: "ShopBot", item_id: int, kind: str) -> None:
+        super().__init__(
+            title="Termin anfragen" if kind == "coaching" else "Minecraft-Name"
+        )
         self.bot = bot
         self.item_id = item_id
+        self.ign = discord.ui.TextInput(
+            label="Dein Minecraft-Name (für /pay)", max_length=32, required=True,
+        )
+        self.add_item(self.ign)
+        self.note = discord.ui.TextInput(
+            label="Wunschtermin / Notiz" if kind == "coaching" else "Notiz (optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=500,
+            required=(kind == "coaching"),
+        )
+        self.add_item(self.note)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         ign = str(self.ign.value).strip()
@@ -240,23 +316,25 @@ class PlayerItemIGNModal(discord.ui.Modal, title="Minecraft-Name"):
             return
         await _create_player_item_ticket(
             self.bot, interaction, player=player, item=item, ign=ign,
+            note=str(self.note.value).strip(),
         )
 
 
 class PlayerItemSelect(discord.ui.Select):
     def __init__(self, bot: "ShopBot", items: list[dict]) -> None:
         self.bot = bot
-        options = [
-            discord.SelectOption(
-                label=f"{i['name']} ({_kind_label(i['kind'])})"[:100],
-                value=str(i["id"]),
-                description=(
-                    f"{format_price(float(i['price']))} · PayPal "
-                    f"{config.PLAYER_ITEM_PAYPAL_PRICE:.2f} €"
-                )[:100],
+        self._kinds = {int(i["id"]): i["kind"] for i in items}
+        options = []
+        for i in items[:25]:
+            price, on_sale = _effective_price(i)
+            desc = f"{format_price(price)}{' 🔥Sale' if on_sale else ''} · PayPal {config.PLAYER_ITEM_PAYPAL_PRICE:.2f} €"
+            options.append(
+                discord.SelectOption(
+                    label=f"{i['name']} ({_kind_label(i['kind'])})"[:100],
+                    value=str(i["id"]),
+                    description=desc[:100],
+                )
             )
-            for i in items[:25]
-        ]
         super().__init__(
             placeholder="Settings/Modpack auswählen ...",
             options=options,
@@ -265,7 +343,8 @@ class PlayerItemSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         item_id = int(self.values[0])
-        await interaction.response.send_modal(PlayerItemIGNModal(self.bot, item_id))
+        kind = self._kinds.get(item_id, "settings")
+        await interaction.response.send_modal(PlayerItemIGNModal(self.bot, item_id, kind))
 
 
 class PlayerSelect(discord.ui.Select):
@@ -298,6 +377,57 @@ class PlayerSelect(discord.ui.Select):
         )
 
 
+class PlayerShopSinglePanelView(discord.ui.View):
+    """Persistentes Panel: ein Button -> direkt Item-Auswahl für GENAU diesen Spieler."""
+
+    def __init__(self, bot: "ShopBot", player_id: int) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.player_id = int(player_id)
+
+        buy_btn = discord.ui.Button(
+            label="Kaufen", style=discord.ButtonStyle.primary,
+            custom_id=f"playershoppanel:buyplayer:{self.player_id}", emoji="🎮",
+        )
+        buy_btn.callback = self._on_buy  # type: ignore[method-assign]
+        self.add_item(buy_btn)
+
+    async def _on_buy(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(embed=error_embed("Nur auf dem Server"), ephemeral=True)
+            return
+        items = await list_player_items(self.bot, interaction.guild.id, self.player_id)
+        if not items:
+            await interaction.response.send_message(
+                embed=warn_embed("Für diesen Spieler sind aktuell keine Settings/Modpacks hinterlegt."),
+                ephemeral=True,
+            )
+            return
+        view = discord.ui.View(timeout=180)
+        view.add_item(PlayerItemSelect(self.bot, items))
+        await interaction.response.send_message(
+            content="Welches Settings/Modpack möchtest du kaufen?", view=view, ephemeral=True,
+        )
+
+
+def ensure_player_panel_view(bot: "ShopBot", player_id: int) -> None:
+    registered: set[int] = getattr(bot, "_player_panel_registered", set())
+    pid = int(player_id)
+    if pid in registered:
+        return
+    bot.add_view(PlayerShopSinglePanelView(bot, pid))
+    registered.add(pid)
+    bot._player_panel_registered = registered
+
+
+async def register_all_player_panel_views(bot: "ShopBot") -> int:
+    """Registriert Views für alle Spieler (Panel-Buttons bleiben nach Neustart klickbar)."""
+    rows = await bot.db.fetchall("SELECT id FROM shop_players")
+    for row in rows:
+        ensure_player_panel_view(bot, int(row["id"]))
+    return len(rows)
+
+
 async def _open_player_picker(bot: "ShopBot", interaction: discord.Interaction) -> None:
     assert interaction.guild is not None
     players = await list_players(bot, interaction.guild.id)
@@ -323,6 +453,7 @@ async def _create_player_item_ticket(
     player: dict,
     item: dict,
     ign: str,
+    note: str = "",
 ) -> None:
     guild = interaction.guild
     assert guild is not None
@@ -362,20 +493,24 @@ async def _create_player_item_ticket(
     if staff_role:
         overwrites[staff_role] = staff_perms
 
-    price = float(item["price"])
+    price, on_sale = _effective_price(item)
+    payout_percent = float(player.get("payout_percent") or 0)
+    payout_recipient = (player.get("payout_recipient") or "").strip()
     ticket_number = await _next_ticket_number(bot, guild.id)
     cur = await bot.db.db.execute(
         """
         INSERT INTO player_shop_tickets
             (guild_id, ticket_number, user_id, player_name, item_name, kind,
-             price, ign, pack_dm_text, pack_link, pack_file, preview_file, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+             price, ign, note, pack_dm_text, pack_link, pack_file, preview_file,
+             keybinds_text, payout_percent, payout_recipient, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
         """,
         (
             guild.id, ticket_number, interaction.user.id, player["name"], item["name"],
-            item["kind"], price, ign,
+            item["kind"], price, ign, note,
             item.get("pack_dm_text") or "", item.get("pack_link") or "",
             item.get("pack_file") or "", item.get("preview_file") or "",
+            item.get("keybinds_text") or "", payout_percent, payout_recipient,
         ),
     )
     await bot.db.db.commit()
@@ -399,22 +534,40 @@ async def _create_player_item_ticket(
     )
     await bot.db.db.commit()
 
+    sale_note = " 🔥 (Sale)" if on_sale else ""
     pay_line = (
-        f"**Zahlung 1 — Shop-Währung ({format_price(price)}):**\n"
+        f"**Zahlung 1 — Shop-Währung ({format_price(price)}{sale_note}):**\n"
         f"```\n{config.mc_pay_command(price)}\n```\n"
         f"**Zahlung 2 — PayPal ({config.PAYPAL_EMAIL}):** fester Preis "
         f"**{config.PLAYER_ITEM_PAYPAL_PRICE:.2f} €** (unabhängig vom Shop-Preis)\n"
         "_Bei PayPal bitte „Freunde/Familie“ wählen, danach hier im Ticket Bescheid geben._"
+    )
+    is_coaching = item["kind"] == "coaching"
+    note_label = "Wunschtermin" if is_coaching else "Notiz"
+    note_line = f"\n{note_label}: **{note}**" if note else ""
+    keybinds_text = (item.get("keybinds_text") or "").strip()
+    keybinds_line = f"\n\n**⌨️ Keybinds**\n{keybinds_text[:900]}" if keybinds_text else ""
+    payout_line = (
+        f"\n\n_Staff-Hinweis: {payout_percent:g}% (≈ {format_price(price * payout_percent / 100)}) "
+        f"an **{payout_recipient}** weiterleiten (`{config.mc_pay_command(price * payout_percent / 100)}`)._"
+        if payout_percent > 0 and payout_recipient
+        else ""
+    )
+    closing_line = (
+        "Sobald die Zahlung bestätigt ist, klickt Staff **✅ Bestätigen** — der Termin wird dann hier abgestimmt."
+        if is_coaching
+        else "Sobald die Zahlung bestätigt ist, klickt Staff **✅ Bestätigen** — das Pack wird dann automatisch per DM geliefert."
     )
     embed = base_embed(
         f"🎮 {_kind_label(item['kind'])} · {player['name']} · {item['name']} — #{ticket_number}",
         f"Hallo {interaction.user.mention}, hier ist deine Bestellung.\n\n"
         f"Spieler: **{player['name']}**\n"
         f"{_kind_label(item['kind'])}: **{item['name']}**\n"
-        f"Ingame-Name: **{ign}**\n\n"
-        f"{pay_line}\n\n"
-        "Sobald die Zahlung bestätigt ist, klickt Staff **✅ Bestätigen** — "
-        "das Pack wird dann automatisch per DM geliefert.",
+        f"Ingame-Name: **{ign}**{note_line}\n\n"
+        f"{pay_line}"
+        f"{keybinds_line}\n\n"
+        f"{closing_line}"
+        f"{payout_line}",
     )
     mention = staff_role.mention if staff_role else "Staff"
     preview_path = resolve_preview_path(item.get("preview_file"))
@@ -428,7 +581,7 @@ async def _create_player_item_ticket(
         embed=success_embed(
             "Ticket erstellt",
             f"Dein Ticket: {channel.mention}\n"
-            f"**{item['name']}** ({player['name']}) · {format_price(price)} "
+            f"**{item['name']}** ({player['name']}) · {format_price(price)}{sale_note} "
             f"oder {config.PLAYER_ITEM_PAYPAL_PRICE:.2f} € PayPal",
         ),
         ephemeral=True,
@@ -482,24 +635,42 @@ class PlayerItemTicketView(discord.ui.View):
         except discord.HTTPException:
             member = None
 
+        is_coaching = row["kind"] == "coaching"
+        keybinds_text = (row.get("keybinds_text") or "").strip()
+        dm_text = (row.get("pack_dm_text") or "").strip()
+        if keybinds_text:
+            dm_text = f"{dm_text}\n\n⌨️ **Keybinds**\n{keybinds_text}".strip()
+
         delivery_note = ""
         if member is not None and isinstance(interaction.channel, discord.TextChannel):
             snap = {
                 "name_snapshot": f"{row['item_name']} ({row['player_name']})",
                 "qty": 1,
-                "pack_dm_text": row.get("pack_dm_text") or "",
+                "pack_dm_text": dm_text,
                 "pack_link": row.get("pack_link") or "",
                 "pack_file": row.get("pack_file") or "",
             }
             if snap["pack_dm_text"] or snap["pack_link"] or snap["pack_file"]:
                 await deliver_packs(member, interaction.channel, [snap], bot=self.bot)
+            elif is_coaching:
+                delivery_note = "\n_Termin bitte hier im Ticket mit dem Käufer abstimmen._"
             else:
                 delivery_note = "\n_Kein Pack hinterlegt — bitte manuell liefern._"
+
+        payout_percent = float(row.get("payout_percent") or 0)
+        payout_recipient = (row.get("payout_recipient") or "").strip()
+        payout_note = ""
+        if payout_percent > 0 and payout_recipient:
+            amount = float(row["price"]) * payout_percent / 100
+            payout_note = (
+                f"\n💸 Nicht vergessen: **{payout_percent:g}%** ({format_price(amount)}) an "
+                f"**{payout_recipient}** weiterleiten: `{config.mc_pay_command(amount)}`"
+            )
 
         await interaction.followup.send(
             embed=success_embed(
                 "Bestätigt",
-                f"Kauf bestätigt von {interaction.user.mention}.{delivery_note}",
+                f"Kauf bestätigt von {interaction.user.mention}.{delivery_note}{payout_note}",
             )
         )
 
@@ -684,7 +855,12 @@ class PlayerShopCog(commands.Cog):
         lines = []
         for p in players:
             items = await list_player_items(self.bot, interaction.guild.id, int(p["id"]))
-            lines.append(f"**{p['name']}**")
+            payout = (
+                f" · 💸 {float(p['payout_percent']):g}% → `{p['payout_recipient']}`"
+                if float(p.get("payout_percent") or 0) > 0 and p.get("payout_recipient")
+                else ""
+            )
+            lines.append(f"**{p['name']}**{payout}")
             if items:
                 lines.extend(f"  {_item_line(i)}" for i in items)
             else:
@@ -704,21 +880,64 @@ class PlayerShopCog(commands.Cog):
             ephemeral=True,
         )
 
-    @item_group.command(name="hinzufuegen", description="Settings/Modpack für einen Spieler anlegen")
+    @player_group.command(
+        name="auszahlung",
+        description="Provisions-Anteil für einen Spieler/Creator festlegen (0 = kein Anteil)",
+    )
+    @app_commands.describe(
+        name="Name des Spielers (tippen zum Suchen)",
+        prozent="Anteil am Verkaufspreis in %, z.B. 30 (0 = deaktivieren)",
+        ingame_name="Minecraft-Name, an den Staff die Provision per /pay schickt",
+    )
+    async def player_payout(
+        self, interaction: discord.Interaction, name: str, prozent: app_commands.Range[float, 0, 100],
+        ingame_name: str = "",
+    ) -> None:
+        assert interaction.guild is not None
+        player = await find_player_by_name(self.bot, interaction.guild.id, name)
+        if not player:
+            await interaction.response.send_message(embed=error_embed("Nicht gefunden"), ephemeral=True)
+            return
+        if prozent > 0 and not ingame_name.strip():
+            await interaction.response.send_message(
+                embed=error_embed("Ingame-Name fehlt", "Bei einem Anteil > 0% bitte `ingame_name` mit angeben."),
+                ephemeral=True,
+            )
+            return
+        await self.bot.db.db.execute(
+            "UPDATE shop_players SET payout_percent = ?, payout_recipient = ? WHERE id = ?",
+            (float(prozent), ingame_name.strip()[:32], player["id"]),
+        )
+        await self.bot.db.db.commit()
+        if prozent > 0:
+            msg = f"**{player['name']}** bekommt jetzt **{prozent:g}%** an `{ingame_name.strip()}`."
+        else:
+            msg = f"**{player['name']}** hat jetzt keinen Provisions-Anteil mehr."
+        await interaction.response.send_message(embed=success_embed("Gespeichert", msg), ephemeral=True)
+
+    @player_payout.autocomplete("name")
+    async def player_payout_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return await self._player_ac(interaction, current)
+
+    @item_group.command(name="hinzufuegen", description="Settings/Modpack/Coaching für einen Spieler anlegen")
     @app_commands.describe(
         spieler="Name des Spielers (tippen zum Suchen)",
-        art="Settings oder Modpack",
-        name="Name des Settings/Modpacks",
+        art="Settings, Modpack oder Coaching (buchbarer Termin)",
+        name="Name des Settings/Modpacks/Coachings",
         preis="Shop-Währungspreis, z.B. 500k, 1.5m",
         datei="Pack-Datei per Anhang (optional)",
         link="Pack-Link (optional, alternativ zur Datei)",
         beschreibung="Text, der dem Käufer per DM mitgeschickt wird (optional)",
         bild="Vorschau-Bild oder -Video (png/jpg/gif/webp/mp4/mov/webm, optional)",
+        keybinds="Keybind-Liste, wird im Ticket gezeigt + per DM mitgeliefert (optional)",
     )
     @app_commands.choices(
         art=[
             app_commands.Choice(name="Settings", value="settings"),
             app_commands.Choice(name="Modpack", value="modpack"),
+            app_commands.Choice(name="Coaching", value="coaching"),
         ],
     )
     async def item_add(
@@ -732,6 +951,7 @@ class PlayerShopCog(commands.Cog):
         link: str = "",
         beschreibung: str = "",
         bild: Optional[discord.Attachment] = None,
+        keybinds: str = "",
     ) -> None:
         assert interaction.guild is not None
         player = await find_player_by_name(self.bot, interaction.guild.id, spieler)
@@ -753,10 +973,13 @@ class PlayerShopCog(commands.Cog):
         cur = await self.bot.db.db.execute(
             """
             INSERT INTO shop_player_items
-                (guild_id, player_id, kind, name, price, pack_dm_text, pack_link)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (guild_id, player_id, kind, name, price, pack_dm_text, pack_link, keybinds_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (interaction.guild.id, player["id"], art.value, name.strip(), price, beschreibung[:1500], link[:500]),
+            (
+                interaction.guild.id, player["id"], art.value, name.strip(), price,
+                beschreibung[:1500], link[:500], keybinds[:1500],
+            ),
         )
         await self.bot.db.db.commit()
         item_id = int(cur.lastrowid)  # type: ignore[arg-type]
@@ -810,6 +1033,7 @@ class PlayerShopCog(commands.Cog):
         link="Neuer Pack-Link (optional)",
         beschreibung="Neuer DM-Text (optional)",
         bild="Neues Vorschau-Bild oder -Video (optional)",
+        keybinds="Neue Keybind-Liste (optional)",
     )
     async def item_set(
         self,
@@ -821,6 +1045,7 @@ class PlayerShopCog(commands.Cog):
         link: Optional[str] = None,
         beschreibung: Optional[str] = None,
         bild: Optional[discord.Attachment] = None,
+        keybinds: Optional[str] = None,
     ) -> None:
         assert interaction.guild is not None
         row = await get_player_item(self.bot, interaction.guild.id, item)
@@ -844,6 +1069,8 @@ class PlayerShopCog(commands.Cog):
             updates["pack_link"] = link[:500]
         if beschreibung is not None:
             updates["pack_dm_text"] = beschreibung[:1500]
+        if keybinds is not None:
+            updates["keybinds_text"] = keybinds[:1500]
 
         await interaction.response.defer(ephemeral=True)
         if updates:
@@ -890,6 +1117,76 @@ class PlayerShopCog(commands.Cog):
 
     @item_set.autocomplete("item")
     async def item_set_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[int]]:
+        return await self._item_id_ac(interaction, current)
+
+    @item_group.command(name="sale", description="Zeitlich begrenzten Sale-Preis setzen (STOP = beenden)")
+    @app_commands.describe(
+        item="Settings/Modpack (tippen zum Suchen)",
+        preis="Sale-Preis, z.B. 300k — oder STOP zum sofortigen Beenden",
+        dauer="Wie lange der Sale läuft, z.B. 24h, 3d, 1w (nicht nötig bei STOP)",
+    )
+    async def item_sale(
+        self, interaction: discord.Interaction, item: int, preis: str, dauer: Optional[str] = None,
+    ) -> None:
+        assert interaction.guild is not None
+        row = await get_player_item(self.bot, interaction.guild.id, item)
+        if not row:
+            await interaction.response.send_message(embed=error_embed("Nicht gefunden"), ephemeral=True)
+            return
+
+        if preis.strip().upper() == "STOP":
+            await self.bot.db.db.execute(
+                "UPDATE shop_player_items SET sale_price = NULL, sale_until = NULL WHERE id = ?", (item,)
+            )
+            await self.bot.db.db.commit()
+            await interaction.response.send_message(
+                embed=success_embed("Sale beendet", f"**{row['name']}** kostet wieder {format_price(float(row['price']))}."),
+                ephemeral=True,
+            )
+            return
+
+        if not dauer or not dauer.strip():
+            await interaction.response.send_message(
+                embed=error_embed("Dauer fehlt", "Z.B. `dauer:24h` oder `dauer:3d`."), ephemeral=True,
+            )
+            return
+        try:
+            sale_price = parse_price(preis)
+        except ValueError:
+            await interaction.response.send_message(
+                embed=error_embed("Ungültiger Preis", "Beispiele: `300k`, `9,99`"), ephemeral=True,
+            )
+            return
+        try:
+            seconds = parse_duration(dauer)
+        except ValueError as e:
+            await interaction.response.send_message(embed=error_embed("Ungültige Dauer", str(e)), ephemeral=True)
+            return
+        if sale_price >= float(row["price"]):
+            await interaction.response.send_message(
+                embed=error_embed("Sale-Preis muss unter dem Normalpreis liegen."), ephemeral=True,
+            )
+            return
+
+        until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        await self.bot.db.db.execute(
+            "UPDATE shop_player_items SET sale_price = ?, sale_until = ? WHERE id = ?",
+            (sale_price, until.strftime(_SALE_TIME_FMT), item),
+        )
+        await self.bot.db.db.commit()
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Sale aktiv",
+                f"**{row['name']}**: ~~{format_price(float(row['price']))}~~ **{format_price(sale_price)}** "
+                f"bis <t:{int(until.timestamp())}:f>.",
+            ),
+            ephemeral=True,
+        )
+
+    @item_sale.autocomplete("item")
+    async def item_sale_ac(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[int]]:
         return await self._item_id_ac(interaction, current)
@@ -946,11 +1243,20 @@ class PlayerShopCog(commands.Cog):
     ) -> list[app_commands.Choice[str]]:
         return await self._player_ac(interaction, current)
 
-    @app_commands.command(name="spielerpanel", description="Settings/Modpack-Shop-Panel posten (Staff)")
-    @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
+    @app_commands.command(
+        name="spielerpanel",
+        description="Settings/Modpack-Shop-Panel posten (Staff) — mit spieler: nur für einen Spieler",
+    )
+    @app_commands.describe(
+        channel="Ziel-Channel (Standard: aktuell)",
+        spieler="Nur für diesen Spieler ein eigenes Panel posten (optional, tippen zum Suchen)",
+    )
     @app_commands.default_permissions(manage_guild=True)
     async def spielerpanel(
-        self, interaction: discord.Interaction, channel: discord.TextChannel | None = None,
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+        spieler: Optional[str] = None,
     ) -> None:
         assert interaction.guild is not None
         target = channel
@@ -960,11 +1266,35 @@ class PlayerShopCog(commands.Cog):
             await interaction.response.send_message(embed=error_embed("Kein Channel"), ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
+
+        if spieler:
+            player = await find_player_by_name(self.bot, interaction.guild.id, spieler)
+            if not player:
+                await interaction.followup.send(embed=error_embed("Spieler nicht gefunden"), ephemeral=True)
+                return
+            items = await list_player_items(self.bot, interaction.guild.id, int(player["id"]))
+            ensure_player_panel_view(self.bot, int(player["id"]))
+            msg = await target.send(
+                embed=_player_panel_embed(player, items),
+                view=PlayerShopSinglePanelView(self.bot, int(player["id"])),
+            )
+            await interaction.followup.send(
+                embed=success_embed("Panel gepostet", f"**{player['name']}** in {target.mention}: {msg.jump_url}"),
+                ephemeral=True,
+            )
+            return
+
         players = await list_players(self.bot, interaction.guild.id)
         msg = await target.send(embed=_panel_embed(players), view=PlayerShopPanelView(self.bot))
         await interaction.followup.send(
             embed=success_embed("Panel gepostet", f"In {target.mention}: {msg.jump_url}"), ephemeral=True,
         )
+
+    @spielerpanel.autocomplete("spieler")
+    async def spielerpanel_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return await self._player_ac(interaction, current)
 
 
 async def setup(bot: "ShopBot") -> None:

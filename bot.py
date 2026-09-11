@@ -118,10 +118,13 @@ class ShopBot(commands.Bot):
 
         self.add_view(SpawnerPanelView(self))
         self.add_view(SpawnerTicketView(self))
-        from cogs.player_shop import PlayerShopPanelView, PlayerItemTicketView
+        from cogs.player_shop import PlayerShopPanelView, PlayerItemTicketView, register_all_player_panel_views
 
         self.add_view(PlayerShopPanelView(self))
         self.add_view(PlayerItemTicketView(self))
+        n_player_panels = await register_all_player_panel_views(self)
+        if n_player_panels:
+            print(f"[PlayerShop] {n_player_panels} Spieler-Panel-View(s) registriert")
         from cogs.tweak_panel import TweakShopPanelView
 
         self.add_view(TweakShopPanelView(self))
