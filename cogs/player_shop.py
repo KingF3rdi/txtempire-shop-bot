@@ -137,6 +137,22 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             confirmed_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS shop_player_item_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            original_filename TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 99,
+            FOREIGN KEY (item_id) REFERENCES shop_player_items(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS player_shop_ticket_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            original_filename TEXT NOT NULL,
+            FOREIGN KEY (ticket_id) REFERENCES player_shop_tickets(id) ON DELETE CASCADE
+        );
         """
     )
     await bot.db.db.commit()
@@ -345,6 +361,42 @@ async def get_player_item(bot: "ShopBot", guild_id: int, item_id: int) -> Option
         "SELECT * FROM shop_player_items WHERE id = ? AND guild_id = ?", (item_id, guild_id)
     )
     return dict(row) if row else None
+
+
+async def list_item_files(bot: "ShopBot", item_id: int) -> list[dict]:
+    rows = await bot.db.fetchall(
+        "SELECT * FROM shop_player_item_files WHERE item_id = ? ORDER BY sort_order, id",
+        (item_id,),
+    )
+    return [dict(r) for r in rows]
+
+
+async def add_item_file(
+    bot: "ShopBot", guild_id: int, item_id: int, file_path: str, original_filename: str
+) -> None:
+    await bot.db.db.execute(
+        "INSERT INTO shop_player_item_files (item_id, guild_id, file_path, original_filename) VALUES (?, ?, ?, ?)",
+        (item_id, guild_id, file_path, original_filename),
+    )
+    await bot.db.db.commit()
+
+
+async def snapshot_item_files_to_ticket(bot: "ShopBot", item_id: int, ticket_id: int) -> None:
+    files = await list_item_files(bot, item_id)
+    for f in files:
+        await bot.db.db.execute(
+            "INSERT INTO player_shop_ticket_files (ticket_id, file_path, original_filename) VALUES (?, ?, ?)",
+            (ticket_id, f["file_path"], f["original_filename"]),
+        )
+    if files:
+        await bot.db.db.commit()
+
+
+async def list_ticket_files(bot: "ShopBot", ticket_id: int) -> list[dict]:
+    rows = await bot.db.fetchall(
+        "SELECT * FROM player_shop_ticket_files WHERE ticket_id = ? ORDER BY id", (ticket_id,)
+    )
+    return [dict(r) for r in rows]
 
 
 def _kind_label(kind: str) -> str:
@@ -750,6 +802,10 @@ async def _create_player_item_ticket(
     )
     await bot.db.db.commit()
     ticket_id = int(cur.lastrowid)  # type: ignore[arg-type]
+    extra_files: list[dict] = []
+    if item.get("id"):
+        await snapshot_item_files_to_ticket(bot, int(item["id"]), ticket_id)
+        extra_files = await list_item_files(bot, int(item["id"]))
 
     safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in interaction.user.name.lower())[:18]
     name = f"settings-{ticket_number:04d}-{safe}"[:100]
@@ -783,6 +839,8 @@ async def _create_player_item_ticket(
     note_line = f"\n{note_label}: **{note}**" if note else ""
     keybinds_text = (item.get("keybinds_text") or "").strip()
     keybinds_line = f"\n\n**⌨️ Keybinds**\n{keybinds_text[:900]}" if keybinds_text else ""
+    total_files = (1 if item.get("pack_file") else 0) + len(extra_files)
+    files_line = f"\n📎 **{total_files} Datei(en)** werden nach Bestätigung geliefert." if total_files > 1 else ""
     payout_line = (
         f"\n\n_Staff-Hinweis: {payout_percent:g}% (≈ {format_price(price * payout_percent / 100)}) "
         f"an **{payout_recipient}** weiterleiten (`{config.mc_pay_command(price * payout_percent / 100)}`)._"
@@ -801,7 +859,8 @@ async def _create_player_item_ticket(
         f"{_kind_label(item['kind'])}: **{item['name']}**\n"
         f"Ingame-Name: **{ign}**{note_line}\n\n"
         f"{pay_line}"
-        f"{keybinds_line}\n\n"
+        f"{keybinds_line}"
+        f"{files_line}\n\n"
         f"{closing_line}"
         f"{payout_line}",
     )
@@ -880,17 +939,33 @@ class PlayerItemTicketView(discord.ui.View):
         if keybinds_text:
             dm_text = f"{dm_text}\n\n⌨️ **Keybinds**\n{keybinds_text}".strip()
 
-        delivery_note = ""
-        if member is not None and isinstance(interaction.channel, discord.TextChannel):
-            snap = {
-                "name_snapshot": f"{row['item_name']} ({row['player_name']})",
+        item_label = f"{row['item_name']} ({row['player_name']})"
+        extra_files = await list_ticket_files(self.bot, int(row["id"]))
+        snaps = [
+            {
+                "name_snapshot": item_label,
                 "qty": 1,
                 "pack_dm_text": dm_text,
                 "pack_link": row.get("pack_link") or "",
                 "pack_file": row.get("pack_file") or "",
             }
-            if snap["pack_dm_text"] or snap["pack_link"] or snap["pack_file"]:
-                await deliver_packs(member, interaction.channel, [snap], bot=self.bot)
+        ]
+        snaps.extend(
+            {
+                "name_snapshot": item_label,
+                "qty": 1,
+                "pack_dm_text": "",
+                "pack_link": "",
+                "pack_file": f["file_path"],
+            }
+            for f in extra_files
+        )
+
+        delivery_note = ""
+        if member is not None and isinstance(interaction.channel, discord.TextChannel):
+            has_content = any(s["pack_dm_text"] or s["pack_link"] or s["pack_file"] for s in snaps)
+            if has_content:
+                await deliver_packs(member, interaction.channel, snaps, bot=self.bot)
             elif is_coaching:
                 delivery_note = "\n_Termin bitte hier im Ticket mit dem Käufer abstimmen._"
             else:
@@ -1550,6 +1625,80 @@ class PlayerShopCog(commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[int]]:
         return await self._item_id_ac(interaction, current)
+
+    @item_group.command(name="paket", description="Weitere Pack-Datei zu einem Item hinzufügen (mehrere möglich)")
+    @app_commands.describe(item="Settings/Modpack (tippen zum Suchen)", datei="Zusätzliche Pack-Datei per Anhang")
+    async def item_add_file(
+        self, interaction: discord.Interaction, item: int, datei: discord.Attachment,
+    ) -> None:
+        assert interaction.guild is not None
+        row = await get_player_item(self.bot, interaction.guild.id, item)
+        if not row:
+            await interaction.response.send_message(embed=error_embed("Nicht gefunden"), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            rel = await save_pack_attachment(item, datei)
+        except ValueError as e:
+            await interaction.followup.send(embed=error_embed("Upload fehlgeschlagen", str(e)), ephemeral=True)
+            return
+        await add_item_file(self.bot, interaction.guild.id, item, rel, datei.filename)
+        files = await list_item_files(self.bot, item)
+        primary = 1 if row.get("pack_file") else 0
+        await interaction.followup.send(
+            embed=success_embed(
+                "Datei hinzugefügt",
+                f"**{datei.filename}** → **{row['name']}**\nInsgesamt jetzt **{primary + len(files)}** Datei(en) für dieses Item.",
+            ),
+            ephemeral=True,
+        )
+
+    @item_add_file.autocomplete("item")
+    async def item_add_file_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[int]]:
+        return await self._item_id_ac(interaction, current)
+
+    @item_group.command(name="paket_liste", description="Zusätzliche Pack-Dateien eines Items anzeigen")
+    @app_commands.describe(item="Settings/Modpack (tippen zum Suchen)")
+    async def item_list_files(self, interaction: discord.Interaction, item: int) -> None:
+        assert interaction.guild is not None
+        row = await get_player_item(self.bot, interaction.guild.id, item)
+        if not row:
+            await interaction.response.send_message(embed=error_embed("Nicht gefunden"), ephemeral=True)
+            return
+        files = await list_item_files(self.bot, item)
+        lines = []
+        if row.get("pack_file"):
+            lines.append("`primär` " + row["pack_file"].rsplit("_", 1)[-1])
+        lines.extend(f"`{f['id']}` {f['original_filename']}" for f in files)
+        body = "\n".join(lines) or "_Keine Dateien hinterlegt._"
+        await interaction.response.send_message(
+            embed=base_embed(f"Dateien — {row['name']}", body[:4000]), ephemeral=True,
+        )
+
+    @item_list_files.autocomplete("item")
+    async def item_list_files_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[int]]:
+        return await self._item_id_ac(interaction, current)
+
+    @item_group.command(name="paket_entfernen", description="Eine zusätzliche Pack-Datei entfernen (siehe /spieleritem paket_liste)")
+    @app_commands.describe(datei_id="ID aus /spieleritem paket_liste")
+    async def item_remove_file(self, interaction: discord.Interaction, datei_id: int) -> None:
+        assert interaction.guild is not None
+        row = await self.bot.db.fetchone(
+            "SELECT * FROM shop_player_item_files WHERE id = ? AND guild_id = ?",
+            (datei_id, interaction.guild.id),
+        )
+        if not row:
+            await interaction.response.send_message(embed=error_embed("Nicht gefunden"), ephemeral=True)
+            return
+        await self.bot.db.db.execute("DELETE FROM shop_player_item_files WHERE id = ?", (datei_id,))
+        await self.bot.db.db.commit()
+        await interaction.response.send_message(
+            embed=success_embed("Entfernt", f"**{row['original_filename']}** wurde entfernt."), ephemeral=True,
+        )
 
     @item_group.command(name="sale", description="Zeitlich begrenzten Sale-Preis setzen (STOP = beenden)")
     @app_commands.describe(
