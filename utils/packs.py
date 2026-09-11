@@ -10,8 +10,7 @@ from config import DATA_DIR
 PACKS_DIR = DATA_DIR / "packs"
 PACKS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Discord upload limit for bots is typically 25MB (without boosts we keep a safe cap)
-MAX_PACK_BYTES = 25 * 1024 * 1024
+MAX_PACK_BYTES = 100 * 1024 * 1024
 
 
 def _safe_filename(name: str) -> str:
