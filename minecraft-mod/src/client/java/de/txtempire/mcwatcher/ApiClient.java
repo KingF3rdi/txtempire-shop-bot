@@ -77,6 +77,97 @@ public final class ApiClient {
 		post("/mc/v1/heartbeat", config.basePayload());
 	}
 
+	// -- Duel Invsee (opt-in, eigener Key) ---------------------------------
+
+	/** Meldet den lokalen Opt-in-Status ans Bot-Backend (eigener, weniger privilegierter Key). */
+	public void postDuelInvseeOptIn(String ign, boolean enabled) {
+		JsonObject body = config.basePayload();
+		body.addProperty("ign", ign);
+		body.addProperty("enabled", enabled);
+		pool.execute(() -> sendNowWithKey("/mc/v1/duelinvsee/optin", body.toString(), config.duelInvseeKey));
+	}
+
+	/**
+	 * Fragt beim Bot ab, ob gerade jemand gekauft hat, unser eigenes Inventar
+	 * zu sehen. Ruft {@code onWatched} mit dem Live-View-Token auf, wenn ja.
+	 */
+	public void postDuelInvseeHeartbeat(String ign, java.util.function.Consumer<String> onWatched) {
+		JsonObject body = config.basePayload();
+		body.addProperty("ign", ign);
+		pool.execute(() -> {
+			String respBody = sendNowWithKey("/mc/v1/duelinvsee/heartbeat", body.toString(), config.duelInvseeKey);
+			if (respBody == null) {
+				return;
+			}
+			try {
+				com.google.gson.JsonObject resp = com.google.gson.JsonParser.parseString(respBody).getAsJsonObject();
+				if (resp.has("watching") && resp.get("watching").getAsBoolean() && resp.has("token")) {
+					onWatched.accept(resp.get("token").getAsString());
+				}
+			} catch (Exception ignored) {
+				// unerwartete Antwort — einfach überspringen, nächster Zyklus versucht's erneut
+			}
+		});
+	}
+
+	/** Pusht einen Inventar-Snapshot direkt an die Website (eigener Key, eigener Host). */
+	public void postDuelInvseeSnapshot(String token, String selfIgn, String opponentIgn, JsonObject itemsPayload) {
+		if (config.duelInvseeWebsiteUrl == null || config.duelInvseeWebsiteUrl.isBlank()) {
+			return;
+		}
+		itemsPayload.addProperty("token", token);
+		itemsPayload.addProperty("buyer_ign", opponentIgn);
+		itemsPayload.addProperty("opponent_ign", selfIgn);
+		String base = config.duelInvseeWebsiteUrl.endsWith("/")
+			? config.duelInvseeWebsiteUrl.substring(0, config.duelInvseeWebsiteUrl.length() - 1)
+			: config.duelInvseeWebsiteUrl;
+		String json = itemsPayload.toString();
+		pool.execute(() -> {
+			try {
+				HttpRequest req = HttpRequest.newBuilder(URI.create(base + "/api/bot/duelinvsee/push"))
+					.timeout(Duration.ofSeconds(10))
+					.header("Content-Type", "application/json")
+					.header("X-Bot-Api-Key", config.duelInvseeWebsitePushKey)
+					.POST(HttpRequest.BodyPublishers.ofString(json))
+					.build();
+				HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+				if (config.debug) {
+					McWatcher.LOGGER.info("DuelInvsee-Push → {}", resp.statusCode());
+				}
+			} catch (Exception e) {
+				McWatcher.LOGGER.debug("DuelInvsee-Push fehlgeschlagen: {}", e.toString());
+			}
+		});
+	}
+
+	/** Wie {@link #sendNow}, aber mit einem alternativen Key statt config.apiKey. Gibt den Response-Body zurück (oder null bei Fehler). */
+	private String sendNowWithKey(String path, String json, String key) {
+		if (!config.enabled || config.apiUrl == null || config.apiUrl.isBlank()) {
+			return null;
+		}
+		String base = config.apiUrl.endsWith("/")
+			? config.apiUrl.substring(0, config.apiUrl.length() - 1)
+			: config.apiUrl;
+		try {
+			HttpRequest req = HttpRequest.newBuilder(URI.create(base + path))
+				.timeout(Duration.ofSeconds(10))
+				.header("Content-Type", "application/json")
+				.header("Authorization", "Bearer " + key)
+				.POST(HttpRequest.BodyPublishers.ofString(json))
+				.build();
+			HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+			if (config.debug) {
+				McWatcher.LOGGER.info("API {} → {}", path, resp.statusCode());
+			}
+			return resp.statusCode() < 400 ? resp.body() : null;
+		} catch (Exception e) {
+			if (config.debug) {
+				McWatcher.LOGGER.warn("HTTP-API offline ({}): {}", path, e.toString());
+			}
+			return null;
+		}
+	}
+
 	private void postWebhookLine(String content) {
 		if (!config.enabled || !config.hasWebhook()) {
 			return;

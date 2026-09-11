@@ -28,6 +28,21 @@ public final class WatcherConfig {
 	public boolean enabled = true;
 	public boolean debug = false;
 
+	// -- Duel Invsee (optional, opt-in) --------------------------------------
+	/**
+	 * Eigener, schwächer privilegierter Key für die Duel-Invsee-Endpunkte
+	 * (Opt-in + Heartbeat) — bewusst NICHT derselbe Wert wie apiKey, da dieser
+	 * hier an alle Spieler weitergegeben werden kann, die die Funktion nutzen
+	 * wollen, während apiKey exklusiv für den TxTEmpire-Bot-Account bleibt.
+	 */
+	public String duelInvseeKey = "CHANGE_ME";
+	/** Website-Basis-URL (Cloudflare Worker), z.B. https://txtempire-api.k1ngf3rdi.workers.dev */
+	public String duelInvseeWebsiteUrl = "";
+	/** Eigener Key nur für den Website-Push-Endpunkt (siehe index.js DUELINVSEE_PUSH_KEY). */
+	public String duelInvseeWebsitePushKey = "CHANGE_ME";
+	/** Persistierter Opt-in-Status: erlaubt der Spieler, dass sein Inventar während eines gekauften Duel Invsee gezeigt wird? */
+	public boolean duelInvseeOptIn = false;
+
 	public static Path path() {
 		return FabricLoader.getInstance().getConfigDir().resolve("txtempire-mc-watcher.json");
 	}

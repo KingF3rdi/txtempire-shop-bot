@@ -153,6 +153,16 @@ else:
     MC_API_PORT = int(os.getenv("MC_API_PORT") or "8765")
 MC_API_KEY = os.getenv("MC_API_KEY", "").strip()
 MC_LINK_CODE_TTL_MINUTES = int(os.getenv("MC_LINK_CODE_TTL_MINUTES", "10") or "10")
+
+# Duel Invsee — eigener, schwächer privilegierter Key (getrennt von MC_API_KEY),
+# da dieser an Spieler weitergegeben wird, die die Funktion selbst nutzen
+# (Opt-in + Heartbeat), statt exklusiv beim TxTEmpire-Bot-Account zu bleiben.
+DUEL_INVSEE_PUBLIC_KEY = os.getenv("DUEL_INVSEE_PUBLIC_KEY", "").strip()
+DUEL_INVSEE_PRICE = float(os.getenv("DUEL_INVSEE_PRICE", "50000") or "50000")
+DUEL_INVSEE_WATCH_MINUTES = int(os.getenv("DUEL_INVSEE_WATCH_MINUTES", "30") or "30")
+DUEL_INVSEE_VIEW_URL = os.getenv(
+    "DUEL_INVSEE_VIEW_URL", "https://txtempire-website.txtempire.workers.dev"
+).strip()
 MC_LINK_IGN = (os.getenv("MC_LINK_IGN", "TxTEmpire") or "TxTEmpire").strip()
 
 # Pack AI — Texturepack Studio (offline HMAC-Keys + Discord-Webhook)

@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 import config
+from utils.duel_invsee_store import find_active_watch_token, set_opt_in
 from utils.mc_confirm import handle_mc_link_redeem, handle_mc_payment
+from utils.mc_duel_invsee import handle_duel_invsee_charge
 
 if TYPE_CHECKING:
     from bot import ShopBot
@@ -18,15 +20,29 @@ IGN_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 CODE_RE = re.compile(r"^[A-Z0-9\-]{4,24}$", re.I)
 
 
+def _bearer_or_key(request: web.Request) -> str:
+    auth = request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (request.headers.get("X-Api-Key") or "").strip()
+
+
 def _auth_ok(request: web.Request) -> bool:
     expected = (config.MC_API_KEY or "").strip()
     if not expected:
         return False
-    auth = request.headers.get("Authorization") or ""
-    if auth.lower().startswith("bearer "):
-        token = auth[7:].strip()
-    else:
-        token = (request.headers.get("X-Api-Key") or "").strip()
+    token = _bearer_or_key(request)
+    return bool(token) and token == expected
+
+
+def _duelinvsee_auth_ok(request: web.Request) -> bool:
+    """Eigener, schwächer privilegierter Key für die Duel-Invsee-Endpunkte —
+    getrennt von MC_API_KEY, da dieser an alle Spieler weitergegeben wird,
+    die selbst Duel Invsee nutzen wollen (siehe minecraft-mod/)."""
+    expected = (config.DUEL_INVSEE_PUBLIC_KEY or "").strip()
+    if not expected:
+        return False
+    token = _bearer_or_key(request)
     return bool(token) and token == expected
 
 
@@ -79,6 +95,9 @@ class McApiServer:
         app.router.add_post("/mc/v1/link", self.link)
         app.router.add_post("/mc/v1/payment", self.payment)
         app.router.add_post("/mc/v1/chat", self.chat)
+        app.router.add_post("/mc/v1/duelinvsee/charge", self.duelinvsee_charge)
+        app.router.add_post("/mc/v1/duelinvsee/optin", self.duelinvsee_optin)
+        app.router.add_post("/mc/v1/duelinvsee/heartbeat", self.duelinvsee_heartbeat)
         # Pack AI License-API auf demselben Port (für Bot + PackAI.exe)
         from integrations import packai_license_api
 
@@ -178,6 +197,80 @@ class McApiServer:
             raw_text=raw,
         )
         return web.json_response(result)
+
+    async def duelinvsee_charge(self, request: web.Request) -> web.Response:
+        """Vom Duell-Plugin aufgerufen: bucht den Duel-Invsee-Preis vom
+        verknüpften Discord-Account des Käufers ab (IGN -> Discord-Link).
+        Das Plugin selbst prüft vorher, dass Käufer und Ziel gerade
+        tatsächlich in einem laufenden Duell gegeneinander stehen."""
+        if not _auth_ok(request):
+            raise web.HTTPUnauthorized(text='{"ok":false,"reason":"unauthorized"}')
+        self._touch_watcher("duelinvsee_charge")
+        data = await _read_json(request)
+        ign = str(data.get("ign") or "").strip()
+        guild_id = _guild_id(data)
+        if not IGN_RE.match(ign):
+            return web.json_response({"ok": False, "reason": "bad_ign"}, status=400)
+        if not guild_id:
+            return web.json_response(
+                {"ok": False, "reason": "guild_id_required"}, status=400
+            )
+        try:
+            amount = float(data.get("amount"))
+        except (TypeError, ValueError):
+            return web.json_response({"ok": False, "reason": "bad_amount"}, status=400)
+        if amount <= 0:
+            return web.json_response({"ok": False, "reason": "bad_amount"}, status=400)
+
+        result = await handle_duel_invsee_charge(
+            self.bot, guild_id=guild_id, ign=ign, amount=amount
+        )
+        if result.get("ok"):
+            return web.json_response(result, status=200)
+        status = 404 if result.get("reason") == "ign_not_linked" else 402
+        return web.json_response(result, status=status)
+
+    async def duelinvsee_optin(self, request: web.Request) -> web.Response:
+        """Vom Ingame-Mod aufgerufen, wenn ein Spieler SELBST `/duelinvsee on`
+        oder `/duelinvsee off` ausführt. Rein deklarativ — jeder meldet nur
+        seinen eigenen Opt-in-Status für seinen eigenen IGN."""
+        if not _duelinvsee_auth_ok(request):
+            raise web.HTTPUnauthorized(text='{"ok":false,"reason":"unauthorized"}')
+        self._touch_watcher("duelinvsee_optin")
+        data = await _read_json(request)
+        ign = str(data.get("ign") or "").strip()
+        guild_id = _guild_id(data)
+        if not IGN_RE.match(ign):
+            return web.json_response({"ok": False, "reason": "bad_ign"}, status=400)
+        if not guild_id:
+            return web.json_response(
+                {"ok": False, "reason": "guild_id_required"}, status=400
+            )
+        enabled = bool(data.get("enabled"))
+        await set_opt_in(self.bot, guild_id, ign, enabled)
+        return web.json_response({"ok": True, "ign": ign, "enabled": enabled})
+
+    async def duelinvsee_heartbeat(self, request: web.Request) -> web.Response:
+        """Vom Ingame-Mod alle ~10s aufgerufen (nur solange der Spieler selbst
+        opted-in ist): meldet zurück, ob GERADE jemand für diesen IGN bezahlt
+        hat zuzusehen, und mit welchem Token der Mod sein Inventar dann direkt
+        an die Website pushen soll."""
+        if not _duelinvsee_auth_ok(request):
+            raise web.HTTPUnauthorized(text='{"ok":false,"reason":"unauthorized"}')
+        self._touch_watcher("duelinvsee_heartbeat")
+        data = await _read_json(request)
+        ign = str(data.get("ign") or "").strip()
+        guild_id = _guild_id(data)
+        if not IGN_RE.match(ign):
+            return web.json_response({"ok": False, "reason": "bad_ign"}, status=400)
+        if not guild_id:
+            return web.json_response(
+                {"ok": False, "reason": "guild_id_required"}, status=400
+            )
+        token = await find_active_watch_token(self.bot, guild_id, ign)
+        if token:
+            return web.json_response({"ok": True, "watching": True, "token": token})
+        return web.json_response({"ok": True, "watching": False})
 
     async def chat(self, request: web.Request) -> web.Response:
         """Generischer Chat-Event: Mod schickt Klartext, Bot parst Link/Payment."""

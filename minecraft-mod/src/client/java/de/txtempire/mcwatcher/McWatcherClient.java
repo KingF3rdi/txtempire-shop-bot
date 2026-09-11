@@ -44,6 +44,8 @@ public class McWatcherClient implements ClientModInitializer {
 		ClientReceiveMessageEvents.CHAT.register(this::onChat);
 		ClientReceiveMessageEvents.GAME.register(this::onGame);
 
+		DuelInvseeClient.init(config, api);
+
 		// Alle 15s Heartbeat + Retry (Link/Payment wenn Bot kurz offline war)
 		api.postHeartbeat();
 		HEARTBEAT.scheduleAtFixedRate(
