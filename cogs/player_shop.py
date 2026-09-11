@@ -864,6 +864,9 @@ class PlayerItemTicketView(discord.ui.View):
             return
         await interaction.response.defer()
         await _mark_ticket(self.bot, int(row["id"]), "confirmed", interaction.user.id)
+        from utils.referrals import credit_referral
+
+        await credit_referral(self.bot, interaction.guild, int(row["user_id"]), float(row["price"]))
 
         member: discord.Member | None = None
         try:

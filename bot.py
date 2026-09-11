@@ -45,6 +45,7 @@ class ShopBot(commands.Bot):
             "cogs.custom_pack",
             "cogs.spawner_shop",
             "cogs.player_shop",
+            "cogs.monetization",
             "cogs.tweak_panel",
             "cogs.website_backfill",
             ):
@@ -125,6 +126,10 @@ class ShopBot(commands.Bot):
         n_player_panels = await register_all_player_panel_views(self)
         if n_player_panels:
             print(f"[PlayerShop] {n_player_panels} Spieler-Panel-View(s) registriert")
+        from cogs.monetization import VipTicketView, BoxPanelView
+
+        self.add_view(VipTicketView(self))
+        self.add_view(BoxPanelView(self, [{"id": 0, "name": "placeholder", "price": 0}]))
         from cogs.tweak_panel import TweakShopPanelView
 
         self.add_view(TweakShopPanelView(self))

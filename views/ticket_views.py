@@ -19,6 +19,7 @@ from utils.embeds import (
     warn_embed,
 )
 from utils.product_channels import grant_purchase_channels
+from utils.referrals import credit_referral
 from utils.roles import grant_purchase_roles
 
 if TYPE_CHECKING:
@@ -404,6 +405,7 @@ async def action_confirm_order(
         await sync_website_purchases(
             int(order["user_id"]), order_items, total=float(order.get("total") or 0)
         )
+        await credit_referral(bot, interaction.guild, int(order["user_id"]), float(order.get("total") or 0))
     elif member and non_product:
         role_result = await grant_purchase_roles(member, settings, [])
     elif not member:

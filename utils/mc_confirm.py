@@ -18,6 +18,7 @@ from utils.embeds import (
     warn_embed,
 )
 from utils.product_channels import grant_purchase_channels
+from utils.referrals import credit_referral
 from utils.roles import grant_purchase_roles
 from views.ticket_views import enrich_order_item_roles, _delete_channel_later
 
@@ -213,6 +214,7 @@ async def confirm_order_by_id(
             await sync_website_purchases(
                 int(order["user_id"]), order_items, total=float(order.get("total") or 0)
             )
+            await credit_referral(bot, guild, int(order["user_id"]), float(order.get("total") or 0))
         elif member and non_product:
             role_result = await grant_purchase_roles(member, settings, [])
         elif not member:
