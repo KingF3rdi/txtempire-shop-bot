@@ -43,6 +43,15 @@ DEFAULT_PRICES: dict[str, float] = {"LT3": 4.99, "HT3": 9.99, "HT4": 14.99}
 
 # ── DB Bootstrap & Helpers ───────────────────────────────────────────────
 
+async def _ensure_column(bot: "ShopBot", table: str, column: str, ddl: str) -> None:
+    try:
+        await bot.db.db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+        await bot.db.db.commit()
+    except Exception as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
+
 async def _ensure_tables(bot: "ShopBot") -> None:
     await bot.db.db.executescript(
         """
@@ -64,13 +73,44 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             tier_key TEXT NOT NULL,
             price REAL NOT NULL,
             ign TEXT NOT NULL,
+            gamemode TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
             ticket_channel_id INTEGER,
             created_by INTEGER,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             confirmed_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS boost_gamemodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 99,
+            UNIQUE(guild_id, name)
+        );
         """
+    )
+    await bot.db.db.commit()
+    # Für Installationen, bei denen "boost_tickets" schon vor "gamemode" existierte.
+    await _ensure_column(bot, "boost_tickets", "gamemode", "gamemode TEXT")
+
+
+async def list_gamemodes(bot: "ShopBot", guild_id: int) -> list[dict]:
+    rows = await bot.db.fetchall(
+        "SELECT * FROM boost_gamemodes WHERE guild_id = ? ORDER BY sort_order ASC, name ASC", (guild_id,),
+    )
+    return [dict(r) for r in rows]
+
+
+async def add_gamemode(bot: "ShopBot", guild_id: int, name: str) -> None:
+    await bot.db.db.execute(
+        "INSERT OR IGNORE INTO boost_gamemodes (guild_id, name) VALUES (?, ?)", (guild_id, name.strip()),
+    )
+    await bot.db.db.commit()
+
+
+async def remove_gamemode(bot: "ShopBot", guild_id: int, name: str) -> None:
+    await bot.db.db.execute(
+        "DELETE FROM boost_gamemodes WHERE guild_id = ? AND lower(name) = lower(?)", (guild_id, name.strip()),
     )
     await bot.db.db.commit()
 
@@ -149,7 +189,26 @@ class TierSelect(discord.ui.Select):
         super().__init__(placeholder="Stufe auswählen ...", options=options, custom_id="tierboost:select")
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_modal(TierIgnModal(self.bot, self.values[0]))
+        assert interaction.guild is not None
+        tier_key = self.values[0]
+        gamemodes = await list_gamemodes(self.bot, interaction.guild.id)
+        if gamemodes:
+            view = discord.ui.View(timeout=180)
+            view.add_item(GamemodeSelect(self.bot, tier_key, gamemodes))
+            await interaction.response.edit_message(content="Welchen Gamemode möchtest du buchen?", view=view)
+            return
+        await interaction.response.send_modal(TierIgnModal(self.bot, tier_key, None))
+
+
+class GamemodeSelect(discord.ui.Select):
+    def __init__(self, bot: "ShopBot", tier_key: str, gamemodes: list[dict]) -> None:
+        self.bot = bot
+        self.tier_key = tier_key
+        options = [discord.SelectOption(label=g["name"], value=g["name"]) for g in gamemodes[:25]]
+        super().__init__(placeholder="Gamemode auswählen ...", options=options, custom_id="tierboost:gamemode")
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(TierIgnModal(self.bot, self.tier_key, self.values[0]))
 
 
 async def _open_tier_picker(bot: "ShopBot", interaction: discord.Interaction) -> None:
@@ -163,18 +222,25 @@ async def _open_tier_picker(bot: "ShopBot", interaction: discord.Interaction) ->
 class TierIgnModal(discord.ui.Modal, title="Boost anfragen"):
     ign = discord.ui.TextInput(label="Dein Minecraft-Name", max_length=16, min_length=3, required=True)
 
-    def __init__(self, bot: "ShopBot", tier_key: str) -> None:
+    def __init__(self, bot: "ShopBot", tier_key: str, gamemode: Optional[str]) -> None:
         super().__init__()
         self.bot = bot
         self.tier_key = tier_key
+        self.gamemode = gamemode
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
         price = await get_tier_price(self.bot, interaction.guild.id, self.tier_key)
-        await _create_boost_ticket(self.bot, interaction, tier_key=self.tier_key, price=price, ign=str(self.ign.value).strip())
+        await _create_boost_ticket(
+            self.bot, interaction, tier_key=self.tier_key, price=price,
+            ign=str(self.ign.value).strip(), gamemode=self.gamemode,
+        )
 
 
-async def _create_boost_ticket(bot: "ShopBot", interaction: discord.Interaction, *, tier_key: str, price: float, ign: str) -> None:
+async def _create_boost_ticket(
+    bot: "ShopBot", interaction: discord.Interaction, *, tier_key: str, price: float, ign: str,
+    gamemode: Optional[str] = None,
+) -> None:
     guild = interaction.guild
     assert guild is not None
     if not interaction.response.is_done():
@@ -215,10 +281,10 @@ async def _create_boost_ticket(bot: "ShopBot", interaction: discord.Interaction,
     ticket_number = await _next_ticket_number(bot, guild.id)
     cur = await bot.db.db.execute(
         """
-        INSERT INTO boost_tickets (guild_id, ticket_number, user_id, tier_key, price, ign, status)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending')
+        INSERT INTO boost_tickets (guild_id, ticket_number, user_id, tier_key, price, ign, gamemode, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
         """,
-        (guild.id, ticket_number, interaction.user.id, tier_key, price, ign),
+        (guild.id, ticket_number, interaction.user.id, tier_key, price, ign, gamemode),
     )
     await bot.db.db.commit()
     ticket_id = int(cur.lastrowid)  # type: ignore[arg-type]
@@ -240,7 +306,8 @@ async def _create_boost_ticket(bot: "ShopBot", interaction: discord.Interaction,
         f"⚔️ Boost-Ticket #{ticket_number}",
         f"Käufer: {interaction.user.mention}\n"
         f"Stufe: **{tier_key}**\n"
-        f"Minecraft-Name: **{ign}**\n"
+        + (f"Gamemode: **{gamemode}**\n" if gamemode else "")
+        + f"Minecraft-Name: **{ign}**\n"
         f"Preis: **{format_price(price)}**\n\n"
         f"**{config.PAYMENT_NOTICE}**\n"
         f"Zahlung an **{payee_name(settings)}**:\n{payee_details_text(settings) or '_Keine Details hinterlegt_'}\n\n"
@@ -386,6 +453,34 @@ class TierBoostCog(commands.Cog):
         assert interaction.guild is not None
         lines = [f"**{t}** — {format_price(await get_tier_price(self.bot, interaction.guild.id, t))}" for t in TIERS]
         await interaction.response.send_message(embed=base_embed("Tier-Preise", "\n".join(lines)), ephemeral=True)
+
+    @tier_group.command(name="gamemode-hinzufuegen", description="Gamemode zur Auswahl beim Kauf hinzufügen")
+    @app_commands.describe(name="z. B. Sumo, Boxing, NoDebuff, Combo")
+    async def gamemode_add(self, interaction: discord.Interaction, name: str) -> None:
+        assert interaction.guild is not None
+        await add_gamemode(self.bot, interaction.guild.id, name)
+        await interaction.response.send_message(
+            embed=success_embed("Hinzugefügt", f"**{name.strip()}** steht jetzt bei jedem Boost-Kauf zur Auswahl."),
+            ephemeral=True,
+        )
+
+    @tier_group.command(name="gamemode-entfernen", description="Gamemode wieder entfernen")
+    @app_commands.describe(name="Name des Gamemodes")
+    async def gamemode_remove(self, interaction: discord.Interaction, name: str) -> None:
+        assert interaction.guild is not None
+        await remove_gamemode(self.bot, interaction.guild.id, name)
+        await interaction.response.send_message(
+            embed=success_embed("Entfernt", f"**{name}** wurde entfernt."), ephemeral=True,
+        )
+
+    @tier_group.command(name="gamemode-liste", description="Alle wählbaren Gamemodes anzeigen")
+    async def gamemode_list(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        gamemodes = await list_gamemodes(self.bot, interaction.guild.id)
+        body = "\n".join(f"• {g['name']}" for g in gamemodes) or (
+            "_Keine Gamemodes gesetzt — Käufer werden aktuell nicht nach einem Modus gefragt._"
+        )
+        await interaction.response.send_message(embed=base_embed("Gamemodes", body), ephemeral=True)
 
 
 async def setup(bot: "ShopBot") -> None:
