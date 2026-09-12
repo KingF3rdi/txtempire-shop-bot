@@ -41,6 +41,15 @@ if TYPE_CHECKING:
 
 # ── DB Bootstrap & Helpers ───────────────────────────────────────────────
 
+async def _ensure_column(bot: "ShopBot", table: str, column: str, ddl: str) -> None:
+    try:
+        await bot.db.db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+        await bot.db.db.commit()
+    except Exception as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
+
 async def _ensure_tables(bot: "ShopBot") -> None:
     await bot.db.db.executescript(
         """
@@ -51,6 +60,7 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             price REAL NOT NULL,
             info_text TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'available',
+            stock INTEGER NOT NULL DEFAULT 1,
             sort_order INTEGER NOT NULL DEFAULT 99
         );
         CREATE TABLE IF NOT EXISTS account_settings (
@@ -74,6 +84,8 @@ async def _ensure_tables(bot: "ShopBot") -> None:
         """
     )
     await bot.db.db.commit()
+    # Für Installationen, bei denen "accounts" schon vor "stock" existierte.
+    await _ensure_column(bot, "accounts", "stock", "stock INTEGER NOT NULL DEFAULT 1")
 
 
 async def _next_ticket_number(bot: "ShopBot", guild_id: int) -> int:
@@ -93,7 +105,7 @@ async def _next_ticket_number(bot: "ShopBot", guild_id: int) -> int:
 
 async def list_available_accounts(bot: "ShopBot", guild_id: int) -> list[dict]:
     rows = await bot.db.fetchall(
-        "SELECT * FROM accounts WHERE guild_id = ? AND status = 'available' ORDER BY sort_order ASC, name ASC",
+        "SELECT * FROM accounts WHERE guild_id = ? AND status = 'available' AND stock > 0 ORDER BY sort_order ASC, name ASC",
         (guild_id,),
     )
     return [dict(r) for r in rows]
@@ -111,8 +123,25 @@ async def get_account(bot: "ShopBot", account_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
-async def _mark_sold(bot: "ShopBot", account_id: int) -> None:
-    await bot.db.db.execute("UPDATE accounts SET status = 'sold' WHERE id = ?", (account_id,))
+async def set_stock(bot: "ShopBot", account_id: int, stock: int) -> None:
+    stock = max(0, stock)
+    await bot.db.db.execute(
+        "UPDATE accounts SET stock = ?, status = ? WHERE id = ?",
+        (stock, "available" if stock > 0 else "sold", account_id),
+    )
+    await bot.db.db.commit()
+
+
+async def _consume_one_stock(bot: "ShopBot", account_id: int) -> None:
+    """Zieht 1 vom Lagerbestand ab; bei 0 gilt der Account als ausverkauft."""
+    account = await get_account(bot, account_id)
+    if not account:
+        return
+    remaining = max(0, int(account["stock"]) - 1)
+    await bot.db.db.execute(
+        "UPDATE accounts SET stock = ?, status = ? WHERE id = ?",
+        (remaining, "available" if remaining > 0 else "sold", account_id),
+    )
     await bot.db.db.commit()
 
 
@@ -146,8 +175,15 @@ async def _mark_rejected(bot: "ShopBot", ticket_id: int, staff_id: int) -> None:
 
 # ── UI: Panel, Auswahl, Ticket-Buttons ───────────────────────────────────
 
+def _stock_suffix(account: dict) -> str:
+    stock = int(account.get("stock") or 0)
+    return f" · {stock}x auf Lager" if stock > 1 else ""
+
+
 def _panel_embed(accounts: list[dict]) -> discord.Embed:
-    body = "\n".join(f"👤 **{a['name']}** — {format_price(a['price'])}" for a in accounts) or "_Aktuell keine Accounts im Angebot._"
+    body = "\n".join(
+        f"👤 **{a['name']}** — {format_price(a['price'])}{_stock_suffix(a)}" for a in accounts
+    ) or "_Aktuell keine Accounts im Angebot._"
     return base_embed(
         "👤 Account-Shop",
         f"{body}\n\nKlicke unten und wähle einen Account — danach wird ein privates Ticket erstellt.",
@@ -165,7 +201,7 @@ class AccountSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         account = await get_account(self.bot, int(self.values[0]))
-        if not account or account["status"] != "available":
+        if not account or account["status"] != "available" or int(account.get("stock") or 0) <= 0:
             await interaction.response.send_message(embed=error_embed("Nicht mehr verfügbar"), ephemeral=True)
             return
         await _create_account_ticket(self.bot, interaction, account=account)
@@ -284,7 +320,7 @@ class AccountTicketView(discord.ui.View):
         await interaction.response.defer()
         await _mark_confirmed(self.bot, int(row["id"]), interaction.user.id)
         if row.get("account_id"):
-            await _mark_sold(self.bot, int(row["account_id"]))
+            await _consume_one_stock(self.bot, int(row["account_id"]))
         await interaction.followup.send(
             embed=success_embed(
                 "Bestätigt",
@@ -352,9 +388,11 @@ class AccountPanelView(discord.ui.View):
 
 
 def _single_account_embed(account: dict) -> discord.Embed:
+    stock = int(account.get("stock") or 0)
+    stock_line = f"**Auf Lager:** {stock}\n" if stock > 1 else ""
     return base_embed(
         f"👤 {account['name']}",
-        f"**Preis:** {format_price(account['price'])}\n\n{account['info_text'] or '_Keine weiteren Infos_'}",
+        f"**Preis:** {format_price(account['price'])}\n{stock_line}\n{account['info_text'] or '_Keine weiteren Infos_'}",
     )
 
 
@@ -378,7 +416,7 @@ class AccountSinglePanelView(discord.ui.View):
             await interaction.response.send_message(embed=error_embed("Nur auf dem Server"), ephemeral=True)
             return
         account = await get_account(self.bot, self.account_id)
-        if not account or account["status"] != "available":
+        if not account or account["status"] != "available" or int(account.get("stock") or 0) <= 0:
             await interaction.response.send_message(embed=error_embed("Nicht mehr verfügbar"), ephemeral=True)
             return
         await _create_account_ticket(self.bot, interaction, account=account)
@@ -508,10 +546,45 @@ class AccountShopCog(commands.Cog):
         assert interaction.guild is not None
         rows = await list_all_accounts(self.bot, interaction.guild.id)
         body = "\n".join(
-            f"`{a['id']}` **{a['name']}** — {format_price(a['price'])} · {'✅ verfügbar' if a['status'] == 'available' else '❌ verkauft'}"
+            f"`{a['id']}` **{a['name']}** — {format_price(a['price'])} · "
+            f"{'✅ verfügbar' if a['status'] == 'available' else '❌ ausverkauft'} · Lager: {int(a.get('stock') or 0)}"
             for a in rows
         ) or "_Keine Angebote._"
         await interaction.response.send_message(embed=base_embed("Account-Angebote", body), ephemeral=True)
+
+    @account_group.command(name="stock", description="Lagerbestand eines Accounts anzeigen oder setzen")
+    @app_commands.describe(name="Titel des Angebots", menge="Neuer Lagerbestand (leer lassen, um nur anzuzeigen)")
+    async def stock(self, interaction: discord.Interaction, name: str, menge: Optional[int] = None) -> None:
+        assert interaction.guild is not None
+        rows = await list_all_accounts(self.bot, interaction.guild.id)
+        account = next((a for a in rows if a["name"].lower() == name.strip().lower()), None)
+        if not account:
+            await interaction.response.send_message(
+                embed=error_embed("Nicht gefunden", f"**{name}** existiert nicht."), ephemeral=True,
+            )
+            return
+        if menge is None:
+            await interaction.response.send_message(
+                embed=base_embed(
+                    f"Lagerbestand · {account['name']}",
+                    f"**{int(account.get('stock') or 0)}** auf Lager "
+                    f"({'✅ verfügbar' if account['status'] == 'available' else '❌ ausverkauft'}).",
+                ),
+                ephemeral=True,
+            )
+            return
+        if menge < 0:
+            await interaction.response.send_message(
+                embed=error_embed("Ungültige Menge", "Menge darf nicht negativ sein."), ephemeral=True,
+            )
+            return
+        await set_stock(self.bot, int(account["id"]), menge)
+        if menge > 0:
+            ensure_account_panel_view(self.bot, int(account["id"]))
+        await interaction.response.send_message(
+            embed=success_embed("Gespeichert", f"**{account['name']}** hat jetzt **{menge}** auf Lager."),
+            ephemeral=True,
+        )
 
 
 async def setup(bot: "ShopBot") -> None:
