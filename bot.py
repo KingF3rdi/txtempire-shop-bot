@@ -45,6 +45,10 @@ class ShopBot(commands.Bot):
             "cogs.custom_pack",
             "cogs.spawner_shop",
             "cogs.duel_invsee",
+            "cogs.schematic_shop",
+            "cogs.boost_support",
+            "cogs.account_shop",
+            "cogs.tier_boost",
             "cogs.player_shop",
             "cogs.monetization",
             "cogs.tweak_panel",
@@ -123,6 +127,18 @@ class ShopBot(commands.Bot):
         from cogs.duel_invsee import DuelInvseePanelView
 
         self.add_view(DuelInvseePanelView(self))
+        from cogs.schematic_shop import SchematicPanelView, SchematicTicketView
+
+        self.add_view(SchematicPanelView(self))
+        self.add_view(SchematicTicketView(self))
+        from cogs.account_shop import AccountPanelView, AccountTicketView
+
+        self.add_view(AccountPanelView(self))
+        self.add_view(AccountTicketView(self))
+        from cogs.tier_boost import TierBoostPanelView, BoostTicketView
+
+        self.add_view(TierBoostPanelView(self))
+        self.add_view(BoostTicketView(self))
         from cogs.player_shop import PlayerShopPanelView, PlayerItemTicketView, register_all_player_panel_views
 
         self.add_view(PlayerShopPanelView(self))
