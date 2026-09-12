@@ -351,6 +351,57 @@ class AccountPanelView(discord.ui.View):
         await _open_account_picker(self.bot, interaction)
 
 
+def _single_account_embed(account: dict) -> discord.Embed:
+    return base_embed(
+        f"👤 {account['name']}",
+        f"**Preis:** {format_price(account['price'])}\n\n{account['info_text'] or '_Keine weiteren Infos_'}",
+    )
+
+
+class AccountSinglePanelView(discord.ui.View):
+    """Persistentes Panel: ein Button -> direkt Ticket für GENAU diesen Account."""
+
+    def __init__(self, bot: "ShopBot", account_id: int) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.account_id = int(account_id)
+
+        buy_btn = discord.ui.Button(
+            label="Kaufen", style=discord.ButtonStyle.success,
+            custom_id=f"account:buyone:{self.account_id}", emoji="💰",
+        )
+        buy_btn.callback = self._on_buy  # type: ignore[method-assign]
+        self.add_item(buy_btn)
+
+    async def _on_buy(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(embed=error_embed("Nur auf dem Server"), ephemeral=True)
+            return
+        account = await get_account(self.bot, self.account_id)
+        if not account or account["status"] != "available":
+            await interaction.response.send_message(embed=error_embed("Nicht mehr verfügbar"), ephemeral=True)
+            return
+        await _create_account_ticket(self.bot, interaction, account=account)
+
+
+def ensure_account_panel_view(bot: "ShopBot", account_id: int) -> None:
+    registered: set[int] = getattr(bot, "_account_panel_registered", set())
+    aid = int(account_id)
+    if aid in registered:
+        return
+    bot.add_view(AccountSinglePanelView(bot, aid))
+    registered.add(aid)
+    bot._account_panel_registered = registered
+
+
+async def register_all_account_panel_views(bot: "ShopBot") -> int:
+    """Registriert Views für alle verfügbaren Accounts (Panel-Buttons bleiben nach Neustart klickbar)."""
+    rows = await bot.db.fetchall("SELECT id FROM accounts WHERE status = 'available'")
+    for row in rows:
+        ensure_account_panel_view(bot, int(row["id"]))
+    return len(rows)
+
+
 class AccountInfoModal(discord.ui.Modal, title="Account-Info"):
     info = discord.ui.TextInput(
         label="Info-Text über den Account", style=discord.TextStyle.paragraph,
@@ -401,6 +452,33 @@ class AccountShopCog(commands.Cog):
         accounts = await list_available_accounts(self.bot, interaction.guild.id)
         msg = await target.send(embed=_panel_embed(accounts), view=AccountPanelView(self.bot))
         await interaction.followup.send(embed=success_embed("Panel gepostet", f"In {target.mention}: {msg.jump_url}"), ephemeral=True)
+
+    @account_group.command(name="posten", description="Einen einzelnen Account als eigenen Post veröffentlichen")
+    @app_commands.describe(name="Titel des Angebots", channel="Ziel-Channel (Standard: aktuell)")
+    async def posten(
+        self, interaction: discord.Interaction, name: str, channel: discord.TextChannel | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
+            await interaction.response.send_message(embed=error_embed("Kein Channel"), ephemeral=True)
+            return
+        rows = await list_all_accounts(self.bot, interaction.guild.id)
+        account = next((a for a in rows if a["name"].lower() == name.strip().lower()), None)
+        if not account:
+            await interaction.response.send_message(embed=error_embed("Nicht gefunden", f"**{name}** existiert nicht."), ephemeral=True)
+            return
+        if account["status"] != "available":
+            await interaction.response.send_message(embed=error_embed("Bereits verkauft"), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        ensure_account_panel_view(self.bot, int(account["id"]))
+        msg = await target.send(embed=_single_account_embed(account), view=AccountSinglePanelView(self.bot, int(account["id"])))
+        await interaction.followup.send(
+            embed=success_embed("Gepostet", f"**{account['name']}** in {target.mention}: {msg.jump_url}"), ephemeral=True,
+        )
 
     @account_group.command(name="hinzufuegen", description="Neues Account-Angebot anlegen (öffnet Textfenster für die Info)")
     @app_commands.describe(name="Titel des Angebots", preis="Preis, z. B. 49.99")

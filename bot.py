@@ -131,10 +131,13 @@ class ShopBot(commands.Bot):
 
         self.add_view(SchematicPanelView(self))
         self.add_view(SchematicTicketView(self))
-        from cogs.account_shop import AccountPanelView, AccountTicketView
+        from cogs.account_shop import AccountPanelView, AccountTicketView, register_all_account_panel_views
 
         self.add_view(AccountPanelView(self))
         self.add_view(AccountTicketView(self))
+        n_account_panels = await register_all_account_panel_views(self)
+        if n_account_panels:
+            print(f"[AccountShop] {n_account_panels} Account-Panel-View(s) registriert")
         from cogs.tier_boost import TierBoostPanelView, BoostTicketView
 
         self.add_view(TierBoostPanelView(self))
