@@ -33,6 +33,7 @@ _PAYMENT_REASON_LABELS: dict[str, str] = {
     "ign_not_linked": "IGN nicht verknüpft",
     "auto_confirm_disabled": "Auto-Confirm aus",
     "no_matching_order": "Kein passendes Ticket (Betrag)",
+    "mini_shop_payment_flagged": "Zahlung erkannt, im Mini-Shop-Ticket markiert",
     "already_completed": "Order schon bestätigt",
     "cancelled": "Order storniert",
     "order_not_found": "Order nicht gefunden",
@@ -83,6 +84,8 @@ async def _post_mc_payment_log(
 
     title = "MC-Zahlung · Auto-Confirm" if auto_confirmed else "MC-Zahlung erkannt"
     if auto_confirmed:
+        embed = success_embed(title, "\n".join(lines))
+    elif reason == "mini_shop_payment_flagged":
         embed = success_embed(title, "\n".join(lines))
     elif reason in ("no_matching_order", "ign_not_linked", "auto_confirm_disabled"):
         embed = warn_embed(title, "\n".join(lines))
@@ -448,13 +451,24 @@ async def handle_mc_payment(
 
     order = await bot.db.find_open_order_by_amount(guild_id, user_id, amount)
     if not order:
-        reason = "no_matching_order"
+        from utils.mc_order_match import find_matching_pending_tickets, flag_detected_payments
+
+        mini_shop_matches = await find_matching_pending_tickets(bot, guild_id, user_id, amount)
+        flagged = 0
+        if mini_shop_matches:
+            guild = bot.get_guild(guild_id)
+            if guild is not None:
+                flagged = await flag_detected_payments(
+                    bot, guild, mini_shop_matches, ign=ign, amount=amount
+                )
+
+        reason = "mini_shop_payment_flagged" if flagged else "no_matching_order"
         event_id = await bot.db.log_mc_payment(
             guild_id, ign=ign, amount=amount, raw_text=raw_text
         )
         opens = await bot.db.list_open_orders_for_user(guild_id, user_id)
         open_orders = len(opens)
-        if opens:
+        if opens and not flagged:
             await _notify_payment_mismatch(
                 bot, opens[0], ign=ign, amount=amount, raw_text=raw_text
             )
@@ -476,6 +490,7 @@ async def handle_mc_payment(
             "event_id": event_id,
             "user_id": user_id,
             "open_orders": open_orders,
+            "mini_shop_tickets_flagged": flagged,
         }
 
     await bot.db.update_order(int(order["id"]), ign=ign.strip()[:32])
