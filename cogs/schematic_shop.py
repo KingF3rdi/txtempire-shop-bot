@@ -17,6 +17,7 @@ Eigene Tabellen (schematics, schematic_settings, schematic_tickets) - keine
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import discord
@@ -33,6 +34,7 @@ from utils.embeds import (
     success_embed,
     warn_embed,
 )
+from utils.packs import resolve_pack_path, save_pack_attachment
 from utils.price import parse_price
 from views.ticket_views import is_staff
 
@@ -41,6 +43,15 @@ if TYPE_CHECKING:
 
 
 # ── DB Bootstrap & Helpers ───────────────────────────────────────────────
+
+async def _ensure_column(bot: "ShopBot", table: str, column: str, ddl: str) -> None:
+    try:
+        await bot.db.db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+        await bot.db.db.commit()
+    except Exception as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
 
 async def _ensure_tables(bot: "ShopBot") -> None:
     await bot.db.db.executescript(
@@ -51,6 +62,7 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             name TEXT NOT NULL,
             price REAL NOT NULL,
             description TEXT NOT NULL DEFAULT '',
+            file_path TEXT,
             sort_order INTEGER NOT NULL DEFAULT 99,
             UNIQUE(guild_id, name)
         );
@@ -75,6 +87,8 @@ async def _ensure_tables(bot: "ShopBot") -> None:
         """
     )
     await bot.db.db.commit()
+    # Für Installationen, bei denen "schematics" schon vor "file_path" existierte.
+    await _ensure_column(bot, "schematics", "file_path", "file_path TEXT")
 
 
 async def _next_ticket_number(bot: "ShopBot", guild_id: int) -> int:
@@ -331,6 +345,41 @@ class SchematicDeliverModal(discord.ui.Modal, title="Schematic liefern"):
         await interaction.followup.send(embed=success_embed("Schematic geliefert", body), file=await att.to_file())
 
 
+async def _auto_deliver(bot: "ShopBot", interaction: discord.Interaction, ticket: dict, stored_path: Path) -> None:
+    """Liefert eine bei /schematic hinzufuegen mitgegebene Datei automatisch per DM,
+    ohne dass Staff sie erneut hochladen muss."""
+    assert interaction.guild is not None
+    await interaction.response.defer()
+    await _mark_confirmed(bot, int(ticket["id"]), interaction.user.id)
+
+    buyer = await _resolve_member(interaction.guild, ticket.get("user_id"))
+    dm_ok = True
+    if buyer is not None:
+        try:
+            await buyer.send(
+                embed=success_embed(
+                    f"🗺️ Deine Schematic (#{ticket['ticket_number']})",
+                    f"**{ticket['schematic_name']}** — viel Spaß beim Bauen!",
+                ),
+                file=discord.File(stored_path),
+            )
+        except discord.HTTPException:
+            dm_ok = False
+        else:
+            from utils import tweak_vouch
+
+            await tweak_vouch.request_vouch(
+                bot, interaction.guild, buyer, product="Schematic", tier_label=str(ticket["schematic_name"]),
+            )
+
+    body = f"Bestätigt und automatisch geliefert von {interaction.user.mention}."
+    if not dm_ok:
+        body += "\n⚠️ DM an Käufer fehlgeschlagen (DMs geschlossen) — Datei manuell weitergeben."
+    await interaction.followup.send(
+        embed=success_embed("Schematic geliefert", body), file=discord.File(stored_path),
+    )
+
+
 class SchematicTicketView(discord.ui.View):
     def __init__(self, bot: "ShopBot") -> None:
         super().__init__(timeout=None)
@@ -352,6 +401,13 @@ class SchematicTicketView(discord.ui.View):
                 embed=error_embed("Bereits bearbeitet", f"Status: `{row['status']}`"), ephemeral=True,
             )
             return
+
+        schematic = await get_schematic(self.bot, row["schematic_id"]) if row.get("schematic_id") else None
+        stored_path = resolve_pack_path(schematic["file_path"]) if schematic else None
+        if stored_path is not None:
+            await _auto_deliver(self.bot, interaction, row, stored_path)
+            return
+
         await interaction.response.send_modal(SchematicDeliverModal(self.bot, row))
 
     @discord.ui.button(label="Ablehnen", style=discord.ButtonStyle.danger, custom_id="schematicticket:reject", emoji="❌")
@@ -450,9 +506,13 @@ class SchematicShopCog(commands.Cog):
         await interaction.response.send_message(embed=base_embed("Schematics", body), ephemeral=True)
 
     @schematic_group.command(name="hinzufuegen", description="Neue Schematic anlegen")
-    @app_commands.describe(name="Name der Schematic", preis="Preis, z. B. 4.99", beschreibung="Optional")
+    @app_commands.describe(
+        name="Name der Schematic", preis="Preis, z. B. 4.99", beschreibung="Optional",
+        datei="Schematic-Datei (z. B. .litematic/.schem) — wird bei Kauf automatisch per DM verschickt",
+    )
     async def hinzufuegen(
-        self, interaction: discord.Interaction, name: str, preis: str, beschreibung: Optional[str] = None,
+        self, interaction: discord.Interaction, name: str, preis: str,
+        beschreibung: Optional[str] = None, datei: Optional[discord.Attachment] = None,
     ) -> None:
         assert interaction.guild is not None
         try:
@@ -472,13 +532,34 @@ class SchematicShopCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        await self.bot.db.db.execute(
+
+        await interaction.response.defer(ephemeral=True)
+        cur = await self.bot.db.db.execute(
             "INSERT INTO schematics (guild_id, name, price, description) VALUES (?, ?, ?, ?)",
             (interaction.guild.id, name.strip(), price, (beschreibung or "").strip()),
         )
         await self.bot.db.db.commit()
-        await interaction.response.send_message(
-            embed=success_embed("Angelegt", f"**{name}** — {format_price(price)}"), ephemeral=True,
+        schematic_id = int(cur.lastrowid)  # type: ignore[arg-type]
+
+        file_note = ""
+        if datei is not None:
+            try:
+                rel = await save_pack_attachment(schematic_id, datei)
+            except ValueError as e:
+                await interaction.followup.send(
+                    embed=error_embed("Datei abgelehnt", str(e)), ephemeral=True,
+                )
+                return
+            await self.bot.db.db.execute(
+                "UPDATE schematics SET file_path = ? WHERE id = ?", (rel, schematic_id),
+            )
+            await self.bot.db.db.commit()
+            file_note = "\nDatei gespeichert — wird bei Kauf automatisch per DM verschickt."
+        else:
+            file_note = "\n⚠️ Keine Datei angehängt — Staff muss beim Kauf manuell liefern."
+
+        await interaction.followup.send(
+            embed=success_embed("Angelegt", f"**{name}** — {format_price(price)}{file_note}"), ephemeral=True,
         )
 
     @schematic_group.command(name="entfernen", description="Schematic löschen")
