@@ -447,21 +447,25 @@ class AccountInfoModal(discord.ui.Modal, title="Account-Info"):
         placeholder="z. B. Rang, Stats, Alter, besondere Items ...", max_length=1800, required=True,
     )
 
-    def __init__(self, bot: "ShopBot", name: str, price: float) -> None:
+    def __init__(self, bot: "ShopBot", name: str, price: float, stock: int = 1) -> None:
         super().__init__()
         self.bot = bot
         self.name = name
         self.price = price
+        self.stock = stock
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
         await self.bot.db.db.execute(
-            "INSERT INTO accounts (guild_id, name, price, info_text) VALUES (?, ?, ?, ?)",
-            (interaction.guild.id, self.name, self.price, str(self.info.value).strip()),
+            "INSERT INTO accounts (guild_id, name, price, info_text, stock) VALUES (?, ?, ?, ?, ?)",
+            (interaction.guild.id, self.name, self.price, str(self.info.value).strip(), self.stock),
         )
         await self.bot.db.db.commit()
         await interaction.response.send_message(
-            embed=success_embed("Angelegt", f"**{self.name}** — {format_price(self.price)}"), ephemeral=True,
+            embed=success_embed(
+                "Angelegt", f"**{self.name}** — {format_price(self.price)} · {self.stock}x auf Lager",
+            ),
+            ephemeral=True,
         )
 
 
@@ -520,8 +524,13 @@ class AccountShopCog(commands.Cog):
         )
 
     @account_group.command(name="hinzufuegen", description="Neues Account-Angebot anlegen (öffnet Textfenster für die Info)")
-    @app_commands.describe(name="Titel des Angebots", preis="Preis, z. B. 49.99")
-    async def hinzufuegen(self, interaction: discord.Interaction, name: str, preis: str) -> None:
+    @app_commands.describe(
+        name="Titel des Angebots", preis="Preis, z. B. 49.99",
+        menge="Lagerbestand (Standard: 1)",
+    )
+    async def hinzufuegen(
+        self, interaction: discord.Interaction, name: str, preis: str, menge: Optional[int] = 1,
+    ) -> None:
         try:
             price = parse_price(preis)
         except ValueError:
@@ -529,7 +538,13 @@ class AccountShopCog(commands.Cog):
                 embed=error_embed("Ungültiger Preis", "Beispiele: `49.99`, `500k`."), ephemeral=True,
             )
             return
-        await interaction.response.send_modal(AccountInfoModal(self.bot, name.strip(), price))
+        stock = menge if menge is not None else 1
+        if stock < 1:
+            await interaction.response.send_message(
+                embed=error_embed("Ungültige Menge", "Menge muss mindestens 1 sein."), ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(AccountInfoModal(self.bot, name.strip(), price, stock))
 
     @account_group.command(name="entfernen", description="Account-Angebot löschen")
     @app_commands.describe(name="Titel des Angebots")
