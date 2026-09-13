@@ -6,8 +6,9 @@ Tier-Boosting (LT3, HT3, HT4). Kunde wählt eine Stufe, gibt seinen
 Minecraft-Namen an, zahlt, Staff bestätigt und führt den Boost durch —
 kein Datei-Versand, das ist eine Dienstleistung.
 
-Eigene Support-Rolle + Einzelmitglieder (siehe utils/boost_support.py),
-geteilt mit cogs/account_shop.py — NICHT die generische Ticket-Staff-Rolle.
+Eigene Support-Rolle + Einzelmitglieder (siehe utils/tier_support.py) —
+getrennt von cogs/account_shop.py und der generischen Ticket-Staff-Rolle.
+Konfiguration über /tiersupport.
 
 Eigene Tabellen (boost_tier_prices, boost_settings, boost_tickets) - keine
 Änderung an db/database.py nötig.
@@ -22,7 +23,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
-from utils import boost_support
+from utils import tier_support
 from utils.embeds import (
     base_embed,
     error_embed,
@@ -306,7 +307,7 @@ async def _create_boost_ticket(
     category = guild.get_channel(int(category_id)) if category_id else None
     if category is not None and not isinstance(category, discord.CategoryChannel):
         category = None
-    staff_role = await boost_support.boost_staff_role(bot, guild)
+    staff_role = await tier_support.tier_staff_role(bot, guild)
     me = guild.me
     if me is None:
         await interaction.followup.send(embed=error_embed("Bot-Mitgliedschaft fehlt"), ephemeral=True)
@@ -328,7 +329,7 @@ async def _create_boost_ticket(
         overwrites[interaction.user] = buyer_perms
     if staff_role:
         overwrites[staff_role] = staff_perms
-    for uid in await boost_support.get_extra_staff_ids(bot, guild.id):
+    for uid in await tier_support.get_extra_staff_ids(bot, guild.id):
         member = guild.get_member(uid)
         if member is not None:
             overwrites[member] = staff_perms
@@ -382,7 +383,7 @@ class BoostTicketView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.guild is None:
             return
-        if not await boost_support.is_boost_staff(self.bot, interaction):
+        if not await tier_support.is_tier_staff(self.bot, interaction):
             await interaction.response.send_message(embed=error_embed("Nur Support"), ephemeral=True)
             return
         row = await _get_ticket_by_channel(self.bot, interaction.channel_id)
@@ -404,7 +405,7 @@ class BoostTicketView(discord.ui.View):
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.guild is None:
             return
-        if not await boost_support.is_boost_staff(self.bot, interaction):
+        if not await tier_support.is_tier_staff(self.bot, interaction):
             await interaction.response.send_message(embed=error_embed("Nur Support"), ephemeral=True)
             return
         row = await _get_ticket_by_channel(self.bot, interaction.channel_id)
@@ -428,7 +429,7 @@ class BoostTicketView(discord.ui.View):
         if not row:
             await interaction.response.send_message(embed=error_embed("Kein Boost-Ticket"), ephemeral=True)
             return
-        staff = await boost_support.is_boost_staff(self.bot, interaction)
+        staff = await tier_support.is_tier_staff(self.bot, interaction)
         is_owner = row.get("user_id") and interaction.user.id == int(row["user_id"])
         if not staff and not is_owner:
             await interaction.response.send_message(embed=error_embed("Keine Berechtigung"), ephemeral=True)
@@ -469,6 +470,55 @@ class TierBoostCog(commands.Cog):
         name="tier", description="Tier-Boosting-Preise verwalten (Staff)",
         default_permissions=discord.Permissions(manage_guild=True),
     )
+    tiersupport_group = app_commands.Group(
+        name="tiersupport", description="Eigene Support-Rolle/Mitglieder für Tier-Boost verwalten (Staff)",
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    @tiersupport_group.command(name="rolle", description="Support-Rolle für Tier-Boost setzen")
+    @app_commands.describe(rolle="Rolle, die in Boost-Tickets gepingt wird und Zugriff bekommt")
+    async def tiersupport_rolle(self, interaction: discord.Interaction, rolle: discord.Role) -> None:
+        assert interaction.guild is not None
+        await tier_support.set_staff_role_id(self.bot, interaction.guild.id, rolle.id)
+        await interaction.response.send_message(
+            embed=success_embed("Gespeichert", f"Support-Rolle für Tier-Boost ist jetzt {rolle.mention}."),
+            ephemeral=True,
+        )
+
+    @tiersupport_group.command(name="member-hinzufuegen", description="Einzelnes Mitglied ohne Rolle als Tier-Support hinzufügen")
+    @app_commands.describe(user="Mitglied, das Zugriff auf Boost-Tickets bekommt (ohne die Rolle tragen zu müssen)")
+    async def tiersupport_member_add(self, interaction: discord.Interaction, user: discord.Member) -> None:
+        assert interaction.guild is not None
+        await tier_support.add_extra_staff(self.bot, interaction.guild.id, user.id)
+        await interaction.response.send_message(
+            embed=success_embed("Gespeichert", f"{user.mention} ist jetzt Support für Tier-Boost."), ephemeral=True,
+        )
+
+    @tiersupport_group.command(name="member-entfernen", description="Einzelnes Tier-Support-Mitglied wieder entfernen")
+    @app_commands.describe(user="Mitglied, das wieder entfernt werden soll")
+    async def tiersupport_member_remove(self, interaction: discord.Interaction, user: discord.Member) -> None:
+        assert interaction.guild is not None
+        await tier_support.remove_extra_staff(self.bot, interaction.guild.id, user.id)
+        await interaction.response.send_message(
+            embed=success_embed("Entfernt", f"{user.mention} ist kein Tier-Support mehr."), ephemeral=True,
+        )
+
+    @tiersupport_group.command(name="anzeigen", description="Aktuelle Tier-Support-Rolle & Mitglieder anzeigen")
+    async def tiersupport_anzeigen(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        guild_id = interaction.guild.id
+        role_id = await tier_support.get_staff_role_id(self.bot, guild_id)
+        role = interaction.guild.get_role(role_id) if role_id else None
+        extra_ids = await tier_support.get_extra_staff_ids(self.bot, guild_id)
+        extras = "\n".join(f"• <@{uid}>" for uid in extra_ids) or "_keine_"
+        await interaction.response.send_message(
+            embed=base_embed(
+                "Tier-Boost-Support",
+                f"**Rolle:** {role.mention if role else '_keine gesetzt_'}\n\n"
+                f"**Einzelmitglieder ohne Rolle:**\n{extras}",
+            ),
+            ephemeral=True,
+        )
 
     @app_commands.command(name="tierpanel", description="Tier-Boosting-Panel posten (Staff)")
     @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
@@ -594,4 +644,5 @@ class TierBoostCog(commands.Cog):
 
 async def setup(bot: "ShopBot") -> None:
     await _ensure_tables(bot)
+    await tier_support.ensure_table(bot)
     await bot.add_cog(TierBoostCog(bot))

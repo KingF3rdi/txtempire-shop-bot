@@ -7,8 +7,9 @@ Preis und einen freien Info-Text (Staff schreibt ihn per Textfenster) — z.B.
 Rang, Stats, Alter des Accounts. Ein Angebot ist ein Unikat: sobald es
 verkauft ist, verschwindet es aus der Auswahl.
 
-Eigene Support-Rolle + Einzelmitglieder (siehe utils/boost_support.py),
-geteilt mit cogs/tier_boost.py — NICHT die generische Ticket-Staff-Rolle.
+Eigene Support-Rolle + Einzelmitglieder (siehe utils/boost_support.py) —
+getrennt von cogs/tier_boost.py (hat seit /tiersupport seine eigene) und
+der generischen Ticket-Staff-Rolle.
 
 Eigene Tabellen (accounts, account_settings, account_tickets) - keine
 Änderung an db/database.py nötig.
