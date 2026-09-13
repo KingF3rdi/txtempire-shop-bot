@@ -53,6 +53,8 @@ class ShopBot(commands.Bot):
             "cogs.monetization",
             "cogs.tweak_panel",
             "cogs.website_backfill",
+            "cogs.autorole",
+            "cogs.antiraid",
             ):
             try:
                 await self.load_extension(ext)
