@@ -64,106 +64,115 @@ class ShopBot(commands.Bot):
 
                 traceback.print_exc()
 
-        # Persistent views
-        from utils.panels import register_slot_panel_views, register_category_panel_views
-        from views.daily_deal_views import register_daily_deal_views
-        from views.shop_views import ShopPanelView
-        from views.ticket_views import TicketOrderView
+        # Persistent views — in einem eigenen try/except: ein einzelner kaputter
+        # View-Import (z.B. fehlende Abhängigkeit) darf NIEMALS den Command-Sync
+        # weiter unten verhindern, sonst fehlen plötzlich ALLE neuen Slash-Befehle,
+        # nicht nur die View, die tatsächlich betroffen ist.
+        try:
+            from utils.panels import register_slot_panel_views, register_category_panel_views
+            from views.daily_deal_views import register_daily_deal_views
+            from views.shop_views import ShopPanelView
+            from views.ticket_views import TicketOrderView
 
-        self.add_view(ShopPanelView(self))
-        register_slot_panel_views(self)
-        await register_category_panel_views(self)
-        # Mit Fast-Buy-Button registrieren (erscheint nur auf Credits-Tickets)
-        self.add_view(TicketOrderView(self, show_fast_buy=True))
-        from views.scan_panel import ScanPanelView
+            self.add_view(ShopPanelView(self))
+            register_slot_panel_views(self)
+            await register_category_panel_views(self)
+            # Mit Fast-Buy-Button registrieren (erscheint nur auf Credits-Tickets)
+            self.add_view(TicketOrderView(self, show_fast_buy=True))
+            from views.scan_panel import ScanPanelView
 
-        self.add_view(ScanPanelView(self))
-        from views.snipe_panel import SnipePanelView
+            self.add_view(ScanPanelView(self))
+            from views.snipe_panel import SnipePanelView
 
-        self.add_view(SnipePanelView(self))
-        from utils.vouch_request import VouchRatingView
-        from views.service_ticket_panel import (
-            ApplicationPanelView,
-            PartnerPanelView,
-            ServiceCloseView,
-            SupportPanelView,
-            TexturepackPanelView,
-            TexturepackTicketView,
-        )
-        from views.boost_packs import BoostThanksView
+            self.add_view(SnipePanelView(self))
+            from utils.vouch_request import VouchRatingView
+            from views.service_ticket_panel import (
+                ApplicationPanelView,
+                PartnerPanelView,
+                ServiceCloseView,
+                SupportPanelView,
+                TexturepackPanelView,
+                TexturepackTicketView,
+            )
+            from views.boost_packs import BoostThanksView
 
-        self.add_view(VouchRatingView(self))
-        self.add_view(SupportPanelView(self))
-        self.add_view(ApplicationPanelView(self))
-        self.add_view(PartnerPanelView(self))
-        self.add_view(TexturepackPanelView(self))
-        self.add_view(TexturepackTicketView(self))
-        self.add_view(ServiceCloseView(self))
-        self.add_view(BoostThanksView(self))
-        from views.giveaway_views import GiveawayEnterView
+            self.add_view(VouchRatingView(self))
+            self.add_view(SupportPanelView(self))
+            self.add_view(ApplicationPanelView(self))
+            self.add_view(PartnerPanelView(self))
+            self.add_view(TexturepackPanelView(self))
+            self.add_view(TexturepackTicketView(self))
+            self.add_view(ServiceCloseView(self))
+            self.add_view(BoostThanksView(self))
+            from views.giveaway_views import GiveawayEnterView
 
-        self.add_view(GiveawayEnterView(self))
-        from views.mc_link_views import McLinkPanelView
+            self.add_view(GiveawayEnterView(self))
+            from views.mc_link_views import McLinkPanelView
 
-        self.add_view(McLinkPanelView(self))
-        from cogs.mousetweaks_keys import MousetweaksKeyPanelView, MousetweaksKeyTicketView
+            self.add_view(McLinkPanelView(self))
+            from cogs.mousetweaks_keys import MousetweaksKeyPanelView, MousetweaksKeyTicketView
 
-        self.add_view(MousetweaksKeyPanelView(self))
-        self.add_view(MousetweaksKeyTicketView(self))
-        from cogs.gputweaks_keys import GputweaksKeyPanelView, GputweaksKeyTicketView
+            self.add_view(MousetweaksKeyPanelView(self))
+            self.add_view(MousetweaksKeyTicketView(self))
+            from cogs.gputweaks_keys import GputweaksKeyPanelView, GputweaksKeyTicketView
 
-        self.add_view(GputweaksKeyPanelView(self))
-        self.add_view(GputweaksKeyTicketView(self))
-        from cogs.packai_keys import PackAiKeyPanelView, PackAiKeyTicketView
+            self.add_view(GputweaksKeyPanelView(self))
+            self.add_view(GputweaksKeyTicketView(self))
+            from cogs.packai_keys import PackAiKeyPanelView, PackAiKeyTicketView
 
-        self.add_view(PackAiKeyPanelView(self))
-        self.add_view(PackAiKeyTicketView(self))
-        from cogs.custom_pack import CustomPackPanelView, CustomPackTicketView
+            self.add_view(PackAiKeyPanelView(self))
+            self.add_view(PackAiKeyTicketView(self))
+            from cogs.custom_pack import CustomPackPanelView, CustomPackTicketView
 
-        self.add_view(CustomPackPanelView(self))
-        self.add_view(CustomPackTicketView(self))
-        from cogs.spawner_shop import SpawnerPanelView, SpawnerTicketView
+            self.add_view(CustomPackPanelView(self))
+            self.add_view(CustomPackTicketView(self))
+            from cogs.spawner_shop import SpawnerPanelView, SpawnerTicketView
 
-        self.add_view(SpawnerPanelView(self))
-        self.add_view(SpawnerTicketView(self))
-        from cogs.duel_invsee import DuelInvseePanelView
+            self.add_view(SpawnerPanelView(self))
+            self.add_view(SpawnerTicketView(self))
+            from cogs.duel_invsee import DuelInvseePanelView
 
-        self.add_view(DuelInvseePanelView(self))
-        from cogs.schematic_shop import SchematicPanelView, SchematicTicketView
+            self.add_view(DuelInvseePanelView(self))
+            from cogs.schematic_shop import SchematicPanelView, SchematicTicketView
 
-        self.add_view(SchematicPanelView(self))
-        self.add_view(SchematicTicketView(self))
-        from cogs.account_shop import AccountPanelView, AccountTicketView, register_all_account_panel_views
+            self.add_view(SchematicPanelView(self))
+            self.add_view(SchematicTicketView(self))
+            from cogs.account_shop import AccountPanelView, AccountTicketView, register_all_account_panel_views
 
-        self.add_view(AccountPanelView(self))
-        self.add_view(AccountTicketView(self))
-        n_account_panels = await register_all_account_panel_views(self)
-        if n_account_panels:
-            print(f"[AccountShop] {n_account_panels} Account-Panel-View(s) registriert")
-        from cogs.tier_boost import TierBoostPanelView, BoostTicketView
+            self.add_view(AccountPanelView(self))
+            self.add_view(AccountTicketView(self))
+            n_account_panels = await register_all_account_panel_views(self)
+            if n_account_panels:
+                print(f"[AccountShop] {n_account_panels} Account-Panel-View(s) registriert")
+            from cogs.tier_boost import TierBoostPanelView, BoostTicketView
 
-        self.add_view(TierBoostPanelView(self))
-        self.add_view(BoostTicketView(self))
-        from cogs.player_shop import PlayerShopPanelView, PlayerItemTicketView, register_all_player_panel_views
+            self.add_view(TierBoostPanelView(self))
+            self.add_view(BoostTicketView(self))
+            from cogs.player_shop import PlayerShopPanelView, PlayerItemTicketView, register_all_player_panel_views
 
-        self.add_view(PlayerShopPanelView(self))
-        self.add_view(PlayerItemTicketView(self))
-        n_player_panels = await register_all_player_panel_views(self)
-        if n_player_panels:
-            print(f"[PlayerShop] {n_player_panels} Spieler-Panel-View(s) registriert")
-        from cogs.monetization import VipTicketView, BoxPanelView
+            self.add_view(PlayerShopPanelView(self))
+            self.add_view(PlayerItemTicketView(self))
+            n_player_panels = await register_all_player_panel_views(self)
+            if n_player_panels:
+                print(f"[PlayerShop] {n_player_panels} Spieler-Panel-View(s) registriert")
+            from cogs.monetization import VipTicketView, BoxPanelView
 
-        self.add_view(VipTicketView(self))
-        self.add_view(BoxPanelView(self, [{"id": 0, "name": "placeholder", "price": 0}]))
-        from cogs.tweak_panel import TweakShopPanelView
+            self.add_view(VipTicketView(self))
+            self.add_view(BoxPanelView(self, [{"id": 0, "name": "placeholder", "price": 0}]))
+            from cogs.tweak_panel import TweakShopPanelView
 
-        self.add_view(TweakShopPanelView(self))
-        from utils.tweak_vouch import TweakVouchRatingView
+            self.add_view(TweakShopPanelView(self))
+            from utils.tweak_vouch import TweakVouchRatingView
 
-        self.add_view(TweakVouchRatingView(self))
-        n_deals = await register_daily_deal_views(self)
-        if n_deals:
-            print(f"[DailyDeal] {n_deals} aktive Deal-View(s) registriert")
+            self.add_view(TweakVouchRatingView(self))
+            n_deals = await register_daily_deal_views(self)
+            if n_deals:
+                print(f"[DailyDeal] {n_deals} aktive Deal-View(s) registriert")
+        except Exception as e:
+            print(f"WARNUNG: Persistent-View-Registrierung fehlgeschlagen: {e!r}")
+            import traceback
+
+            traceback.print_exc()
 
         try:
             if config.GUILD_ID:
