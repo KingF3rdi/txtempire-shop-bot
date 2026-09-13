@@ -87,6 +87,13 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             sort_order INTEGER NOT NULL DEFAULT 99,
             UNIQUE(guild_id, name)
         );
+        CREATE TABLE IF NOT EXISTS boost_gamemode_prices (
+            guild_id INTEGER NOT NULL,
+            tier_key TEXT NOT NULL,
+            gamemode TEXT NOT NULL,
+            price REAL NOT NULL,
+            PRIMARY KEY (guild_id, tier_key, gamemode)
+        );
         """
     )
     await bot.db.db.commit()
@@ -115,13 +122,27 @@ async def remove_gamemode(bot: "ShopBot", guild_id: int, name: str) -> None:
     await bot.db.db.commit()
 
 
-async def get_tier_price(bot: "ShopBot", guild_id: int, tier_key: str) -> float:
+async def get_tier_default_price(bot: "ShopBot", guild_id: int, tier_key: str) -> float:
+    """Der Preis einer Stufe ohne (oder ohne passenden) Gamemode."""
     row = await bot.db.fetchone(
         "SELECT price FROM boost_tier_prices WHERE guild_id = ? AND tier_key = ?", (guild_id, tier_key),
     )
     if row:
         return float(row["price"])
     return DEFAULT_PRICES.get(tier_key, 0.0)
+
+
+async def get_tier_price(bot: "ShopBot", guild_id: int, tier_key: str, gamemode: Optional[str] = None) -> float:
+    """Preis für Stufe + Gamemode. Ohne eigenen Preis für diese Kombination
+    (oder ohne angegebenen Gamemode) wird der Standardpreis der Stufe genutzt."""
+    if gamemode:
+        row = await bot.db.fetchone(
+            "SELECT price FROM boost_gamemode_prices WHERE guild_id = ? AND tier_key = ? AND lower(gamemode) = lower(?)",
+            (guild_id, tier_key, gamemode),
+        )
+        if row:
+            return float(row["price"])
+    return await get_tier_default_price(bot, guild_id, tier_key)
 
 
 async def set_tier_price(bot: "ShopBot", guild_id: int, tier_key: str, price: float) -> None:
@@ -131,6 +152,33 @@ async def set_tier_price(bot: "ShopBot", guild_id: int, tier_key: str, price: fl
         ON CONFLICT(guild_id, tier_key) DO UPDATE SET price = excluded.price
         """,
         (guild_id, tier_key, price),
+    )
+    await bot.db.db.commit()
+
+
+async def set_gamemode_price(bot: "ShopBot", guild_id: int, tier_key: str, gamemode: str, price: float) -> None:
+    await bot.db.db.execute(
+        """
+        INSERT INTO boost_gamemode_prices (guild_id, tier_key, gamemode, price) VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, tier_key, gamemode) DO UPDATE SET price = excluded.price
+        """,
+        (guild_id, tier_key, gamemode.strip(), price),
+    )
+    await bot.db.db.commit()
+
+
+async def list_gamemode_prices(bot: "ShopBot", guild_id: int, tier_key: str) -> list[dict]:
+    rows = await bot.db.fetchall(
+        "SELECT gamemode, price FROM boost_gamemode_prices WHERE guild_id = ? AND tier_key = ? ORDER BY gamemode ASC",
+        (guild_id, tier_key),
+    )
+    return [dict(r) for r in rows]
+
+
+async def remove_gamemode_price(bot: "ShopBot", guild_id: int, tier_key: str, gamemode: str) -> None:
+    await bot.db.db.execute(
+        "DELETE FROM boost_gamemode_prices WHERE guild_id = ? AND tier_key = ? AND lower(gamemode) = lower(?)",
+        (guild_id, tier_key, gamemode.strip()),
     )
     await bot.db.db.commit()
 
@@ -193,18 +241,25 @@ class TierSelect(discord.ui.Select):
         tier_key = self.values[0]
         gamemodes = await list_gamemodes(self.bot, interaction.guild.id)
         if gamemodes:
+            prices = {
+                g["name"]: await get_tier_price(self.bot, interaction.guild.id, tier_key, gamemode=g["name"])
+                for g in gamemodes
+            }
             view = discord.ui.View(timeout=180)
-            view.add_item(GamemodeSelect(self.bot, tier_key, gamemodes))
+            view.add_item(GamemodeSelect(self.bot, tier_key, gamemodes, prices))
             await interaction.response.edit_message(content="Welchen Gamemode möchtest du buchen?", view=view)
             return
         await interaction.response.send_modal(TierIgnModal(self.bot, tier_key, None))
 
 
 class GamemodeSelect(discord.ui.Select):
-    def __init__(self, bot: "ShopBot", tier_key: str, gamemodes: list[dict]) -> None:
+    def __init__(self, bot: "ShopBot", tier_key: str, gamemodes: list[dict], prices: dict[str, float]) -> None:
         self.bot = bot
         self.tier_key = tier_key
-        options = [discord.SelectOption(label=g["name"], value=g["name"]) for g in gamemodes[:25]]
+        options = [
+            discord.SelectOption(label=g["name"], value=g["name"], description=format_price(prices[g["name"]]))
+            for g in gamemodes[:25]
+        ]
         super().__init__(placeholder="Gamemode auswählen ...", options=options, custom_id="tierboost:gamemode")
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -230,7 +285,7 @@ class TierIgnModal(discord.ui.Modal, title="Boost anfragen"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
-        price = await get_tier_price(self.bot, interaction.guild.id, self.tier_key)
+        price = await get_tier_price(self.bot, interaction.guild.id, self.tier_key, gamemode=self.gamemode)
         await _create_boost_ticket(
             self.bot, interaction, tier_key=self.tier_key, price=price,
             ign=str(self.ign.value).strip(), gamemode=self.gamemode,
@@ -431,28 +486,82 @@ class TierBoostCog(commands.Cog):
         msg = await target.send(embed=embed, view=TierBoostPanelView(self.bot))
         await interaction.followup.send(embed=success_embed("Panel gepostet", f"In {target.mention}: {msg.jump_url}"), ephemeral=True)
 
-    @tier_group.command(name="preis", description="Preis einer Boost-Stufe setzen")
-    @app_commands.describe(stufe="LT3, HT3 oder HT4", preis="Neuer Preis, z. B. 9.99")
+    @tier_group.command(name="preis", description="Preis einer Boost-Stufe setzen (optional: pro Gamemode)")
+    @app_commands.describe(
+        stufe="LT3, HT3 oder HT4", preis="Neuer Preis, z. B. 9.99 — STOP entfernt einen Gamemode-Preis wieder",
+        gamemode="Nur für diesen Gamemode (leer lassen für den Standardpreis der Stufe)",
+    )
     @app_commands.choices(stufe=[app_commands.Choice(name=t, value=t) for t in TIERS])
-    async def preis(self, interaction: discord.Interaction, stufe: app_commands.Choice[str], preis: str) -> None:
+    async def preis(
+        self, interaction: discord.Interaction, stufe: app_commands.Choice[str], preis: str,
+        gamemode: Optional[str] = None,
+    ) -> None:
         assert interaction.guild is not None
+        if gamemode and preis.strip().upper() == "STOP":
+            await remove_gamemode_price(self.bot, interaction.guild.id, stufe.value, gamemode)
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Entfernt", f"**{stufe.value} · {gamemode}** nutzt jetzt wieder den Standardpreis.",
+                ),
+                ephemeral=True,
+            )
+            return
         try:
             price = parse_price(preis)
         except ValueError:
             await interaction.response.send_message(
-                embed=error_embed("Ungültiger Preis", "Beispiele: `9.99`, `500k`."), ephemeral=True,
+                embed=error_embed("Ungültiger Preis", "Beispiele: `9.99`, `500k` (oder `STOP` bei gesetztem Gamemode)."), ephemeral=True,
+            )
+            return
+        if gamemode:
+            existing = await list_gamemodes(self.bot, interaction.guild.id)
+            if not any(g["name"].lower() == gamemode.strip().lower() for g in existing):
+                await interaction.response.send_message(
+                    embed=error_embed(
+                        "Gamemode nicht gefunden",
+                        f"**{gamemode}** existiert nicht. Erst mit `/tier gamemode-hinzufuegen` anlegen.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+            await set_gamemode_price(self.bot, interaction.guild.id, stufe.value, gamemode, price)
+            await interaction.response.send_message(
+                embed=success_embed(
+                    "Gespeichert", f"**{stufe.value} · {gamemode}** kostet jetzt {format_price(price)}.",
+                ),
+                ephemeral=True,
             )
             return
         await set_tier_price(self.bot, interaction.guild.id, stufe.value, price)
         await interaction.response.send_message(
-            embed=success_embed("Gespeichert", f"**{stufe.value}** kostet jetzt {format_price(price)}."), ephemeral=True,
+            embed=success_embed("Gespeichert", f"**{stufe.value}** (Standard) kostet jetzt {format_price(price)}."),
+            ephemeral=True,
         )
 
-    @tier_group.command(name="liste", description="Aktuelle Preise anzeigen")
+    @preis.autocomplete("gamemode")
+    async def _preis_gamemode_ac(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        if not interaction.guild_id:
+            return []
+        gamemodes = await list_gamemodes(self.bot, interaction.guild_id)
+        q = (current or "").lower().strip()
+        if q:
+            gamemodes = [g for g in gamemodes if q in g["name"].lower()]
+        return [app_commands.Choice(name=g["name"], value=g["name"]) for g in gamemodes[:25]]
+
+    @tier_group.command(name="liste", description="Aktuelle Preise anzeigen (inkl. Gamemode-Preise)")
     async def liste(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
-        lines = [f"**{t}** — {format_price(await get_tier_price(self.bot, interaction.guild.id, t))}" for t in TIERS]
-        await interaction.response.send_message(embed=base_embed("Tier-Preise", "\n".join(lines)), ephemeral=True)
+        blocks: list[str] = []
+        for t in TIERS:
+            default_price = await get_tier_default_price(self.bot, interaction.guild.id, t)
+            block = f"**{t}** — {format_price(default_price)} (Standard)"
+            gamemode_prices = await list_gamemode_prices(self.bot, interaction.guild.id, t)
+            for gp in gamemode_prices:
+                block += f"\n　• {gp['gamemode']}: {format_price(gp['price'])}"
+            blocks.append(block)
+        await interaction.response.send_message(embed=base_embed("Tier-Preise", "\n\n".join(blocks)), ephemeral=True)
 
     @tier_group.command(name="gamemode-hinzufuegen", description="Gamemode zur Auswahl beim Kauf hinzufügen")
     @app_commands.describe(name="z. B. Sumo, Boxing, NoDebuff, Combo")
