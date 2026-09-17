@@ -2,18 +2,25 @@
 antiraid.py
 ============
 
-Anti-Raid-Schutz: erkennt ungewöhnlich viele Server-Beitritte in kurzer Zeit
-und reagiert automatisch auf frisch erstellte Accounts, die währenddessen
-beitreten. Per Befehl an-/ausschaltbar, keine Änderung an db/database.py
-nötig (eigene Tabelle antiraid_settings).
+Anti-Raid- & Anti-Nuke-Schutz, ein gemeinsamer Schalter (/antiraid protect
+und /antiraid off) für beides:
 
-Erkennung: pro Server wird (nur im Arbeitsspeicher, kein Verlauf nötig) eine
-Liste der letzten Beitritts-Zeitpunkte geführt. Kommen innerhalb von
-"fenster_sek" Sekunden mindestens "schwelle" Beitritte zusammen, gilt das als
-Raid — jedes NEUE Mitglied, das währenddessen beitritt UND dessen Account
-jünger als "min_account_alter_stunden" ist, wird automatisch gekickt/gebannt
-(je nach "aktion"). Ein Alarm geht zusätzlich (höchstens alle 30s) in den
-konfigurierten Channel.
+- Raid: erkennt ungewöhnlich viele Server-Beitritte in kurzer Zeit und
+  reagiert automatisch auf frisch erstellte Accounts, die währenddessen
+  beitreten.
+- Nuke: erkennt, wenn ein einzelnes Mitglied in kurzer Zeit mehrere
+  destruktive Aktionen ausführt (Channel löschen, Rolle löschen, Mitglied
+  bannen) — typisches Muster eines kompromittierten/böswilligen
+  Staff-Accounts oder eines gekaperten Bots. Der Übeltäter wird sofort alle
+  Rollen entzogen und danach je nach "aktion" gekickt/gebannt.
+
+Braucht die Berechtigung "Audit-Log anzeigen" für den Bot, um den Verursacher
+einer Löschung/Bann zu ermitteln. Keine Änderung an db/database.py nötig
+(eigene Tabelle antiraid_settings).
+
+Erkennung basiert auf einem gleitenden Zeitfenster pro Server (Raid) bzw. pro
+Server+Verursacher (Nuke), nur im Arbeitsspeicher — ein Neustart "vergisst"
+laufende Vorfälle harmlos.
 """
 from __future__ import annotations
 
@@ -33,9 +40,23 @@ if TYPE_CHECKING:
 ACTIONS: tuple[str, ...] = ("kick", "ban", "nur_alarm")
 ALERT_COOLDOWN_SECONDS = 30.0
 
-# Nur Laufzeit-Zustand (kein Verlauf nötig, ein Neustart "vergisst" laufende Raids harmlos).
+NUKE_THRESHOLD = 3
+NUKE_WINDOW_SECONDS = 10.0
+NUKE_PUNISH_COOLDOWN_SECONDS = 60.0
+
+# Nur Laufzeit-Zustand (kein Verlauf nötig, ein Neustart "vergisst" laufende Vorfälle harmlos).
 _recent_joins: dict[int, deque[float]] = {}
+_recent_actions: dict[tuple[int, int], deque[float]] = {}  # (guild_id, actor_id) -> Zeitstempel
+_last_punished: dict[tuple[int, int], float] = {}
 _last_alert: dict[int, float] = {}
+
+
+def _hit_threshold(bucket: "deque[float]", now: float, window: float, threshold: int) -> bool:
+    """Trägt `now` ein, verwirft alles außerhalb von `window`, meldet ob `threshold` erreicht ist."""
+    bucket.append(now)
+    while bucket and now - bucket[0] > window:
+        bucket.popleft()
+    return len(bucket) >= threshold
 
 
 async def _ensure_table(bot: "ShopBot") -> None:
@@ -96,7 +117,7 @@ def _account_age_hours(member: discord.Member) -> float:
     return (now - created).total_seconds() / 3600.0
 
 
-async def _alert(bot: "ShopBot", guild: discord.Guild, settings: dict, *, joins_in_window: int, member: discord.Member, action_taken: str) -> None:
+async def _send_alert(bot: "ShopBot", guild: discord.Guild, settings: dict, title: str, description: str) -> None:
     now = time.monotonic()
     last = _last_alert.get(guild.id, 0.0)
     if now - last < ALERT_COOLDOWN_SECONDS:
@@ -108,17 +129,81 @@ async def _alert(bot: "ShopBot", guild: discord.Guild, settings: dict, *, joins_
     if not isinstance(channel, discord.TextChannel):
         return
     try:
-        await channel.send(
-            embed=warn_embed(
-                "🚨 Anti-Raid: ungewöhnlich viele Beitritte",
-                f"**{joins_in_window}** Beitritte innerhalb von **{settings['window_seconds']}s** erkannt.\n"
-                f"Zuletzt: {member.mention} (`{member}`), Account erstellt vor "
-                f"{_account_age_hours(member):.1f}h.\n"
-                f"Aktion: **{action_taken}**",
-            )
-        )
+        await channel.send(embed=warn_embed(title, description))
     except discord.HTTPException:
         pass
+
+
+async def _alert(bot: "ShopBot", guild: discord.Guild, settings: dict, *, joins_in_window: int, member: discord.Member, action_taken: str) -> None:
+    await _send_alert(
+        bot, guild, settings,
+        "🚨 Anti-Raid: ungewöhnlich viele Beitritte",
+        f"**{joins_in_window}** Beitritte innerhalb von **{settings['window_seconds']}s** erkannt.\n"
+        f"Zuletzt: {member.mention} (`{member}`), Account erstellt vor "
+        f"{_account_age_hours(member):.1f}h.\n"
+        f"Aktion: **{action_taken}**",
+    )
+
+
+async def _find_actor(guild: discord.Guild, action: discord.AuditLogAction, target_id: int) -> Optional[discord.abc.User]:
+    """Sucht im Audit-Log den Verursacher einer frischen (<5s) Aktion gegen target_id."""
+    try:
+        async for entry in guild.audit_logs(limit=5, action=action):
+            if getattr(entry.target, "id", None) != target_id:
+                continue
+            if (discord.utils.utcnow() - entry.created_at).total_seconds() < 5:
+                return entry.user
+            return None
+    except discord.Forbidden:
+        pass
+    return None
+
+
+async def _punish_nuker(bot: "ShopBot", guild: discord.Guild, settings: dict, actor: discord.abc.User, trigger: str) -> None:
+    key = (guild.id, actor.id)
+    now = time.monotonic()
+    if now - _last_punished.get(key, 0.0) < NUKE_PUNISH_COOLDOWN_SECONDS:
+        return
+    _last_punished[key] = now
+    _recent_actions.pop(key, None)
+
+    action_taken = "nur beobachtet"
+    member = guild.get_member(actor.id)
+    try:
+        if member is not None and member.roles[1:]:
+            await member.edit(roles=[], reason=f"Anti-Nuke: {trigger}")
+        action = str(settings["action"])
+        if action == "kick" and member is not None:
+            await member.kick(reason=f"Anti-Nuke: {trigger}")
+            action_taken = "Rollen entzogen + gekickt"
+        elif action == "ban":
+            await guild.ban(actor, reason=f"Anti-Nuke: {trigger}", delete_message_seconds=0)
+            action_taken = "Rollen entzogen + gebannt"
+        elif member is not None:
+            action_taken = "Rollen entzogen"
+    except discord.HTTPException:
+        action_taken = f"{action_taken} (Aktion teilweise fehlgeschlagen, fehlende Rechte?)"
+
+    await _send_alert(
+        bot, guild, settings,
+        "🚨 Anti-Nuke: verdächtige Serien-Aktion",
+        f"{actor.mention} (`{actor}`) hat mehrfach destruktiv gehandelt: **{trigger}**.\n"
+        f"Aktion: **{action_taken}**",
+    )
+
+
+async def _handle_nuke_event(bot: "ShopBot", guild: discord.Guild, audit_action: discord.AuditLogAction, target_id: int, trigger: str) -> None:
+    settings = await _get_settings(bot, guild.id)
+    if not settings.get("enabled"):
+        return
+    actor = await _find_actor(guild, audit_action, target_id)
+    if actor is None or actor.id == bot.user.id or actor.id == guild.owner_id:
+        return
+
+    key = (guild.id, actor.id)
+    bucket = _recent_actions.setdefault(key, deque())
+    if _hit_threshold(bucket, time.monotonic(), NUKE_WINDOW_SECONDS, NUKE_THRESHOLD):
+        await _punish_nuker(bot, guild, settings, actor, trigger)
 
 
 class AntiRaidCog(commands.Cog):
@@ -126,26 +211,26 @@ class AntiRaidCog(commands.Cog):
         self.bot = bot
 
     antiraid_group = app_commands.Group(
-        name="antiraid", description="Anti-Raid-Schutz verwalten (Staff)",
+        name="antiraid", description="Anti-Raid- & Anti-Nuke-Schutz verwalten (Staff)",
         default_permissions=discord.Permissions(manage_guild=True),
     )
 
-    @antiraid_group.command(name="an", description="Anti-Raid-Schutz aktivieren")
-    async def an(self, interaction: discord.Interaction) -> None:
+    @antiraid_group.command(name="protect", description="Anti-Raid- & Anti-Nuke-Schutz aktivieren")
+    async def protect(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
         await _upsert(self.bot, interaction.guild.id, enabled=1)
         settings = await _get_settings(self.bot, interaction.guild.id)
         note = "" if settings.get("alert_channel_id") else "\n⚠️ Kein Alarm-Channel gesetzt — nutze `/antiraid einstellungen`."
         await interaction.response.send_message(
-            embed=success_embed("Aktiviert", f"Anti-Raid-Schutz ist jetzt **an**.{note}"), ephemeral=True,
+            embed=success_embed("Aktiviert", f"Anti-Raid- & Anti-Nuke-Schutz ist jetzt **an**.{note}"), ephemeral=True,
         )
 
-    @antiraid_group.command(name="aus", description="Anti-Raid-Schutz deaktivieren")
-    async def aus(self, interaction: discord.Interaction) -> None:
+    @antiraid_group.command(name="off", description="Anti-Raid- & Anti-Nuke-Schutz deaktivieren")
+    async def off(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
         await _upsert(self.bot, interaction.guild.id, enabled=0)
         await interaction.response.send_message(
-            embed=success_embed("Deaktiviert", "Anti-Raid-Schutz ist jetzt **aus**."), ephemeral=True,
+            embed=success_embed("Deaktiviert", "Anti-Raid- & Anti-Nuke-Schutz ist jetzt **aus**."), ephemeral=True,
         )
 
     @antiraid_group.command(name="einstellungen", description="Anti-Raid-Schwellenwerte konfigurieren")
@@ -209,14 +294,8 @@ class AntiRaidCog(commands.Cog):
 
         window = int(settings["window_seconds"])
         threshold = int(settings["join_threshold"])
-        now = time.monotonic()
-
         joins = _recent_joins.setdefault(guild.id, deque())
-        joins.append(now)
-        while joins and now - joins[0] > window:
-            joins.popleft()
-
-        if len(joins) < threshold:
+        if not _hit_threshold(joins, time.monotonic(), window, threshold):
             return
 
         # Raid-Verdacht: reagiere nur auf frische Accounts, nicht auf jeden Beitritt.
@@ -239,15 +318,28 @@ class AntiRaidCog(commands.Cog):
 
         await _alert(self.bot, guild, settings, joins_in_window=len(joins), member=member, action_taken=action_taken)
 
+    @commands.Cog.listener()
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
+        await _handle_nuke_event(self.bot, channel.guild, discord.AuditLogAction.channel_delete, channel.id, "mehrere Channels gelöscht")
+
+    @commands.Cog.listener()
+    async def on_guild_role_delete(self, role: discord.Role) -> None:
+        await _handle_nuke_event(self.bot, role.guild, discord.AuditLogAction.role_delete, role.id, "mehrere Rollen gelöscht")
+
+    @commands.Cog.listener()
+    async def on_member_ban(self, guild: discord.Guild, user: discord.abc.User) -> None:
+        await _handle_nuke_event(self.bot, guild, discord.AuditLogAction.ban, user.id, "mehrere Mitglieder gebannt")
+
 
 def _settings_text(guild: discord.Guild, settings: dict) -> str:
     channel_id = settings.get("alert_channel_id")
     channel = guild.get_channel(int(channel_id)) if channel_id else None
     action_labels = {"kick": "Kicken", "ban": "Bannen", "nur_alarm": "Nur Alarm"}
     return (
-        f"Status: {'✅ an' if settings.get('enabled') else '❌ aus'}\n"
-        f"Schwelle: **{settings['join_threshold']}** Beitritte / **{settings['window_seconds']}s**\n"
+        f"Status: {'✅ an (Raid- & Nuke-Schutz)' if settings.get('enabled') else '❌ aus'}\n"
+        f"Raid-Schwelle: **{settings['join_threshold']}** Beitritte / **{settings['window_seconds']}s**\n"
         f"Reagiert auf Accounts jünger als **{settings['min_account_age_hours']}h**\n"
+        f"Nuke-Schwelle: **{NUKE_THRESHOLD}** destruktive Aktionen / **{int(NUKE_WINDOW_SECONDS)}s** (Channel/Rolle löschen, bannen)\n"
         f"Aktion: **{action_labels.get(settings['action'], settings['action'])}**\n"
         f"Alarm-Channel: {channel.mention if channel else '_keiner gesetzt_'}"
     )
@@ -256,3 +348,17 @@ def _settings_text(guild: discord.Guild, settings: dict) -> str:
 async def setup(bot: "ShopBot") -> None:
     await _ensure_table(bot)
     await bot.add_cog(AntiRaidCog(bot))
+
+
+def _self_check() -> None:
+    """ponytail: kleiner Nachweis, dass das Sliding-Window korrekt zählt und verwirft."""
+    bucket: deque[float] = deque()
+    assert not _hit_threshold(bucket, 0.0, window=10, threshold=3)
+    assert not _hit_threshold(bucket, 1.0, window=10, threshold=3)
+    assert _hit_threshold(bucket, 2.0, window=10, threshold=3)
+    assert not _hit_threshold(bucket, 20.0, window=10, threshold=3), "alte Einträge müssen aus dem Fenster fallen"
+
+
+if __name__ == "__main__":
+    _self_check()
+    print("OK")
