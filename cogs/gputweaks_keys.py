@@ -575,7 +575,7 @@ async def _create_key_ticket_channel(
 async def _resolve_support_role(
     bot: "ShopBot", guild: discord.Guild, gt_settings: Optional[dict] = None
 ) -> Optional[discord.Role]:
-    """Eigene GPU-Tweaks-Support-Rolle, falls gesetzt (/gtkeysetup support_role:@...)
+    """Eigene GPU-Tweaks-Support-Rolle, falls gesetzt (/gtkey setup support_role:@...)
     - sonst Fallback auf die normale Shop-Staff-Rolle (/setup)."""
     if gt_settings is None:
         gt_settings = await _get_settings(bot, guild.id)
@@ -804,8 +804,14 @@ class GputweaksKeysCog(commands.Cog):
     def __init__(self, bot: "ShopBot") -> None:
         self.bot = bot
 
-    @app_commands.command(
-        name="gtkeysetup",
+    gtkey = app_commands.Group(
+        name="gtkey",
+        description="y3zz-GPU-Tweaks-Lizenzkeys verwalten (Staff)",
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    @gtkey.command(
+        name="setup",
         description="Preise für y3zz-GPU-Tweaks-Keys setzen (Staff)",
     )
     @app_commands.describe(
@@ -870,8 +876,8 @@ class GputweaksKeysCog(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(
-        name="gtkeypanel",
+    @gtkey.command(
+        name="panel",
         description="Kauf-Panel für y3zz-GPU-Tweaks-Keys posten (Staff)",
     )
     @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
@@ -899,12 +905,6 @@ class GputweaksKeysCog(commands.Cog):
             embed=success_embed("Key-Panel gepostet", f"In {target.mention}: {msg.jump_url}"),
             ephemeral=True,
         )
-
-    gtkey = app_commands.Group(
-        name="gtkey",
-        description="y3zz-GPU-Tweaks-Lizenzkeys verwalten (Staff)",
-        default_permissions=discord.Permissions(manage_guild=True),
-    )
 
     @gtkey.command(name="generate", description="Sofort einen gültigen Key erzeugen (Staff)")
     @app_commands.describe(

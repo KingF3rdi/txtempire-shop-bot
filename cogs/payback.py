@@ -97,13 +97,6 @@ class PaybackCog(commands.Cog):
         )
 
     @app_commands.command(
-        name="dayli",
-        description="Alias für /daily (Payback-XP)",
-    )
-    async def dayli(self, interaction: discord.Interaction) -> None:
-        await self.daily(interaction)
-
-    @app_commands.command(
         name="payback",
         description="Dein Payback-XP und Belohnungsstand",
     )

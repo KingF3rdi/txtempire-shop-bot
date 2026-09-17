@@ -137,7 +137,7 @@ MOUSETWEAKS_PRICE_LIFETIME = float(
 # MUSS exakt mit LICENSE_SECRET in licensing.py der y3zz-GPU-Tweaks-App
 # übereinstimmen, sonst kann die App die Keys nicht prüfen.
 GPUTWEAKS_LICENSE_SECRET = os.getenv("GPUTWEAKS_LICENSE_SECRET", "").strip()
-# Standardpreise (pro Server überschreibbar mit /gtkeysetup)
+# Standardpreise (pro Server überschreibbar mit /gtkey setup)
 GPUTWEAKS_PRICE_14D = float(os.getenv("GPUTWEAKS_PRICE_14D", "0") or "0")
 GPUTWEAKS_PRICE_30D = float(os.getenv("GPUTWEAKS_PRICE_30D", "0") or "0")
 GPUTWEAKS_PRICE_LIFETIME = float(

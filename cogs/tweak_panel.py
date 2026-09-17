@@ -5,7 +5,7 @@ tweak_panel.py
 Ein gemeinsames Kauf-Panel für BEIDE Tweak-Produkte (Ferdi Mousetweaks +
 y3zz GPU Tweaks) statt zwei getrennter Panels. Preise werden live aus den
 jeweiligen Settings-Tabellen gelesen - also weiterhin ganz normal per
-`/keysetup` (Mousetweaks) bzw. `/gtkeysetup` (GPU Tweaks) änderbar, hier
+`/keysetup` (Mousetweaks) bzw. `/gtkey setup` (GPU Tweaks) änderbar, hier
 nur zusammen dargestellt. Die Buttons rufen exakt dieselben Handler auf
 wie die einzelnen Panels (cogs/mousetweaks_keys.py, cogs/gputweaks_keys.py) -
 kein Code doppelt, keine zweite Preis-/Key-Logik.

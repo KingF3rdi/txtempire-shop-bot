@@ -52,7 +52,6 @@ class ShopBot(commands.Bot):
             "cogs.player_shop",
             "cogs.monetization",
             "cogs.tweak_panel",
-            "cogs.website_backfill",
             "cogs.autorole",
             "cogs.antiraid",
             ):
