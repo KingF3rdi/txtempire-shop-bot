@@ -402,8 +402,8 @@ async def _create_spawner_ticket(
         f"Produkt: **{spawner['name']}**-Spawner × **{qty}**\n"
         f"Einzelpreis: **{format_price(unit)}** · Gesamt: **{format_price(total)}**\n"
         f"Ingame-Name: **{ign}**\n\n"
-        f"{pay_line}\n\n"
-        "Sobald die Zahlung bestätigt ist, klickt Staff **✅ Bestätigen**.",
+        "Sobald die Zahlung bestätigt ist, klickt Staff **✅ Bestätigen**.\n\n"
+        f"{pay_line}",
     )
     mention = staff_role.mention if staff_role else "Staff"
     await channel.send(

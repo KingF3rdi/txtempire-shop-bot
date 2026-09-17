@@ -829,11 +829,11 @@ async def _create_player_item_ticket(
     discount_line = f"\n🏷️ **Rabatt:** {discount_note}" if discount_note else ""
     pay_line = (
         f"**Zahlung 1 — Shop-Währung ({format_price(price)}{sale_note}):**{discount_line}\n"
-        f"```\n{config.mc_pay_command(price)}\n```\n"
         f"**Zahlung 2 — PayPal ({config.PAYPAL_EMAIL}):** fester Preis "
         f"**{config.PLAYER_ITEM_PAYPAL_PRICE:.2f} €** (unabhängig vom Shop-Preis)\n"
         "_Bei PayPal bitte „Freunde/Familie“ wählen, danach hier im Ticket Bescheid geben._"
     )
+    ingame_cmd_line = f"```\n{config.mc_pay_command(price)}\n```"
     is_coaching = item["kind"] == "coaching"
     note_label = "Wunschtermin" if is_coaching else "Notiz"
     note_line = f"\n{note_label}: **{note}**" if note else ""
@@ -861,7 +861,8 @@ async def _create_player_item_ticket(
         f"{pay_line}"
         f"{keybinds_line}"
         f"{files_line}\n\n"
-        f"{closing_line}"
+        f"{closing_line}\n\n"
+        f"{ingame_cmd_line}"
         f"{payout_line}",
     )
     mention = staff_role.mention if staff_role else "Staff"

@@ -231,7 +231,7 @@ async def _create_vip_ticket(bot: "ShopBot", interaction: discord.Interaction) -
 
     paypal_line = (
         f"**Zahlung 2 — PayPal ({config.PAYPAL_EMAIL}):** fester Preis **{float(paypal_price):.2f} €**\n"
-        "_Bitte „Freunde/Familie“ wählen, danach hier im Ticket Bescheid geben._"
+        "_Bitte „Freunde/Familie“ wählen, danach hier im Ticket Bescheid geben._\n\n"
         if paypal_price is not None
         else ""
     )
@@ -241,9 +241,9 @@ async def _create_vip_ticket(bot: "ShopBot", interaction: discord.Interaction) -
         f"Hallo {interaction.user.mention}, hier ist deine VIP-Bestellung.\n\n"
         f"Rolle: {role.mention if role else '_Rolle nicht gefunden_'}\n"
         f"Laufzeit: **{days} Tage** (bei bestehendem VIP wird verlängert)\n\n"
-        f"**Zahlung 1 — Shop-Währung:**\n```\n{config.mc_pay_command(price)}\n```\n"
-        f"{paypal_line}\n\n"
-        "Sobald die Zahlung bestätigt ist, klickt Staff **✅ Bestätigen**.",
+        f"{paypal_line}"
+        "Sobald die Zahlung bestätigt ist, klickt Staff **✅ Bestätigen**.\n\n"
+        f"**Zahlung 1 — Shop-Währung:**\n```\n{config.mc_pay_command(price)}\n```",
     )
     mention = staff_role.mention if staff_role else "Staff"
     await channel.send(content=f"{interaction.user.mention} {mention}", embed=embed, view=VipTicketView(bot))

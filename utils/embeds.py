@@ -146,11 +146,6 @@ def payment_info_embed(
         value=order_ref(order),
         inline=True,
     )
-    embed.add_field(
-        name="Ingame-Zahlungsbefehl (kopieren)",
-        value=f"```\n{config.mc_pay_command(float(order['total']))}\n```",
-        inline=False,
-    )
     pack_qty = int(order.get("pack_qty") or 0)
     if pack_qty > 0:
         paypal_total = round(pack_qty * config.PAYPAL_PRICE_PER_PACK, 2)
@@ -208,6 +203,11 @@ def payment_info_embed(
             value=MONEY_LOG_HINT,
             inline=False,
         )
+    embed.add_field(
+        name="Ingame-Zahlungsbefehl (kopieren)",
+        value=f"```\n{config.mc_pay_command(float(order['total']))}\n```",
+        inline=False,
+    )
     embed.set_footer(text=PAYMENT_NOTICE)
     return embed
 

@@ -331,6 +331,8 @@ class Database:
             ("guild_settings", "ticket_money_log_hint", "INTEGER NOT NULL DEFAULT 1"),
             ("orders", "faq_turns", "INTEGER NOT NULL DEFAULT 0"),
             ("service_tickets", "faq_turns", "INTEGER NOT NULL DEFAULT 0"),
+            ("orders", "staff_replied", "INTEGER NOT NULL DEFAULT 0"),
+            ("service_tickets", "staff_replied", "INTEGER NOT NULL DEFAULT 0"),
             ("guild_settings", "mc_payment_log_channel_id", "INTEGER"),
             ("guild_settings", "mc_auto_confirm", "INTEGER NOT NULL DEFAULT 1"),
             ("items", "is_new", "INTEGER NOT NULL DEFAULT 0"),

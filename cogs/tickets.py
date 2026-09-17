@@ -8,6 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.embeds import (
+    error_embed,
     format_price,
     order_ref,
     payment_info_embed,
@@ -18,6 +19,12 @@ from views.ticket_views import TicketOrderView
 
 if TYPE_CHECKING:
     from bot import ShopBot
+
+
+def _ticket_faq_should_answer(*, is_ticket_owner: bool, is_staff_author: bool, staff_replied: bool) -> bool:
+    """Ob die Auto-Antwort-Logik für diese Kundennachricht laufen soll —
+    sobald Staff im Ticket geschrieben hat (staff_replied), dauerhaft aus."""
+    return is_ticket_owner and not is_staff_author and not staff_replied
 
 
 async def _send_with_retry(
@@ -298,10 +305,15 @@ class TicketsCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """Erste 3 Kunden-Fragen im Ticket beantworten, sonst Staff pingen."""
+        """Erste 3 Kunden-Fragen im Ticket beantworten — sobald Staff im
+        Ticket geschrieben hat, ist die Auto-Antwort für diesen Ticket
+        endgültig aus (staff_replied-Flag), auch unterhalb des Limits."""
         if message.author.bot or message.guild is None:
             return
         if not isinstance(message.channel, discord.TextChannel):
+            return
+        author = message.author
+        if not isinstance(author, discord.Member):
             return
 
         content = (message.content or "").strip()
@@ -311,6 +323,7 @@ class TicketsCog(commands.Cog):
         service = None
         ticket_owner_id: int | None = None
         faq_turns = 0
+        staff_replied = False
         ticket_kind = ""
 
         if order is not None:
@@ -318,6 +331,7 @@ class TicketsCog(commands.Cog):
                 return
             ticket_owner_id = int(order["user_id"])
             faq_turns = int(order.get("faq_turns") or 0)
+            staff_replied = bool(order.get("staff_replied"))
             ticket_kind = "order"
         else:
             service = await self.bot.db.get_service_ticket_by_channel(
@@ -329,19 +343,28 @@ class TicketsCog(commands.Cog):
                 return
             ticket_owner_id = int(service["user_id"])
             faq_turns = int(service.get("faq_turns") or 0)
+            staff_replied = bool(service.get("staff_replied"))
             ticket_kind = "service"
 
-        # Nur Ticket-Ersteller (nicht Staff)
-        author = message.author
-        if not isinstance(author, discord.Member):
-            return
-        if author.id != ticket_owner_id:
-            return
-        if author.guild_permissions.administrator:
-            return
         settings = await self.bot.db.ensure_guild(message.guild.id)
         staff_id = settings.get("staff_role_id")
-        if staff_id and any(r.id == int(staff_id) for r in author.roles):
+        is_staff_author = author.guild_permissions.administrator or bool(
+            staff_id and any(r.id == int(staff_id) for r in author.roles)
+        )
+
+        if author.id != ticket_owner_id:
+            # Staff (oder sonst wer mit Kanalzugriff) hat geschrieben —
+            # Auto-Antwort für diesen Ticket dauerhaft abschalten.
+            if is_staff_author and not staff_replied:
+                if ticket_kind == "order" and order is not None:
+                    await self.bot.db.update_order(int(order["id"]), staff_replied=1)
+                elif service is not None:
+                    await self.bot.db.update_service_ticket(int(service["id"]), staff_replied=1)
+            return
+
+        if not _ticket_faq_should_answer(
+            is_ticket_owner=True, is_staff_author=is_staff_author, staff_replied=staff_replied,
+        ):
             return
 
         from utils.embeds import base_embed, warn_embed
@@ -836,7 +859,8 @@ class TicketsCog(commands.Cog):
                 "Ticket-FAQ",
                 f"**Money-Log-Hinweis:** {'an' if on else 'aus'}\n"
                 f"Auto-Hilfe: erste **3** Kunden-Fragen beantworten, "
-                f"sonst Staff-Ping.\n"
+                f"sonst Staff-Ping. Sobald Staff im Ticket schreibt, ist "
+                f"die Auto-Hilfe für diesen Ticket dauerhaft aus.\n"
                 f"Ändern: `/ticketfaq money_log:True|False`\n\n"
                 f"Hinweis: **Message Content Intent** muss im Developer "
                 f"Portal aktiv sein.",
@@ -847,3 +871,17 @@ class TicketsCog(commands.Cog):
 
 async def setup(bot: ShopBot) -> None:
     await bot.add_cog(TicketsCog(bot))
+
+
+def _self_check() -> None:
+    """ponytail: Nachweis, dass die Auto-Antwort nach einer Staff-Nachricht
+    dauerhaft aus bleibt, auch wenn das Turn-Limit noch nicht erreicht ist."""
+    assert _ticket_faq_should_answer(is_ticket_owner=True, is_staff_author=False, staff_replied=False)
+    assert not _ticket_faq_should_answer(is_ticket_owner=False, is_staff_author=False, staff_replied=False)
+    assert not _ticket_faq_should_answer(is_ticket_owner=True, is_staff_author=True, staff_replied=False)
+    assert not _ticket_faq_should_answer(is_ticket_owner=True, is_staff_author=False, staff_replied=True)
+
+
+if __name__ == "__main__":
+    _self_check()
+    print("OK")
