@@ -112,7 +112,8 @@ async def _ensure_table(bot: "ShopBot") -> None:
         );
         CREATE TABLE IF NOT EXISTS pack_settings (
             guild_id INTEGER PRIMARY KEY,
-            next_order_number INTEGER NOT NULL DEFAULT 1
+            next_order_number INTEGER NOT NULL DEFAULT 1,
+            support_role_id INTEGER
         );
         """
     )
@@ -120,6 +121,7 @@ async def _ensure_table(bot: "ShopBot") -> None:
     for stmt in (
         "ALTER TABLE pack_orders ADD COLUMN kind TEXT NOT NULL DEFAULT 'texturepack'",
         "ALTER TABLE pack_orders ADD COLUMN ingame_price REAL",
+        "ALTER TABLE pack_settings ADD COLUMN support_role_id INTEGER",
     ):
         try:
             await bot.db.db.execute(stmt)
@@ -143,6 +145,62 @@ async def _next_order_number(bot: "ShopBot", guild_id: int) -> int:
     )
     await bot.db.db.commit()
     return n
+
+
+async def _get_pack_settings(bot: "ShopBot", guild_id: int) -> dict:
+    await bot.db.db.execute(
+        "INSERT OR IGNORE INTO pack_settings (guild_id, next_order_number) VALUES (?, 1)",
+        (guild_id,),
+    )
+    await bot.db.db.commit()
+    row = await bot.db.fetchone(
+        "SELECT * FROM pack_settings WHERE guild_id = ?", (guild_id,)
+    )
+    return dict(row) if row else {"guild_id": guild_id, "support_role_id": None}
+
+
+async def _update_pack_settings(bot: "ShopBot", guild_id: int, **fields) -> None:
+    if not fields:
+        return
+    await _get_pack_settings(bot, guild_id)  # sicherstellen, dass die Zeile existiert
+    cols = ", ".join(f"{k} = ?" for k in fields)
+    await bot.db.db.execute(
+        f"UPDATE pack_settings SET {cols} WHERE guild_id = ?",
+        (*fields.values(), guild_id),
+    )
+    await bot.db.db.commit()
+
+
+async def _resolve_support_role(
+    bot: "ShopBot", guild: discord.Guild, pack_settings: Optional[dict] = None
+) -> Optional[discord.Role]:
+    """Eigene Custom-Pack/Sky-Support-Rolle, falls gesetzt (/custompack staff)
+    - sonst Fallback auf die normale Shop-Staff-Rolle (/setup)."""
+    if pack_settings is None:
+        pack_settings = await _get_pack_settings(bot, guild.id)
+    role_id = pack_settings.get("support_role_id")
+    if role_id:
+        role = guild.get_role(int(role_id))
+        if role is not None:
+            return role
+    settings = await bot.db.ensure_guild(guild.id)
+    staff_role_id = settings.get("staff_role_id")
+    return guild.get_role(int(staff_role_id)) if staff_role_id else None
+
+
+async def _is_pack_staff(bot: "ShopBot", interaction: discord.Interaction) -> bool:
+    """Wie is_staff(), aber die eigene Custom-Pack/Sky-Support-Rolle zählt
+    zusätzlich zur normalen Shop-Staff-Rolle."""
+    user = interaction.user
+    if isinstance(user, discord.Member) and user.guild_permissions.administrator:
+        return True
+    assert interaction.guild is not None
+    pack_settings = await _get_pack_settings(bot, interaction.guild.id)
+    role_id = pack_settings.get("support_role_id")
+    if role_id and isinstance(user, discord.Member):
+        if any(r.id == int(role_id) for r in user.roles):
+            return True
+    return await is_staff(bot, interaction)
 
 
 async def _create_order(
@@ -304,8 +362,7 @@ async def _create_pack_ticket_channel(
     category = guild.get_channel(int(category_id)) if category_id else None
     if category is not None and not isinstance(category, discord.CategoryChannel):
         category = None
-    staff_role_id = settings.get("staff_role_id")
-    staff_role = guild.get_role(int(staff_role_id)) if staff_role_id else None
+    staff_role = await _resolve_support_role(bot, guild)
     me = guild.me
     if me is None:
         await interaction.followup.send(embed=error_embed("Bot-Mitgliedschaft fehlt"), ephemeral=True)
@@ -470,7 +527,7 @@ class CustomPackTicketView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.guild is None:
             return
-        if not await is_staff(self.bot, interaction):
+        if not await _is_pack_staff(self.bot, interaction):
             await interaction.response.send_message(embed=error_embed("Nur Staff"), ephemeral=True)
             return
         row = await _get_order_by_channel(self.bot, interaction.channel_id)
@@ -493,7 +550,7 @@ class CustomPackTicketView(discord.ui.View):
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.guild is None:
             return
-        if not await is_staff(self.bot, interaction):
+        if not await _is_pack_staff(self.bot, interaction):
             await interaction.response.send_message(embed=error_embed("Nur Staff"), ephemeral=True)
             return
         row = await _get_order_by_channel(self.bot, interaction.channel_id)
@@ -542,7 +599,7 @@ class CustomPackTicketView(discord.ui.View):
         if not row:
             await interaction.response.send_message(embed=error_embed("Kein Pack-Ticket"), ephemeral=True)
             return
-        staff = await is_staff(self.bot, interaction)
+        staff = await _is_pack_staff(self.bot, interaction)
         is_owner = row.get("user_id") and interaction.user.id == int(row["user_id"])
         if not staff and not is_owner:
             await interaction.response.send_message(embed=error_embed("Keine Berechtigung"), ephemeral=True)
@@ -599,13 +656,18 @@ class CustomPackCog(commands.Cog):
     def __init__(self, bot: "ShopBot") -> None:
         self.bot = bot
 
-    @app_commands.command(
-        name="custompackpanel",
-        description="Custom-Texturepack-Anfrage-Panel posten (Staff)",
+    custompack_group = app_commands.Group(
+        name="custompack",
+        description="Custom Pack/Sky verwalten (Staff)",
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    @custompack_group.command(
+        name="panel",
+        description="Custom-Pack/Sky-Anfrage-Panel posten (Staff)",
     )
     @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
-    @app_commands.default_permissions(manage_guild=True)
-    async def custompackpanel(
+    async def panel(
         self, interaction: discord.Interaction, channel: discord.TextChannel | None = None,
     ) -> None:
         assert interaction.guild is not None
@@ -619,6 +681,37 @@ class CustomPackCog(commands.Cog):
         msg = await target.send(embed=_panel_embed(), view=CustomPackPanelView(self.bot))
         await interaction.followup.send(
             embed=success_embed("Panel gepostet", f"In {target.mention}: {msg.jump_url}"), ephemeral=True,
+        )
+
+    @custompack_group.command(
+        name="staff",
+        description="Eigene Support-Rolle für Custom Pack/Sky setzen (Staff)",
+    )
+    @app_commands.describe(
+        role="Eigene Support-Rolle für Custom-Pack/Sky-Tickets (sieht Tickets, darf bestätigen/ablehnen). Leer = unverändert.",
+        clear="Eigene Support-Rolle entfernen (Fallback: normale Shop-Staff-Rolle)",
+    )
+    async def staff(
+        self,
+        interaction: discord.Interaction,
+        role: discord.Role | None = None,
+        clear: bool = False,
+    ) -> None:
+        assert interaction.guild is not None
+        if clear:
+            await _update_pack_settings(self.bot, interaction.guild.id, support_role_id=None)
+        elif role is not None:
+            await _update_pack_settings(self.bot, interaction.guild.id, support_role_id=role.id)
+        settings = await _get_pack_settings(self.bot, interaction.guild.id)
+        role_id = settings.get("support_role_id")
+        current = interaction.guild.get_role(int(role_id)) if role_id else None
+        role_line = (
+            f"Support-Rolle: {current.mention}"
+            if current
+            else "Support-Rolle: **nicht gesetzt** (Fallback: normale Shop-Staff-Rolle aus `/setup`)"
+        )
+        await interaction.response.send_message(
+            embed=success_embed("Custom-Pack/Sky-Einstellungen", role_line), ephemeral=True,
         )
 
 
