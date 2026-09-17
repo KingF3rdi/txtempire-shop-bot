@@ -354,12 +354,14 @@ async def _create_pack_ticket_channel(
     await _set_ticket_channel(bot, order_id, channel.id)
 
     price_txt = format_price(price) if price is not None else "Preis auf Anfrage — Staff nennt dir den Betrag"
-    pay_line = (
+    money_line = (
         f"**Zahlung 1 — Echtgeld ({price_txt}):**\n"
-        f"Zahlung an **{payee_name(settings)}**:\n{payee_details_text(settings) or '_Keine Details hinterlegt_'}\n\n"
+        f"Zahlung an **{payee_name(settings)}**:\n{payee_details_text(settings) or '_Keine Details hinterlegt_'}"
+    )
+    ingame_line = (
         f"**Zahlung 2 — Ingame (fester Preis {format_price(ingame_price)}):**\n"
-        f"```\n{config.mc_pay_command(ingame_price)}\n```\n"
-        "_Ingame-Zahlung wird automatisch erkannt — Staff bestätigt danach trotzdem manuell._"
+        "_Wird automatisch erkannt — Staff bestätigt danach trotzdem manuell._\n"
+        f"```\n{config.mc_pay_command(ingame_price)}\n```"
     )
     title = f"🌌 Sky-Ticket #{order_number}" if is_sky else f"📦 Pack-Ticket #{order_number}"
     qty_line = "" if is_sky else f"Anzahl Texturen: **{qty}**\n"
@@ -370,9 +372,10 @@ async def _create_pack_ticket_channel(
         f"Preis: **{price_txt}**\n"
         + (f"Beschreibung: {description}\n" if description else "")
         + f"\n**{config.PAYMENT_NOTICE}**\n"
-        f"{pay_line}\n\n"
+        f"{money_line}\n\n"
         "Sobald die Zahlung eingegangen ist, klickt Staff **✅ Bestätigen** und "
-        "lädt die fertige Datei hoch — der Kunde bekommt sie automatisch per DM.",
+        "lädt die fertige Datei hoch — der Kunde bekommt sie automatisch per DM.\n\n"
+        f"{ingame_line}",
     )
     mention = staff_role.mention if staff_role else "Staff"
     await channel.send(
