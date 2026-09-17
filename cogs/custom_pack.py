@@ -2,10 +2,10 @@
 custom_pack.py
 ================
 
-Custom-Texturepack-Bestellungen (Kunde gibt eine Menge an, zahlt nach
-Mengenstaffel, Staff liefert das fertige Pack als Datei direkt im Ticket).
+Custom-Texturepack- und Custom-Sky-Bestellungen (Kunde gibt Details an,
+Staff liefert das fertige Ergebnis als Datei direkt im Ticket).
 
-Preisstaffel (Gesamtpreis pro Bestellung, nicht pro Textur):
+Texturepack-Preisstaffel (Gesamtpreis pro Bestellung, nicht pro Textur):
     bis 10 Texturen   -> 0,20 €
     bis 20 Texturen   -> 0,30 €
     bis 30 Texturen   -> 0,40 €
@@ -13,12 +13,21 @@ Preisstaffel (Gesamtpreis pro Bestellung, nicht pro Textur):
     bis 70 Texturen   -> 1,00 €
     mehr als 70       -> Preis auf Anfrage (Staff nennt Betrag im Ticket)
 
+Custom Sky: fester Preis (config.CUSTOM_SKY_PRICE), keine Mengenstaffel.
+
+Jede Bestellung ist ZUSÄTZLICH zum Echtgeld-Preis immer auch für einen
+festen Ingame-Betrag kaufbar (config.CUSTOM_PACK_INGAME_PRICE bzw.
+CUSTOM_SKY_INGAME_PRICE) — Zahlung per /pay, wird wie beim Haupt-Shop
+automatisch erkannt (utils/mc_order_match.py), Staff bestätigt danach wie
+gewohnt per Button.
+
 Ablauf:
-  - Kunde klickt "📦 Pack anfragen" -> Modal (Anzahl + Beschreibung) ->
-    privates Ticket wird erstellt (fortlaufend nummeriert).
+  - Kunde klickt "📦 Pack anfragen" oder "🌌 Sky anfragen" -> Modal ->
+    privates Ticket wird erstellt (fortlaufend nummeriert), zeigt beide
+    Zahlungsoptionen.
   - Staff bestätigt im Ticket ("✅ Bestätigen") -> öffnet ein natives
     Datei-Upload-Feld (discord.py 2.7 Components-V2, wie beim File-Scanner)
-    zum Hochladen des fertigen Packs -> wird automatisch per DM an den
+    zum Hochladen der fertigen Datei -> wird automatisch per DM an den
     Kunden geschickt.
 
 Eigene Tabelle (pack_orders) - keine Änderung an db/database.py nötig.
@@ -93,6 +102,8 @@ async def _ensure_table(bot: "ShopBot") -> None:
             qty INTEGER NOT NULL,
             description TEXT NOT NULL DEFAULT '',
             price REAL,
+            kind TEXT NOT NULL DEFAULT 'texturepack',
+            ingame_price REAL,
             status TEXT NOT NULL DEFAULT 'pending',
             ticket_channel_id INTEGER,
             created_by INTEGER,
@@ -105,6 +116,15 @@ async def _ensure_table(bot: "ShopBot") -> None:
         );
         """
     )
+    # Additive Spalten für bereits bestehende Installationen (idempotent).
+    for stmt in (
+        "ALTER TABLE pack_orders ADD COLUMN kind TEXT NOT NULL DEFAULT 'texturepack'",
+        "ALTER TABLE pack_orders ADD COLUMN ingame_price REAL",
+    ):
+        try:
+            await bot.db.db.execute(stmt)
+        except Exception:
+            pass
     await bot.db.db.commit()
 
 
@@ -126,15 +146,16 @@ async def _next_order_number(bot: "ShopBot", guild_id: int) -> int:
 
 
 async def _create_order(
-    bot: "ShopBot", guild_id: int, user_id: int, qty: int, description: str, price: Optional[float]
+    bot: "ShopBot", guild_id: int, user_id: int, qty: int, description: str, price: Optional[float],
+    *, kind: str, ingame_price: float,
 ) -> tuple[int, int]:
     order_number = await _next_order_number(bot, guild_id)
     cur = await bot.db.db.execute(
         """
-        INSERT INTO pack_orders (guild_id, order_number, user_id, qty, description, price, status)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending')
+        INSERT INTO pack_orders (guild_id, order_number, user_id, qty, description, price, kind, ingame_price, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
         """,
-        (guild_id, order_number, user_id, qty, description, price),
+        (guild_id, order_number, user_id, qty, description, price, kind, ingame_price),
     )
     await bot.db.db.commit()
     return int(cur.lastrowid), order_number  # type: ignore[arg-type]
@@ -192,11 +213,15 @@ async def _resolve_member(guild: discord.Guild, user_id: Optional[int]) -> Optio
 
 def _panel_embed() -> discord.Embed:
     return base_embed(
-        "📦 Custom Texturepack anfragen",
-        "Du willst individuelle Texturen für dein Pack? Gib die Anzahl an, "
-        "wir liefern dir das fertige Pack direkt im Ticket.\n\n"
+        "📦 Custom Texturepack / 🌌 Custom Sky anfragen",
+        "**Custom Texturepack** — individuelle Texturen für dein Pack, "
+        "Preis nach Anzahl:\n"
         f"{brackets_overview()}\n\n"
-        "Klicke **Pack anfragen** — danach wird ein privates Ticket erstellt.",
+        f"**Custom Sky** — dein eigener Himmel, fester Preis **{format_price(config.CUSTOM_SKY_PRICE)}**.\n\n"
+        "Beides zusätzlich auch für einen festen Ingame-Betrag kaufbar "
+        f"(Pack: **{format_price(config.CUSTOM_PACK_INGAME_PRICE)}**, "
+        f"Sky: **{format_price(config.CUSTOM_SKY_INGAME_PRICE)}**) — steht im Ticket.\n\n"
+        "Klicke einen der Buttons — danach wird ein privates Ticket erstellt.",
     )
 
 
@@ -232,7 +257,31 @@ class CustomPackRequestModal(discord.ui.Modal, title="Custom Pack anfragen"):
         qty = int(raw)
         desc = str(self.description.value).strip()
         price = price_for_qty(qty)
-        await _create_pack_ticket_channel(self.bot, interaction, qty=qty, description=desc, price=price)
+        await _create_pack_ticket_channel(
+            self.bot, interaction, qty=qty, description=desc, price=price,
+            kind="texturepack", ingame_price=config.CUSTOM_PACK_INGAME_PRICE,
+        )
+
+
+class CustomSkyRequestModal(discord.ui.Modal, title="Custom Sky anfragen"):
+    description = discord.ui.TextInput(
+        label="Wie soll der Himmel aussehen?",
+        style=discord.TextStyle.paragraph,
+        placeholder="z. B. Farben, Sterne, Wolken, Referenzbild-Link ...",
+        max_length=1000,
+        required=True,
+    )
+
+    def __init__(self, bot: "ShopBot") -> None:
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        desc = str(self.description.value).strip()
+        await _create_pack_ticket_channel(
+            self.bot, interaction, qty=1, description=desc, price=config.CUSTOM_SKY_PRICE,
+            kind="sky", ingame_price=config.CUSTOM_SKY_INGAME_PRICE,
+        )
 
 
 async def _create_pack_ticket_channel(
@@ -242,6 +291,8 @@ async def _create_pack_ticket_channel(
     qty: int,
     description: str,
     price: Optional[float],
+    kind: str,
+    ingame_price: float,
 ) -> None:
     guild = interaction.guild
     assert guild is not None
@@ -281,15 +332,20 @@ async def _create_pack_ticket_channel(
     if staff_role:
         overwrites[staff_role] = staff_perms
 
-    order_id, order_number = await _create_order(bot, guild.id, interaction.user.id, qty, description, price)
+    order_id, order_number = await _create_order(
+        bot, guild.id, interaction.user.id, qty, description, price,
+        kind=kind, ingame_price=ingame_price,
+    )
 
+    is_sky = kind == "sky"
+    prefix = "sky" if is_sky else "pack"
     safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in interaction.user.name.lower())[:18]
-    name = f"pack-{order_number:04d}-{safe}"[:100]
+    name = f"{prefix}-{order_number:04d}-{safe}"[:100]
 
     try:
         channel = await guild.create_text_channel(
             name=name, category=category, overwrites=overwrites,
-            reason=f"Custom-Pack-Ticket von {interaction.user}",
+            reason=f"Custom-{'Sky' if is_sky else 'Pack'}-Ticket von {interaction.user}",
         )
     except discord.HTTPException as e:
         await interaction.followup.send(embed=error_embed("Channel fehlgeschlagen", str(e)[:400]), ephemeral=True)
@@ -298,16 +354,25 @@ async def _create_pack_ticket_channel(
     await _set_ticket_channel(bot, order_id, channel.id)
 
     price_txt = format_price(price) if price is not None else "Preis auf Anfrage — Staff nennt dir den Betrag"
+    pay_line = (
+        f"**Zahlung 1 — Echtgeld ({price_txt}):**\n"
+        f"Zahlung an **{payee_name(settings)}**:\n{payee_details_text(settings) or '_Keine Details hinterlegt_'}\n\n"
+        f"**Zahlung 2 — Ingame (fester Preis {format_price(ingame_price)}):**\n"
+        f"```\n{config.mc_pay_command(ingame_price)}\n```\n"
+        "_Ingame-Zahlung wird automatisch erkannt — Staff bestätigt danach trotzdem manuell._"
+    )
+    title = f"🌌 Sky-Ticket #{order_number}" if is_sky else f"📦 Pack-Ticket #{order_number}"
+    qty_line = "" if is_sky else f"Anzahl Texturen: **{qty}**\n"
     embed = base_embed(
-        f"📦 Pack-Ticket #{order_number}",
+        title,
         f"Käufer: {interaction.user.mention}\n"
-        f"Anzahl Texturen: **{qty}**\n"
+        f"{qty_line}"
         f"Preis: **{price_txt}**\n"
         + (f"Beschreibung: {description}\n" if description else "")
         + f"\n**{config.PAYMENT_NOTICE}**\n"
-        f"Zahlung an **{payee_name(settings)}**:\n{payee_details_text(settings) or '_Keine Details hinterlegt_'}\n\n"
+        f"{pay_line}\n\n"
         "Sobald die Zahlung eingegangen ist, klickt Staff **✅ Bestätigen** und "
-        "lädt das fertige Pack hoch — der Kunde bekommt es automatisch per DM.",
+        "lädt die fertige Datei hoch — der Kunde bekommt sie automatisch per DM.",
     )
     mention = staff_role.mention if staff_role else "Staff"
     await channel.send(
@@ -328,13 +393,14 @@ class PackDeliverModal(discord.ui.Modal, title="Pack liefern"):
         super().__init__()
         self.bot = bot
         self.order = order
+        is_sky = order.get("kind") == "sky"
         self.file_upload = discord.ui.FileUpload(
             custom_id="pack_file", max_values=1, min_values=1, required=True,
         )
         self.add_item(
             discord.ui.Label(
-                text="Fertiges Pack",
-                description="ZIP/RAR mit den fertigen Texturen · maximal 25 MB",
+                text="Fertige Sky-Datei" if is_sky else "Fertiges Pack",
+                description="ZIP/RAR mit dem fertigen Ergebnis · maximal 25 MB",
                 component=self.file_upload,
             )
         )
@@ -350,6 +416,10 @@ class PackDeliverModal(discord.ui.Modal, title="Pack liefern"):
 
         await _mark_confirmed(self.bot, int(self.order["id"]), interaction.user.id)
 
+        is_sky = self.order.get("kind") == "sky"
+        product_label = "Custom Sky" if is_sky else "Custom Texturepack"
+        tier_label = "Einzelanfertigung" if is_sky else f"{self.order['qty']} Texturen"
+
         buyer = await _resolve_member(interaction.guild, self.order.get("user_id"))
         dm_ok = True
         if buyer is not None:
@@ -357,8 +427,9 @@ class PackDeliverModal(discord.ui.Modal, title="Pack liefern"):
                 file_to_send = await att.to_file()
                 await buyer.send(
                     embed=success_embed(
-                        f"📦 Dein Custom Pack (#{self.order['order_number']})",
-                        f"Anzahl Texturen: **{self.order['qty']}**\nViel Spaß mit deinem Pack!",
+                        f"{'🌌' if is_sky else '📦'} Dein {product_label} (#{self.order['order_number']})",
+                        (f"Anzahl Texturen: **{self.order['qty']}**\n" if not is_sky else "")
+                        + f"Viel Spaß mit deinem {product_label}!",
                     ),
                     file=file_to_send,
                 )
@@ -369,15 +440,15 @@ class PackDeliverModal(discord.ui.Modal, title="Pack liefern"):
 
                 await tweak_vouch.request_vouch(
                     self.bot, interaction.guild, buyer,
-                    product="Custom Texturepack",
-                    tier_label=f"{self.order['qty']} Texturen",
+                    product=product_label,
+                    tier_label=tier_label,
                 )
 
         body = f"Bestätigt und geliefert von {interaction.user.mention}."
         if not dm_ok:
             body += "\n⚠️ DM an Käufer fehlgeschlagen (DMs geschlossen) — Datei oben manuell weitergeben."
         await interaction.followup.send(
-            embed=success_embed("Pack geliefert", body),
+            embed=success_embed("Geliefert", body),
             file=await att.to_file(),
         )
 
@@ -505,6 +576,18 @@ class CustomPackPanelView(discord.ui.View):
             await interaction.response.send_message(embed=error_embed("Nur auf dem Server"), ephemeral=True)
             return
         await interaction.response.send_modal(CustomPackRequestModal(self.bot))
+
+    @discord.ui.button(
+        label="Sky anfragen",
+        style=discord.ButtonStyle.primary,
+        custom_id="custompack:request_sky",
+        emoji="🌌",
+    )
+    async def request_sky(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(embed=error_embed("Nur auf dem Server"), ephemeral=True)
+            return
+        await interaction.response.send_modal(CustomSkyRequestModal(self.bot))
 
 
 # ── Slash-Commands ───────────────────────────────────────────────────────

@@ -48,6 +48,16 @@ PLAYER_ITEM_PAYPAL_PRICE = float(
 )
 PAYMENT_NOTICE = "Das gesamte Geld geht an TxtEmpire."
 
+# Custom Pack / Custom Sky: alternativ zur Preisstaffel/Echtgeld-Preis fest
+# zum angegebenen Ingame-Betrag kaufbar (per /pay, automatisch erkannt).
+CUSTOM_PACK_INGAME_PRICE = float(
+    os.getenv("CUSTOM_PACK_INGAME_PRICE", "50000") or "50000"
+)
+CUSTOM_SKY_PRICE = float(os.getenv("CUSTOM_SKY_PRICE", "2.00") or "2.00")
+CUSTOM_SKY_INGAME_PRICE = float(
+    os.getenv("CUSTOM_SKY_INGAME_PRICE", "100000") or "100000"
+)
+
 # File-Scanner Limits
 SCAN_FREE_DAILY = int(os.getenv("SCAN_FREE_DAILY", "1") or "1")
 SCAN_PREMIUM_DAILY = int(os.getenv("SCAN_PREMIUM_DAILY", "15") or "15")
