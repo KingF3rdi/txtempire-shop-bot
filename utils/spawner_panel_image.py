@@ -50,12 +50,17 @@ ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets" / "spawners"
 # (Substring im kleingeschriebenen Spawner-Namen, Datei in assets/spawners)
 _ICON_FILES: tuple[tuple[str, str], ...] = (
     ("skeleton", "skeleton.png"),
+    ("skelett", "skeleton.png"),
     ("creeper", "creeper.png"),
     ("golem", "iron_golem.png"),
     ("blaze", "blaze.png"),
+    ("lohe", "blaze.png"),
     ("spider", "spider.png"),
+    ("spinne", "spider.png"),
     ("cow", "cow.png"),
+    ("kuh", "cow.png"),
     ("piglin", "zombie_piglin.png"),
+    ("pigman", "zombie_piglin.png"),
 )
 
 _FONT_CANDIDATES = ("DejaVuSans-Bold.ttf", "arialbd.ttf", "LiberationSans-Bold.ttf")
@@ -327,6 +332,8 @@ def _self_check() -> None:
     assert _price_text(None) == "STOP" and _price_text(12_500_000) == "12.5M"
     for name in ("Skeleton", "Creeper", "Iron Golem", "Blaze", "Spider", "Cow", "Zombie Piglin"):
         assert _icon_for(name) is not None, f"Icon fehlt für {name}"
+    for alias in ("Kuh", "Spinne", "Eisengolem", "Skelett", "Lohe", "Zombified Piglin"):
+        assert _icon_for(alias) is not None, f"Alias fehlt: {alias}"
     assert _icon_for("Enderman") is None  # ohne Icon -> gezeichneter Würfel
 
 

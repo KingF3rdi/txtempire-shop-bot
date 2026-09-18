@@ -177,6 +177,14 @@ async def _seed_default_spawners(bot: "ShopBot", guild_id: int) -> None:
     await bot.db.db.commit()
 
 
+async def _reset_spawners(bot: "ShopBot", guild_id: int) -> None:
+    """Löscht ALLE Spawner des Servers und legt die Standard-Spawner neu an."""
+    await bot.db.db.execute("DELETE FROM spawners WHERE guild_id = ?", (guild_id,))
+    await bot.db.db.execute("UPDATE spawner_settings SET defaults_seeded = 0 WHERE guild_id = ?", (guild_id,))
+    await bot.db.db.commit()
+    await _seed_default_spawners(bot, guild_id)
+
+
 async def list_spawners(bot: "ShopBot", guild_id: int) -> list[dict]:
     await _seed_default_spawners(bot, guild_id)
     rows = await bot.db.fetchall(
@@ -811,6 +819,70 @@ class SpawnerShopCog(commands.Cog):
         await self.bot.db.db.commit()
         await interaction.response.send_message(
             embed=success_embed("Emoji aktualisiert", f"**{name}** ist jetzt {emoji.strip()}."), ephemeral=True,
+        )
+
+    @spawner_group.command(
+        name="reset",
+        description="Spawner-Liste auf die Standard-Spawner mit Icons zurücksetzen + Panel neu (Staff)",
+    )
+    @app_commands.describe(
+        bestaetigen="Auf True setzen: löscht ALLE aktuellen Spawner samt Preisen",
+        channel="Neues Panel in diesen Channel posten (alt wird gelöscht). Leer = gemerktes Panel aktualisieren",
+    )
+    async def spawner_reset(
+        self, interaction: discord.Interaction, bestaetigen: bool = False,
+        channel: Optional[discord.TextChannel] = None,
+    ) -> None:
+        assert interaction.guild is not None
+        guild = interaction.guild
+        if not bestaetigen:
+            rows = await list_spawners(self.bot, guild.id)
+            overview = "\n".join(_price_line(s) for s in rows)[:1500] or "_keine_"
+            await interaction.response.send_message(
+                embed=warn_embed(
+                    "Wirklich zurücksetzen?",
+                    f"Das löscht die aktuellen **{len(rows)}** Spawner samt Preisen und legt stattdessen die "
+                    f"{len(DEFAULT_SPAWNERS)} Standard-Spawner mit Icons neu an (alle Preise STOP):\n\n"
+                    f"{overview}\n\nZum Ausführen: `/spawner reset bestaetigen:True` "
+                    "(optional mit `channel:` für ein frisches Panel).",
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        await _reset_spawners(self.bot, guild.id)
+
+        old = await self.bot.db.fetchone(
+            "SELECT panel_channel_id, panel_message_id FROM spawner_settings WHERE guild_id = ?", (guild.id,)
+        )
+        panel_note = "Kein Panel gemerkt — poste eins mit `/spawnerpanel`."
+        if channel is not None:
+            embed, file = await _build_panel_message(self.bot, guild.id)
+            msg = await channel.send(
+                embed=embed, view=SpawnerPanelView(self.bot), **({"file": file} if file else {}),
+            )
+            if old and old["panel_channel_id"] and old["panel_message_id"] and int(old["panel_message_id"]) != msg.id:
+                old_channel = guild.get_channel(int(old["panel_channel_id"]))
+                if isinstance(old_channel, discord.TextChannel):
+                    try:
+                        await old_channel.get_partial_message(int(old["panel_message_id"])).delete()
+                    except discord.HTTPException:
+                        pass
+            await _remember_panel(self.bot, guild.id, channel.id, msg.id)
+            panel_note = f"Neues Panel: {msg.jump_url}"
+        elif old and old["panel_message_id"]:
+            await _refresh_registered_panel(self.bot, guild)
+            panel_note = "Gemerktes Panel wurde aktualisiert."
+
+        names = ", ".join(n for n, _ in DEFAULT_SPAWNERS)
+        await interaction.followup.send(
+            embed=success_embed(
+                "Zurückgesetzt",
+                f"Standard-Spawner mit Icons angelegt: {names}.\n"
+                "Preise setzt du mit `/spawner setzen` (z. B. `name:Skeleton ankauf:12.5m verkauf:STOP`).\n\n"
+                f"{panel_note}",
+            ),
+            ephemeral=True,
         )
 
     @spawner_group.command(name="afkpanel", description="Spawner-AFK-Service-Panel posten (Staff)")
