@@ -238,7 +238,7 @@ async def _build_panel_message(bot: "ShopBot", guild_id: int) -> tuple[discord.E
         return _panel_embed(spawners), None
     import io
 
-    embed = discord.Embed(color=0x8B5CF6, timestamp=discord.utils.utcnow())
+    embed = discord.Embed(color=0xEC4899, timestamp=discord.utils.utcnow())
     embed.set_image(url="attachment://spawner_panel.png")
     embed.set_footer(text="TxtEmpire · Preise zuletzt aktualisiert")
     return embed, discord.File(io.BytesIO(png), filename="spawner_panel.png")

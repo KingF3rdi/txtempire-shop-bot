@@ -4,8 +4,10 @@ spawner_panel_image.py
 
 Rendert das Spawner-Handel-Panel als Bild (Karten pro Spawner mit Ankauf-/
 Verkaufspreis, "STOP" = Richtung deaktiviert). Rein Pillow, keine externen
-Assets: Icons sind kleine gezeichnete Spawner-Würfel in Mob-Farbe, Schrift
-kommt aus dem System (DejaVu/Arial) bzw. Pillows eingebautem Font.
+Spawner-Icons kommen aus assets/spawners/*.png (Zuordnung über den Namen,
+siehe _ICON_FILES); für Spawner ohne Icon wird ein Würfel in Mob-Farbe
+gezeichnet. Schrift kommt aus dem System (DejaVu/Arial) bzw. Pillows
+eingebautem Font. Farbschema: Pink.
 
 Perspektive der Karten ist die des Kunden:
   DU ERHÄLTST = Ankauf-Preis des Shops (Kunde verkauft an uns)
@@ -16,6 +18,8 @@ from __future__ import annotations
 import io
 import math
 import zlib
+from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont
@@ -31,12 +35,28 @@ MAX_SPAWNERS = 16
 
 GOLD = (255, 204, 51, 255)
 GOLD_DARK = (120, 80, 0, 255)
-WHITE = (240, 236, 255, 255)
-MUTED = (150, 140, 185, 255)
+WHITE = (255, 240, 248, 255)
+MUTED = (222, 165, 200, 255)
 RED = (255, 90, 100, 255)
 PILL_RED = (150, 30, 50, 255)
 PILL_GREEN = (25, 120, 70, 255)
-PILL_GREY = (70, 65, 95, 255)
+PILL_GREY = (100, 60, 92, 255)
+CARD_FILL = (58, 20, 52, 235)
+CARD_BORDER = (255, 105, 180, 255)
+BG_TOP, BG_BOTTOM = (62, 16, 50), (26, 7, 24)
+ICON_HEIGHT = 112
+
+ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets" / "spawners"
+# (Substring im kleingeschriebenen Spawner-Namen, Datei in assets/spawners)
+_ICON_FILES: tuple[tuple[str, str], ...] = (
+    ("skeleton", "skeleton.png"),
+    ("creeper", "creeper.png"),
+    ("golem", "iron_golem.png"),
+    ("blaze", "blaze.png"),
+    ("spider", "spider.png"),
+    ("cow", "cow.png"),
+    ("piglin", "zombie_piglin.png"),
+)
 
 _FONT_CANDIDATES = ("DejaVuSans-Bold.ttf", "arialbd.ttf", "LiberationSans-Bold.ttf")
 
@@ -144,6 +164,24 @@ def _draw_spawner_icon(draw: ImageDraw.ImageDraw, cx: int, cy: int, size: int, c
     )
 
 
+@lru_cache(maxsize=32)
+def _load_icon(filename: str) -> Optional[Image.Image]:
+    try:
+        icon = Image.open(ASSETS_DIR / filename).convert("RGBA")
+    except OSError:
+        return None
+    width = max(1, round(icon.width * ICON_HEIGHT / icon.height))
+    return icon.resize((width, ICON_HEIGHT), Image.LANCZOS)
+
+
+def _icon_for(name: str) -> Optional[Image.Image]:
+    low = name.lower()
+    for key, filename in _ICON_FILES:
+        if key in low:
+            return _load_icon(filename)
+    return None
+
+
 def _price_text(value: Optional[float]) -> str:
     if value is None:
         return "STOP"
@@ -157,15 +195,19 @@ def _pill(draw: ImageDraw.ImageDraw, cx: int, y: int, text: str, fill, font, w: 
     draw.text((cx - (box[2] - box[0]) / 2, y + (h - (box[3] - box[1])) / 2 - box[1]), text, font=font, fill=WHITE)
 
 
-def _draw_card(draw: ImageDraw.ImageDraw, x: int, y: int, spawner: dict, fonts: dict) -> None:
-    draw.rounded_rectangle([x, y, x + CARD_W, y + CARD_H], radius=14, fill=(34, 20, 66, 235), outline=(110, 80, 190, 255), width=2)
+def _draw_card(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int, spawner: dict, fonts: dict) -> None:
+    draw.rounded_rectangle([x, y, x + CARD_W, y + CARD_H], radius=14, fill=CARD_FILL, outline=CARD_BORDER, width=2)
     cx = x + CARD_W // 2
     name = str(spawner["name"]).upper()
     if len(name) > 14:
         name = name[:13] + "."
     _center_text(draw, cx, y + 16, name, fonts["name"], WHITE)
 
-    _draw_spawner_icon(draw, cx, y + 108, 92, _mob_color(str(spawner["name"])))
+    icon = _icon_for(str(spawner["name"]))
+    if icon is not None:
+        img.paste(icon, (cx - icon.width // 2, y + 108 - icon.height // 2), icon)
+    else:
+        _draw_spawner_icon(draw, cx, y + 108, 92, _mob_color(str(spawner["name"])))
 
     buy, sell = spawner.get("buy_price"), spawner.get("sell_price")  # Shop-Ankauf / Shop-Verkauf
     col_l, col_r = x + CARD_W // 4 + 4, x + 3 * CARD_W // 4 - 4
@@ -190,14 +232,14 @@ def _draw_card(draw: ImageDraw.ImageDraw, x: int, y: int, spawner: dict, fonts: 
 def _background(height: int) -> Image.Image:
     img = Image.new("RGBA", (WIDTH, height))
     px = ImageDraw.Draw(img)
-    top, bottom = (28, 14, 60), (14, 8, 34)
+    top, bottom = BG_TOP, BG_BOTTOM
     for y in range(height):
         t = y / max(1, height - 1)
         px.line([(0, y), (WIDTH, y)], fill=tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3)) + (255,))
     beams = Image.new("RGBA", (WIDTH, height), (0, 0, 0, 0))
     bd = ImageDraw.Draw(beams)
-    bd.polygon([(120, 0), (300, 0), (520, height * 0.7), (40, height * 0.7)], fill=(255, 220, 120, 26))
-    bd.polygon([(600, 0), (780, 0), (900, height * 0.7), (470, height * 0.7)], fill=(255, 220, 120, 22))
+    bd.polygon([(120, 0), (300, 0), (520, height * 0.7), (40, height * 0.7)], fill=(255, 170, 215, 28))
+    bd.polygon([(600, 0), (780, 0), (900, height * 0.7), (470, height * 0.7)], fill=(255, 170, 215, 22))
     return Image.alpha_composite(img, beams).convert("RGB")
 
 
@@ -227,8 +269,8 @@ def render_spawner_panel(spawners: list[dict], brand: str = "TXTEMPIRE") -> byte
 
     # Header: Diamant, Marke, Titel, Untertitel
     cx = WIDTH // 2
-    draw.polygon([(cx, 40), (cx + 22, 66), (cx, 96), (cx - 22, 66)], fill=(170, 120, 255, 255), outline=(230, 210, 255, 255))
-    draw.polygon([(cx - 22, 66), (cx + 22, 66), (cx, 96)], fill=(120, 80, 220, 255))
+    draw.polygon([(cx, 40), (cx + 22, 66), (cx, 96), (cx - 22, 66)], fill=(255, 120, 190, 255), outline=(255, 215, 235, 255))
+    draw.polygon([(cx - 22, 66), (cx + 22, 66), (cx, 96)], fill=(215, 65, 150, 255))
     _spaced_text(draw, cx, 120, f"{brand}  ·  SPAWNER", fonts["brand"], MUTED, 5)
     _center_text(draw, cx, 160, "SPAWNER HANDEL", fonts["title"], GOLD, stroke=3, stroke_fill=GOLD_DARK)
     _center_text(draw, cx, 268, "Kaufen & verkaufen — schnell, sicher, per Ticket", fonts["sub"], WHITE)
@@ -241,7 +283,7 @@ def render_spawner_panel(spawners: list[dict], brand: str = "TXTEMPIRE") -> byte
         x0 = (WIDTH - row_w) // 2
         y = grid_top + row * (CARD_H + CARD_GAP_Y)
         for i, spawner in enumerate(row_items):
-            _draw_card(draw, x0 + i * (CARD_W + CARD_GAP_X), y, spawner, fonts)
+            _draw_card(img, draw, x0 + i * (CARD_W + CARD_GAP_X), y, spawner, fonts)
 
     # Badges
     by = grid_bottom + 28
@@ -250,7 +292,7 @@ def render_spawner_panel(spawners: list[dict], brand: str = "TXTEMPIRE") -> byte
     bx0 = (WIDTH - (3 * bw + 2 * bgap)) // 2
     for i, text in enumerate(badges):
         x = bx0 + i * (bw + bgap)
-        draw.rounded_rectangle([x, by, x + bw, by + 44], radius=22, fill=(34, 20, 66, 235), outline=(110, 80, 190, 255), width=2)
+        draw.rounded_rectangle([x, by, x + bw, by + 44], radius=22, fill=CARD_FILL, outline=CARD_BORDER, width=2)
         group_w = 20 + 12 + _text_w(draw, text, fonts["badge"])
         gx = x + (bw - group_w) // 2
         draw.ellipse([gx, by + 12, gx + 20, by + 32], fill=GOLD)
@@ -283,6 +325,9 @@ def _self_check() -> None:
         png = render_spawner_panel(data)
         assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 1000
     assert _price_text(None) == "STOP" and _price_text(12_500_000) == "12.5M"
+    for name in ("Skeleton", "Creeper", "Iron Golem", "Blaze", "Spider", "Cow", "Zombie Piglin"):
+        assert _icon_for(name) is not None, f"Icon fehlt für {name}"
+    assert _icon_for("Enderman") is None  # ohne Icon -> gezeichneter Würfel
 
 
 if __name__ == "__main__":
