@@ -42,7 +42,7 @@ from discord.ext import commands
 import config
 from cogs import afk_service
 from utils.embeds import base_embed, error_embed, format_price, success_embed, warn_embed
-from utils.price import parse_price
+from utils.price import format_compact_number, parse_price
 from views.ticket_views import is_staff
 
 if TYPE_CHECKING:
@@ -331,22 +331,32 @@ async def _remember_panel(bot: "ShopBot", guild_id: int, channel_id: int, messag
     await bot.db.db.commit()
 
 
-async def _refresh_registered_panel(bot: "ShopBot", guild: discord.Guild) -> None:
-    """Aktualisiert das zuletzt gepostete Panel (nach Preisänderungen). Best-effort."""
+async def _refresh_message(bot: "ShopBot", guild_id: int, msg: discord.Message) -> bool:
+    """Rendert ein Panel neu und ersetzt Embed/Bild/Buttons der Nachricht (Stil bleibt). Best-effort."""
+    try:
+        embed, file = await _build_panel_message(bot, guild_id, _message_style(msg))
+        await msg.edit(embed=embed, attachments=[file] if file else [], view=SpawnerPanelView(bot))
+        return True
+    except discord.HTTPException:
+        return False
+
+
+async def _refresh_registered_panel(bot: "ShopBot", guild: discord.Guild) -> Optional[int]:
+    """Aktualisiert das zuletzt gepostete Panel (nach Preisänderungen). Gibt die
+    aktualisierte Message-ID zurück, sonst None. Best-effort."""
     row = await bot.db.fetchone(
         "SELECT panel_channel_id, panel_message_id FROM spawner_settings WHERE guild_id = ?", (guild.id,)
     )
     if not row or not row["panel_channel_id"] or not row["panel_message_id"]:
-        return
+        return None
     channel = guild.get_channel(int(row["panel_channel_id"]))
     if not isinstance(channel, discord.TextChannel):
-        return
+        return None
     try:
         msg = await channel.fetch_message(int(row["panel_message_id"]))
-        embed, file = await _build_panel_message(bot, guild.id, _message_style(msg))
-        await msg.edit(embed=embed, attachments=[file] if file else [], view=SpawnerPanelView(bot))
     except discord.HTTPException:
-        pass
+        return None
+    return msg.id if await _refresh_message(bot, guild.id, msg) else None
 
 
 PANEL_COLOR = 0xEC4899
@@ -651,6 +661,85 @@ class SpawnerTicketView(discord.ui.View):
             pass
 
 
+def _price_input_text(value: Optional[float]) -> str:
+    """Vorbelegung für die Preis-Felder: kompakt (12.5m) bzw. STOP — von parse_price_or_stop lesbar."""
+    if value is None:
+        return "STOP"
+    value = float(value)
+    compact = format_compact_number(value)
+    if abs(parse_price(compact) - value) < 1e-6:  # nur kompakt, wenn nichts gerundet wird
+        return compact
+    return str(int(value)) if value.is_integer() else str(value)
+
+
+class SpawnerPriceModal(discord.ui.Modal):
+    def __init__(self, bot: "ShopBot", spawner: dict, panel_message: Optional[discord.Message]) -> None:
+        super().__init__(title=f"Preise: {spawner['name']}"[:45])
+        self.bot = bot
+        self.spawner_id = int(spawner["id"])
+        self.panel_message = panel_message
+        self.buy = discord.ui.TextInput(
+            label="Ankauf (wir zahlen dem Kunden)", default=_price_input_text(spawner["buy_price"]),
+            placeholder="z. B. 12.5m — oder STOP", max_length=20, required=True,
+        )
+        self.sell = discord.ui.TextInput(
+            label="Verkauf (Kunde zahlt uns)", default=_price_input_text(spawner["sell_price"]),
+            placeholder="z. B. 6m — oder STOP", max_length=20, required=True,
+        )
+        self.add_item(self.buy)
+        self.add_item(self.sell)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        try:
+            buy = parse_price_or_stop(str(self.buy.value))
+            sell = parse_price_or_stop(str(self.sell.value))
+        except ValueError:
+            await interaction.response.send_message(
+                embed=error_embed("Ungültiger Preis", "Beispiele: `500k`, `1.5m`, `STOP`."), ephemeral=True,
+            )
+            return
+        spawner = await get_spawner(self.bot, self.spawner_id)
+        if not spawner:
+            await interaction.response.send_message(embed=error_embed("Spawner nicht gefunden"), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        await upsert_spawner(self.bot, interaction.guild.id, spawner["name"], buy, sell, None, mode="update")
+        refreshed = await _refresh_registered_panel(self.bot, interaction.guild)
+        if self.panel_message is not None and self.panel_message.id != refreshed:
+            await _refresh_message(self.bot, interaction.guild.id, self.panel_message)
+        buy_txt = format_price(buy) if buy is not None else "STOP"
+        sell_txt = format_price(sell) if sell is not None else "STOP"
+        await interaction.followup.send(
+            embed=success_embed("Preise gespeichert", f"**{spawner['name']}**: Ankauf `{buy_txt}` · Verkauf `{sell_txt}`"),
+            ephemeral=True,
+        )
+
+
+class SpawnerPriceSelect(discord.ui.Select):
+    def __init__(self, bot: "ShopBot", spawners: list[dict], panel_message: Optional[discord.Message]) -> None:
+        self.bot = bot
+        self.panel_message = panel_message
+        options = [
+            discord.SelectOption(
+                label=s["name"][:100], value=str(s["id"]),
+                description=(
+                    f"Ankauf {'STOP' if s['buy_price'] is None else format_price(s['buy_price'])} · "
+                    f"Verkauf {'STOP' if s['sell_price'] is None else format_price(s['sell_price'])}"
+                )[:100],
+            )
+            for s in spawners[:25]
+        ]
+        super().__init__(placeholder="Spawner auswählen ...", options=options)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        spawner = await get_spawner(self.bot, int(self.values[0]))
+        if not spawner:
+            await interaction.response.send_message(embed=error_embed("Spawner nicht gefunden"), ephemeral=True)
+            return
+        await interaction.response.send_modal(SpawnerPriceModal(self.bot, spawner, self.panel_message))
+
+
 class SpawnerPanelView(discord.ui.View):
     def __init__(self, bot: "ShopBot") -> None:
         super().__init__(timeout=None)
@@ -692,6 +781,29 @@ class SpawnerPanelView(discord.ui.View):
         style = _message_style(interaction.message) if interaction.message else "image"
         embed, file = await _build_panel_message(self.bot, interaction.guild.id, style)
         await interaction.edit_original_response(embed=embed, attachments=[file] if file else [], view=self)
+
+    @discord.ui.button(
+        label="Preise setzen (Admin)", style=discord.ButtonStyle.secondary, custom_id="spawnerpanel:setprices", emoji="⚙️",
+    )
+    async def set_prices(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(embed=error_embed("Nur auf dem Server"), ephemeral=True)
+            return
+        if not await _is_spawner_staff(self.bot, interaction):
+            await interaction.response.send_message(embed=error_embed("Nur Staff"), ephemeral=True)
+            return
+        spawners = await list_spawners(self.bot, interaction.guild.id)
+        if not spawners:
+            await interaction.response.send_message(
+                embed=warn_embed("Keine Spawner", "Lege welche mit `/spawner hinzufuegen` an oder nutze `/spawner reset`."),
+                ephemeral=True,
+            )
+            return
+        view = discord.ui.View(timeout=180)
+        view.add_item(SpawnerPriceSelect(self.bot, spawners, interaction.message))
+        await interaction.response.send_message(
+            content="Für welchen Spawner möchtest du die Preise setzen?", view=view, ephemeral=True,
+        )
 
 
 # ── Slash-Commands ───────────────────────────────────────────────────────
