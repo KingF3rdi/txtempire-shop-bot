@@ -53,6 +53,11 @@ PAYMENT_NOTICE = "Das gesamte Geld geht an TxtEmpire."
 CUSTOM_PACK_INGAME_PRICE = float(
     os.getenv("CUSTOM_PACK_INGAME_PRICE", "50000") or "50000"
 )
+# Spawner-AFK-Service (cogs/afk_service.py): Bones pro Minute und Spawner,
+# Uptime-Stunden pro Tag, Anteil des Kunden am Erlös in Prozent.
+AFK_BONES_PER_MIN = float(os.getenv("AFK_BONES_PER_MIN", "3.6") or "3.6")
+AFK_UPTIME_HOURS = float(os.getenv("AFK_UPTIME_HOURS", "22") or "22")
+AFK_CUSTOMER_PERCENT = float(os.getenv("AFK_CUSTOMER_PERCENT", "75") or "75")
 CUSTOM_SKY_PRICE = float(os.getenv("CUSTOM_SKY_PRICE", "2.00") or "2.00")
 CUSTOM_SKY_INGAME_PRICE = float(
     os.getenv("CUSTOM_SKY_INGAME_PRICE", "100000") or "100000"

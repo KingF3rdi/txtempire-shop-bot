@@ -16,12 +16,20 @@ Ablauf: Panel mit "Kaufen"/"Verkaufen"-Buttons -> Auswahl-Menü der
 verfügbaren Spawner für die Richtung -> Modal (Menge + Ingame-Name) ->
 privates Ticket wird erstellt, genau wie bei custom_pack.py/gputweaks_keys.py.
 
+Das Panel ist ein gerendertes Bild (utils/spawner_panel_image.py) mit einer
+Karte pro Spawner; es wird bei jeder Preisänderung automatisch aktualisiert
+(Panel-Nachricht wird in spawner_settings gemerkt) bzw. per Button.
+
+Außerdem hängen hier /spawner afkpanel und /spawner afkpreis für den
+Spawner-AFK-Service (Logik in cogs/afk_service.py).
+
 Eigene Tabellen (spawners, spawner_settings, spawner_tickets) - keine
 Änderung an db/database.py nötig.
 """
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, Optional
 
 import discord
@@ -29,6 +37,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
+from cogs import afk_service
 from utils.embeds import base_embed, error_embed, format_price, success_embed, warn_embed
 from utils.price import parse_price
 from views.ticket_views import is_staff
@@ -83,6 +92,14 @@ async def _ensure_tables(bot: "ShopBot") -> None:
         );
         """
     )
+    for stmt in (
+        "ALTER TABLE spawner_settings ADD COLUMN panel_channel_id INTEGER",
+        "ALTER TABLE spawner_settings ADD COLUMN panel_message_id INTEGER",
+    ):
+        try:
+            await bot.db.db.execute(stmt)
+        except Exception:
+            pass
     await bot.db.db.commit()
 
 
@@ -199,6 +216,7 @@ def _price_line(s: dict) -> str:
 # ── UI: Panel, Auswahl, Menge/IGN-Modal, Ticket-Buttons ─────────────────
 
 def _panel_embed(spawners: list[dict]) -> discord.Embed:
+    """Text-Fallback, falls das Bild nicht gerendert werden kann."""
     body = "\n".join(_price_line(s) for s in spawners) or "_Noch keine Spawner konfiguriert._"
     return base_embed(
         "🧱 Spawner-Shop",
@@ -206,6 +224,57 @@ def _panel_embed(spawners: list[dict]) -> discord.Embed:
         f"{body}\n\n"
         "📥 Ankauf = wir kaufen dir ab · 📤 Verkauf = du kaufst von uns.",
     )
+
+
+async def _build_panel_message(bot: "ShopBot", guild_id: int) -> tuple[discord.Embed, Optional[discord.File]]:
+    """Panel als Bild-Embed (mit Datei) — bei Renderfehler Text-Embed ohne Datei."""
+    spawners = await list_spawners(bot, guild_id)
+    try:
+        from utils.spawner_panel_image import render_spawner_panel
+
+        png = await asyncio.to_thread(render_spawner_panel, spawners)
+    except Exception as e:  # Pillow fehlt o.ä. — Panel soll trotzdem funktionieren
+        print(f"[SpawnerPanel] Bild-Rendering fehlgeschlagen, nutze Text-Panel: {e!r}")
+        return _panel_embed(spawners), None
+    import io
+
+    embed = discord.Embed(color=0x8B5CF6, timestamp=discord.utils.utcnow())
+    embed.set_image(url="attachment://spawner_panel.png")
+    embed.set_footer(text="TxtEmpire · Preise zuletzt aktualisiert")
+    return embed, discord.File(io.BytesIO(png), filename="spawner_panel.png")
+
+
+async def _remember_panel(bot: "ShopBot", guild_id: int, channel_id: int, message_id: int) -> None:
+    await bot.db.db.execute(
+        "INSERT OR IGNORE INTO spawner_settings (guild_id) VALUES (?)", (guild_id,)
+    )
+    await bot.db.db.execute(
+        "UPDATE spawner_settings SET panel_channel_id = ?, panel_message_id = ? WHERE guild_id = ?",
+        (channel_id, message_id, guild_id),
+    )
+    await bot.db.db.commit()
+
+
+async def _refresh_registered_panel(bot: "ShopBot", guild: discord.Guild) -> None:
+    """Aktualisiert das zuletzt gepostete Panel (nach Preisänderungen). Best-effort."""
+    row = await bot.db.fetchone(
+        "SELECT panel_channel_id, panel_message_id FROM spawner_settings WHERE guild_id = ?", (guild.id,)
+    )
+    if not row or not row["panel_channel_id"] or not row["panel_message_id"]:
+        return
+    channel = guild.get_channel(int(row["panel_channel_id"]))
+    if not isinstance(channel, discord.TextChannel):
+        return
+    try:
+        msg = await channel.fetch_message(int(row["panel_message_id"]))
+        embed, file = await _build_panel_message(bot, guild.id)
+        await msg.edit(embed=embed, attachments=[file] if file else [], view=SpawnerPanelView(bot))
+    except discord.HTTPException:
+        pass
+
+
+_last_panel_refresh: dict[int, float] = {}
+PANEL_REFRESH_COOLDOWN = 10.0
 
 
 class SpawnerQtyModal(discord.ui.Modal, title="Spawner-Menge"):
@@ -511,7 +580,7 @@ class SpawnerPanelView(discord.ui.View):
         self.bot = bot
 
     @discord.ui.button(
-        label="Kaufen", style=discord.ButtonStyle.primary, custom_id="spawnerpanel:buy", emoji="📤",
+        label="Spawner kaufen", style=discord.ButtonStyle.primary, custom_id="spawnerpanel:buy", emoji="🛒",
     )
     async def buy(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.guild is None:
@@ -520,13 +589,31 @@ class SpawnerPanelView(discord.ui.View):
         await _open_spawner_picker(self.bot, interaction, "buy")
 
     @discord.ui.button(
-        label="Verkaufen", style=discord.ButtonStyle.secondary, custom_id="spawnerpanel:sell", emoji="📥",
+        label="Spawner verkaufen", style=discord.ButtonStyle.success, custom_id="spawnerpanel:sell", emoji="💰",
     )
     async def sell(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.guild is None:
             await interaction.response.send_message(embed=error_embed("Nur auf dem Server"), ephemeral=True)
             return
         await _open_spawner_picker(self.bot, interaction, "sell")
+
+    @discord.ui.button(
+        label="Preise aktualisieren", style=discord.ButtonStyle.secondary, custom_id="spawnerpanel:refresh", emoji="🔄",
+    )
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(embed=error_embed("Nur auf dem Server"), ephemeral=True)
+            return
+        now = time.monotonic()
+        if now - _last_panel_refresh.get(interaction.guild.id, 0.0) < PANEL_REFRESH_COOLDOWN:
+            await interaction.response.send_message(
+                embed=warn_embed("Gerade erst aktualisiert", "Bitte kurz warten."), ephemeral=True,
+            )
+            return
+        _last_panel_refresh[interaction.guild.id] = now
+        await interaction.response.defer()
+        embed, file = await _build_panel_message(self.bot, interaction.guild.id)
+        await interaction.edit_original_response(embed=embed, attachments=[file] if file else [], view=self)
 
 
 # ── Slash-Commands ───────────────────────────────────────────────────────
@@ -556,8 +643,11 @@ class SpawnerShopCog(commands.Cog):
             await interaction.response.send_message(embed=error_embed("Kein Channel"), ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        spawners = await list_spawners(self.bot, interaction.guild.id)
-        msg = await target.send(embed=_panel_embed(spawners), view=SpawnerPanelView(self.bot))
+        embed, file = await _build_panel_message(self.bot, interaction.guild.id)
+        msg = await target.send(
+            embed=embed, view=SpawnerPanelView(self.bot), **({"file": file} if file else {}),
+        )
+        await _remember_panel(self.bot, interaction.guild.id, target.id, msg.id)
         await interaction.followup.send(
             embed=success_embed("Panel gepostet", f"In {target.mention}: {msg.jump_url}"), ephemeral=True,
         )
@@ -613,6 +703,7 @@ class SpawnerShopCog(commands.Cog):
             return
         buy_txt = format_price(buy) if buy is not None else "STOP"
         sell_txt = format_price(sell) if sell is not None else "STOP"
+        await _refresh_registered_panel(self.bot, interaction.guild)
         await interaction.response.send_message(
             embed=success_embed(
                 "Spawner gespeichert" if result == "created" else "Spawner aktualisiert",
@@ -630,6 +721,7 @@ class SpawnerShopCog(commands.Cog):
             (interaction.guild.id, name.strip()),
         )
         await self.bot.db.db.commit()
+        await _refresh_registered_panel(self.bot, interaction.guild)
         await interaction.response.send_message(
             embed=success_embed("Entfernt", f"Spawner **{name}** wurde gelöscht."), ephemeral=True,
         )
@@ -652,6 +744,38 @@ class SpawnerShopCog(commands.Cog):
         await interaction.response.send_message(
             embed=success_embed("Emoji aktualisiert", f"**{name}** ist jetzt {emoji.strip()}."), ephemeral=True,
         )
+
+    @spawner_group.command(name="afkpanel", description="Spawner-AFK-Service-Panel posten (Staff)")
+    @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
+    async def spawner_afk_panel(
+        self, interaction: discord.Interaction, channel: discord.TextChannel | None = None,
+    ) -> None:
+        assert interaction.guild is not None
+        target = channel
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
+        if target is None:
+            await interaction.response.send_message(embed=error_embed("Kein Channel"), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        msg = await afk_service.post_afk_panel(self.bot, target)
+        await interaction.followup.send(
+            embed=success_embed("AFK-Panel gepostet", f"In {target.mention}: {msg.jump_url}"), ephemeral=True,
+        )
+
+    @spawner_group.command(name="afkpreis", description="Bone-Order-Preis für den AFK-Service setzen (Staff)")
+    @app_commands.describe(preis="Preis pro Bone, z.B. 54 oder 1.5k")
+    async def spawner_afk_price(self, interaction: discord.Interaction, preis: str) -> None:
+        assert interaction.guild is not None
+        try:
+            price = parse_price(preis)
+        except ValueError:
+            await interaction.response.send_message(
+                embed=error_embed("Ungültiger Preis", "Beispiele: `54`, `1.5k`."), ephemeral=True,
+            )
+            return
+        summary = await afk_service.set_bone_price(self.bot, interaction.guild, price)
+        await interaction.response.send_message(embed=success_embed("Bone-Preis gesetzt", summary), ephemeral=True)
 
     @spawner_group.command(name="rolle", description="Staff-Rolle für Spawner-Tickets setzen")
     @app_commands.describe(rolle="Rolle, die in Spawner-Tickets gepingt wird")

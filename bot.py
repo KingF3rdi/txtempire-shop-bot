@@ -44,6 +44,7 @@ class ShopBot(commands.Bot):
             "cogs.tweak_vouch_setup",
             "cogs.custom_pack",
             "cogs.spawner_shop",
+            "cogs.afk_service",
             "cogs.duel_invsee",
             "cogs.schematic_shop",
             "cogs.boost_support",
