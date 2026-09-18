@@ -11,6 +11,9 @@ Abrechnung (alles in config.py per .env änderbar):
   - config.AFK_CUSTOMER_PERCENT (75) Anteil des Kunden am Erlös
   -> ein Spawner = 3.6 * 60 * 22 = 4.752 Bones pro Tag
   - Bone-Order-Preis wird von Staff gesetzt (/spawner afkpreis).
+  - Eigene Support-Rolle (/spawner afkrolle): sieht/pingt die AFK-Tickets und
+    darf Spawner eintragen, auszahlen und schließen; sonst gilt die normale
+    Shop-Staff-Rolle.
 
 Ablauf:
   - Panel (/spawner afkpanel): Infotext + "Formular ausfüllen" -> Modal
@@ -84,7 +87,8 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             bone_price REAL,
             panel_channel_id INTEGER,
             panel_message_id INTEGER,
-            next_ticket_number INTEGER NOT NULL DEFAULT 1
+            next_ticket_number INTEGER NOT NULL DEFAULT 1,
+            support_role_id INTEGER
         );
         CREATE TABLE IF NOT EXISTS afk_accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,6 +119,10 @@ async def _ensure_tables(bot: "ShopBot") -> None:
         );
         """
     )
+    try:  # bestehende Installationen (idempotent)
+        await bot.db.db.execute("ALTER TABLE afk_settings ADD COLUMN support_role_id INTEGER")
+    except Exception:
+        pass
     await bot.db.db.commit()
 
 
@@ -135,6 +143,39 @@ async def _update_settings(bot: "ShopBot", guild_id: int, **fields) -> None:
 async def get_bone_price(bot: "ShopBot", guild_id: int) -> Optional[float]:
     value = (await _get_settings(bot, guild_id)).get("bone_price")
     return float(value) if value else None
+
+
+async def set_support_role(bot: "ShopBot", guild_id: int, role_id: Optional[int]) -> None:
+    await _update_settings(bot, guild_id, support_role_id=role_id)
+
+
+async def get_support_role_id(bot: "ShopBot", guild_id: int) -> Optional[int]:
+    value = (await _get_settings(bot, guild_id)).get("support_role_id")
+    return int(value) if value else None
+
+
+async def _resolve_support_role(bot: "ShopBot", guild: discord.Guild) -> Optional[discord.Role]:
+    """Eigene AFK-Support-Rolle, falls gesetzt — sonst die normale Shop-Staff-Rolle."""
+    role_id = await get_support_role_id(bot, guild.id)
+    if role_id:
+        role = guild.get_role(role_id)
+        if role is not None:
+            return role
+    settings = await bot.db.ensure_guild(guild.id)
+    staff_role_id = settings.get("staff_role_id")
+    return guild.get_role(int(staff_role_id)) if staff_role_id else None
+
+
+async def _is_afk_staff(bot: "ShopBot", interaction: discord.Interaction) -> bool:
+    """Wie is_staff(), aber die eigene AFK-Support-Rolle zählt zusätzlich."""
+    user = interaction.user
+    if isinstance(user, discord.Member) and user.guild_permissions.administrator:
+        return True
+    if isinstance(user, discord.Member) and interaction.guild is not None:
+        role_id = await get_support_role_id(bot, interaction.guild.id)
+        if role_id and any(r.id == role_id for r in user.roles):
+            return True
+    return await is_staff(bot, interaction)
 
 
 async def _next_ticket_number(bot: "ShopBot", guild_id: int) -> int:
@@ -375,8 +416,7 @@ async def _create_afk_ticket(
     category = guild.get_channel(int(category_id)) if category_id else None
     if category is not None and not isinstance(category, discord.CategoryChannel):
         category = None
-    staff_role_id = settings.get("staff_role_id")
-    staff_role = guild.get_role(int(staff_role_id)) if staff_role_id else None
+    staff_role = await _resolve_support_role(bot, guild)
     me = guild.me
     if me is None:
         await interaction.followup.send(embed=error_embed("Bot-Mitgliedschaft fehlt"), ephemeral=True)
@@ -563,7 +603,7 @@ class AfkTicketView(discord.ui.View):
         return account
 
     async def _staff_or_error(self, interaction: discord.Interaction, hint: str) -> bool:
-        if interaction.guild is not None and await is_staff(self.bot, interaction):
+        if interaction.guild is not None and await _is_afk_staff(self.bot, interaction):
             return True
         await interaction.response.send_message(embed=error_embed("Nur Staff", hint), ephemeral=True)
         return False
@@ -624,7 +664,7 @@ class AfkTicketView(discord.ui.View):
         account = await self._account_or_error(interaction)
         if not account:
             return
-        staff = await is_staff(self.bot, interaction)
+        staff = await _is_afk_staff(self.bot, interaction)
         if not staff and interaction.user.id != int(account["user_id"]):
             await interaction.response.send_message(embed=error_embed("Keine Berechtigung"), ephemeral=True)
             return
@@ -671,7 +711,7 @@ class AfkPanelView(discord.ui.View):
         if interaction.guild is None:
             await interaction.response.send_message(embed=error_embed("Nur auf dem Server"), ephemeral=True)
             return
-        if await is_staff(self.bot, interaction):
+        if await _is_afk_staff(self.bot, interaction):
             await interaction.response.send_message(embed=await _overview_embed(self.bot, interaction.guild), ephemeral=True)
             return
         accounts = await _list_open_accounts(self.bot, interaction.guild.id, interaction.user.id)

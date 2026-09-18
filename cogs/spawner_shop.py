@@ -125,6 +125,18 @@ async def _set_staff_role_id(bot: "ShopBot", guild_id: int, role_id: int) -> Non
     await bot.db.db.commit()
 
 
+async def _is_spawner_staff(bot: "ShopBot", interaction: discord.Interaction) -> bool:
+    """Wie is_staff(), aber die eigene Spawner-Support-Rolle (/spawner rolle) zählt zusätzlich."""
+    user = interaction.user
+    if isinstance(user, discord.Member) and user.guild_permissions.administrator:
+        return True
+    if isinstance(user, discord.Member) and interaction.guild is not None:
+        role_id = await _get_staff_role_id(bot, interaction.guild.id)
+        if role_id and any(r.id == role_id for r in user.roles):
+            return True
+    return await is_staff(bot, interaction)
+
+
 async def _next_ticket_number(bot: "ShopBot", guild_id: int) -> int:
     await bot.db.db.execute(
         "INSERT OR IGNORE INTO spawner_settings (guild_id) VALUES (?)", (guild_id,)
@@ -565,7 +577,7 @@ class SpawnerTicketView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.guild is None:
             return
-        if not await is_staff(self.bot, interaction):
+        if not await _is_spawner_staff(self.bot, interaction):
             await interaction.response.send_message(embed=error_embed("Nur Staff"), ephemeral=True)
             return
         row = await _get_ticket_by_channel(self.bot, interaction.channel_id)
@@ -592,7 +604,7 @@ class SpawnerTicketView(discord.ui.View):
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.guild is None:
             return
-        if not await is_staff(self.bot, interaction):
+        if not await _is_spawner_staff(self.bot, interaction):
             await interaction.response.send_message(embed=error_embed("Nur Staff"), ephemeral=True)
             return
         row = await _get_ticket_by_channel(self.bot, interaction.channel_id)
@@ -618,7 +630,7 @@ class SpawnerTicketView(discord.ui.View):
         if not row:
             await interaction.response.send_message(embed=error_embed("Kein Spawner-Ticket"), ephemeral=True)
             return
-        staff = await is_staff(self.bot, interaction)
+        staff = await _is_spawner_staff(self.bot, interaction)
         is_owner = row.get("user_id") and interaction.user.id == int(row["user_id"])
         if not staff and not is_owner:
             await interaction.response.send_message(embed=error_embed("Keine Berechtigung"), ephemeral=True)
@@ -881,6 +893,30 @@ class SpawnerShopCog(commands.Cog):
                 f"Standard-Spawner mit Icons angelegt: {names}.\n"
                 "Preise setzt du mit `/spawner setzen` (z. B. `name:Skeleton ankauf:12.5m verkauf:STOP`).\n\n"
                 f"{panel_note}",
+            ),
+            ephemeral=True,
+        )
+
+    @spawner_group.command(name="afkrolle", description="Eigene Support-Rolle für den AFK-Service setzen (Staff)")
+    @app_commands.describe(
+        rolle="Rolle, die AFK-Tickets sieht/gepingt wird und bestätigen, auszahlen, schließen darf. Leer = unverändert",
+        entfernen="Eigene Rolle entfernen (Fallback: normale Shop-Staff-Rolle)",
+    )
+    async def spawner_afk_role(
+        self, interaction: discord.Interaction, rolle: Optional[discord.Role] = None, entfernen: bool = False,
+    ) -> None:
+        assert interaction.guild is not None
+        if entfernen:
+            await afk_service.set_support_role(self.bot, interaction.guild.id, None)
+        elif rolle is not None:
+            await afk_service.set_support_role(self.bot, interaction.guild.id, rolle.id)
+        current_id = await afk_service.get_support_role_id(self.bot, interaction.guild.id)
+        current = interaction.guild.get_role(current_id) if current_id else None
+        await interaction.response.send_message(
+            embed=success_embed(
+                "AFK-Support-Rolle",
+                f"Support-Rolle: {current.mention}" if current
+                else "Support-Rolle: **nicht gesetzt** (Fallback: normale Shop-Staff-Rolle aus `/setup`)",
             ),
             ephemeral=True,
         )
