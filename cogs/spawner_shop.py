@@ -16,8 +16,8 @@ Ablauf: Panel mit "Kaufen"/"Verkaufen"-Buttons -> Auswahl-Menü der
 verfügbaren Spawner für die Richtung -> Modal (Menge + Ingame-Name) ->
 privates Ticket wird erstellt, genau wie bei custom_pack.py/gputweaks_keys.py.
 
-Das Panel ist ein gerendertes Bild (utils/spawner_panel_image.py) mit einer
-Karte pro Spawner; es wird bei jeder Preisänderung automatisch aktualisiert
+Das Panel ist standardmäßig ein gerendertes Bild (utils/spawner_panel_image.py)
+mit einer Karte pro Spawner, alternativ ein normales Text-Panel (/spawnerpanel stil:); es wird bei jeder Preisänderung automatisch aktualisiert
 (Panel-Nachricht wird in spawner_settings gemerkt) bzw. per Button.
 
 Außerdem hängen hier /spawner afkpanel und /spawner afkpreis für den
@@ -218,17 +218,32 @@ def _price_line(s: dict) -> str:
 def _panel_embed(spawners: list[dict]) -> discord.Embed:
     """Text-Fallback, falls das Bild nicht gerendert werden kann."""
     body = "\n".join(_price_line(s) for s in spawners) or "_Noch keine Spawner konfiguriert._"
-    return base_embed(
+    embed = base_embed(
         "🧱 Spawner-Shop",
         "Kaufe oder verkaufe Spawner direkt beim Team — nur für Trusted Traders.\n\n"
         f"{body}\n\n"
         "📥 Ankauf = wir kaufen dir ab · 📤 Verkauf = du kaufst von uns.",
     )
+    embed.color = discord.Color(PANEL_COLOR)
+    embed.set_footer(text="TxtEmpire · Preise zuletzt aktualisiert")
+    embed.timestamp = discord.utils.utcnow()
+    return embed
 
 
-async def _build_panel_message(bot: "ShopBot", guild_id: int) -> tuple[discord.Embed, Optional[discord.File]]:
-    """Panel als Bild-Embed (mit Datei) — bei Renderfehler Text-Embed ohne Datei."""
+def _message_style(message: discord.Message) -> str:
+    """"image" wenn das Panel ein Bild-Embed ist, sonst "text" — so behält jedes
+    Panel beim Aktualisieren seinen Stil."""
+    return "image" if message.embeds and message.embeds[0].image else "text"
+
+
+async def _build_panel_message(
+    bot: "ShopBot", guild_id: int, style: str = "image",
+) -> tuple[discord.Embed, Optional[discord.File]]:
+    """Panel als Bild-Embed (mit Datei) bzw. bei style="text" als normales
+    Text-Embed — auch bei Renderfehler Text-Embed ohne Datei."""
     spawners = await list_spawners(bot, guild_id)
+    if style == "text":
+        return _panel_embed(spawners), None
     try:
         from utils.spawner_panel_image import render_spawner_panel
 
@@ -238,7 +253,7 @@ async def _build_panel_message(bot: "ShopBot", guild_id: int) -> tuple[discord.E
         return _panel_embed(spawners), None
     import io
 
-    embed = discord.Embed(color=0xEC4899, timestamp=discord.utils.utcnow())
+    embed = discord.Embed(color=PANEL_COLOR, timestamp=discord.utils.utcnow())
     embed.set_image(url="attachment://spawner_panel.png")
     embed.set_footer(text="TxtEmpire · Preise zuletzt aktualisiert")
     return embed, discord.File(io.BytesIO(png), filename="spawner_panel.png")
@@ -267,12 +282,13 @@ async def _refresh_registered_panel(bot: "ShopBot", guild: discord.Guild) -> Non
         return
     try:
         msg = await channel.fetch_message(int(row["panel_message_id"]))
-        embed, file = await _build_panel_message(bot, guild.id)
+        embed, file = await _build_panel_message(bot, guild.id, _message_style(msg))
         await msg.edit(embed=embed, attachments=[file] if file else [], view=SpawnerPanelView(bot))
     except discord.HTTPException:
         pass
 
 
+PANEL_COLOR = 0xEC4899
 _last_panel_refresh: dict[int, float] = {}
 PANEL_REFRESH_COOLDOWN = 10.0
 
@@ -612,7 +628,8 @@ class SpawnerPanelView(discord.ui.View):
             return
         _last_panel_refresh[interaction.guild.id] = now
         await interaction.response.defer()
-        embed, file = await _build_panel_message(self.bot, interaction.guild.id)
+        style = _message_style(interaction.message) if interaction.message else "image"
+        embed, file = await _build_panel_message(self.bot, interaction.guild.id, style)
         await interaction.edit_original_response(embed=embed, attachments=[file] if file else [], view=self)
 
 
@@ -630,10 +647,18 @@ class SpawnerShopCog(commands.Cog):
     @app_commands.command(
         name="spawnerpanel", description="Spawner-Shop-Panel posten (Staff)",
     )
-    @app_commands.describe(channel="Ziel-Channel (Standard: aktuell)")
+    @app_commands.describe(
+        channel="Ziel-Channel (Standard: aktuell)",
+        stil="Bild-Panel mit Karten (Standard) oder normales Text-Panel",
+    )
+    @app_commands.choices(stil=[
+        app_commands.Choice(name="Bild (Karten mit Icons)", value="image"),
+        app_commands.Choice(name="Normal (Text)", value="text"),
+    ])
     @app_commands.default_permissions(manage_guild=True)
     async def spawnerpanel(
         self, interaction: discord.Interaction, channel: discord.TextChannel | None = None,
+        stil: Optional[app_commands.Choice[str]] = None,
     ) -> None:
         assert interaction.guild is not None
         target = channel
@@ -643,7 +668,9 @@ class SpawnerShopCog(commands.Cog):
             await interaction.response.send_message(embed=error_embed("Kein Channel"), ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        embed, file = await _build_panel_message(self.bot, interaction.guild.id)
+        embed, file = await _build_panel_message(
+            self.bot, interaction.guild.id, stil.value if stil else "image",
+        )
         msg = await target.send(
             embed=embed, view=SpawnerPanelView(self.bot), **({"file": file} if file else {}),
         )
