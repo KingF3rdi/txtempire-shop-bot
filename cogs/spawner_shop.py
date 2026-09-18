@@ -20,6 +20,9 @@ Das Panel ist standardmäßig ein gerendertes Bild (utils/spawner_panel_image.py
 mit einer Karte pro Spawner, alternativ ein normales Text-Panel (/spawnerpanel stil:); es wird bei jeder Preisänderung automatisch aktualisiert
 (Panel-Nachricht wird in spawner_settings gemerkt) bzw. per Button.
 
+Beim ersten Zugriff werden die Standard-Spawner (Skeleton, Creeper, Iron Golem,
+Blaze, Cow, Spider, Zombie Piglin) mit STOP-Preisen vorkonfiguriert.
+
 Außerdem hängen hier /spawner afkpanel und /spawner afkpreis für den
 Spawner-AFK-Service (Logik in cogs/afk_service.py).
 
@@ -95,6 +98,7 @@ async def _ensure_tables(bot: "ShopBot") -> None:
     for stmt in (
         "ALTER TABLE spawner_settings ADD COLUMN panel_channel_id INTEGER",
         "ALTER TABLE spawner_settings ADD COLUMN panel_message_id INTEGER",
+        "ALTER TABLE spawner_settings ADD COLUMN defaults_seeded INTEGER NOT NULL DEFAULT 0",
     ):
         try:
             await bot.db.db.execute(stmt)
@@ -137,7 +141,44 @@ async def _next_ticket_number(bot: "ShopBot", guild_id: int) -> int:
     return n
 
 
+# Vorkonfigurierte Spawner (Icons in assets/spawners, siehe utils/spawner_panel_image.py).
+# Preise starten auf STOP (beide Richtungen aus) — Staff setzt sie mit /spawner setzen.
+DEFAULT_SPAWNERS: tuple[tuple[str, str], ...] = (
+    ("Skeleton", "💀"),
+    ("Creeper", "💥"),
+    ("Iron Golem", "🛡️"),
+    ("Blaze", "🔥"),
+    ("Cow", "🐄"),
+    ("Spider", "🕷️"),
+    ("Zombie Piglin", "🐷"),
+)
+
+
+async def _seed_default_spawners(bot: "ShopBot", guild_id: int) -> None:
+    """Legt die Standard-Spawner einmalig an, wenn der Server noch keine hat.
+    Danach nie wieder (auch nicht, wenn Staff alle löscht)."""
+    row = await bot.db.fetchone(
+        "SELECT defaults_seeded FROM spawner_settings WHERE guild_id = ?", (guild_id,)
+    )
+    if row and row["defaults_seeded"]:
+        return
+    await bot.db.db.execute("INSERT OR IGNORE INTO spawner_settings (guild_id) VALUES (?)", (guild_id,))
+    existing = await bot.db.fetchone("SELECT 1 FROM spawners WHERE guild_id = ? LIMIT 1", (guild_id,))
+    if not existing:
+        for order, (name, emoji) in enumerate(DEFAULT_SPAWNERS, start=1):
+            await bot.db.db.execute(
+                "INSERT INTO spawners (guild_id, name, buy_price, sell_price, emoji, sort_order) "
+                "VALUES (?, ?, NULL, NULL, ?, ?)",
+                (guild_id, name, emoji, order),
+            )
+    await bot.db.db.execute(
+        "UPDATE spawner_settings SET defaults_seeded = 1 WHERE guild_id = ?", (guild_id,)
+    )
+    await bot.db.db.commit()
+
+
 async def list_spawners(bot: "ShopBot", guild_id: int) -> list[dict]:
+    await _seed_default_spawners(bot, guild_id)
     rows = await bot.db.fetchall(
         "SELECT * FROM spawners WHERE guild_id = ? ORDER BY sort_order ASC, name ASC",
         (guild_id,),
