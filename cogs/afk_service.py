@@ -187,14 +187,14 @@ async def _apply_delta(bot: "ShopBot", account: dict, delta: int) -> dict:
 def _panel_embed(bone_price: Optional[float]) -> discord.Embed:
     pct = config.AFK_CUSTOMER_PERCENT
     uptime = config.AFK_UPTIME_HOURS
-    price_txt = f"**{format_price(bone_price)}** pro Bone" if bone_price else "_wird von Staff festgelegt_"
+    price_txt = f": **{format_price(bone_price)}** pro Bone" if bone_price else ""
     return base_embed(
         "Spawner AFK Service",
         f"Wir, die Owner von **TxtEmpire** (Ferdi & Team), AFKn deine Spawner für dich. "
         f"Du erhältst **{pct:g}% vom Gewinn** bei einer garantierten Auslastung von **{uptime:g}h pro Tag**.\n\n"
         "**Wie wird der Gewinn berechnet?**\n"
         "Wir nutzen keinen externen Rechner, sondern den aktuellen Bone-Order-Preis "
-        f"(aktuell: {price_txt}). Pro Skeleton-Spawner entstehen **{config.AFK_BONES_PER_MIN:g} Bones pro Minute**, "
+        f"(aktueller Bone Order Preis{price_txt}). Pro Skeleton-Spawner entstehen **{config.AFK_BONES_PER_MIN:g} Bones pro Minute**, "
         f"gerechnet auf **{uptime:g}h Uptime** pro Tag — das sind **{_fmt_int(bones_per_spawner_per_day())} Bones "
         f"pro Spawner und Tag**. Bones × Bone-Preis = Erlös, davon bekommst du {pct:g}%.\n\n"
         "**Wie sicher sind die Spawner?**\n"
@@ -205,9 +205,7 @@ def _panel_embed(bone_price: Optional[float]) -> discord.Embed:
         "Die Versicherung ist ein optionales zusätzliches Angebot von uns, ohne Gebühren. Du legst einen "
         "kleinen Teil deines Gewinns zur Seite, wir legen denselben Betrag nochmal oben drauf (bis 5%). "
         "Aus 1000$ von dir werden so 2000$ Schutz.\n\n"
-        "Das Geld liegt sicher auf einem extra 2FA-Account und wird ausgezahlt, falls deine Spawner "
-        "verloren gehen. Deinen Anteil kannst du jederzeit zurückholen. Zum Einrichten sprich uns einfach "
-        "im Ticket an.\n\n"
+        "Das Geld wird jeden Tag ausgezahlt, optimalerweise zur gleichen Uhrzeit.\n\n"
         "**Wie viele Spawner muss ich haben?**\n"
         "Wir bevorzugen Anfragen mit größeren Mengen an Spawnern, z.B. 100+, können aber auch vereinzelt "
         "kleinere Mengen annehmen.",
