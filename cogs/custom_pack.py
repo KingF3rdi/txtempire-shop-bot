@@ -21,6 +21,12 @@ CUSTOM_SKY_INGAME_PRICE) — Zahlung per /pay, wird wie beim Haupt-Shop
 automatisch erkannt (utils/mc_order_match.py), Staff bestätigt danach wie
 gewohnt per Button.
 
+Rabatt-/Creator-Codes: optionales Feld im Formular. Prozent-Codes senken Echtgeld-
+UND Ingame-Preis, Betrags-Codes (definiert in Shop-Währung) nur den Ingame-Preis.
+Nutzung wird wie im Haupt-Shop gezählt (Gesamt- und Pro-User-Limit) und bei
+abgelehnten/geschlossenen Tickets wieder freigegeben. Bei "Preis auf Anfrage"
+rechnet Staff den Rabatt auf den genannten Preis an.
+
 Ablauf:
   - Kunde klickt "📦 Pack anfragen" oder "🌌 Sky anfragen" -> Modal ->
     privates Ticket wird erstellt (fortlaufend nummeriert), zeigt beide
@@ -104,6 +110,9 @@ async def _ensure_table(bot: "ShopBot") -> None:
             price REAL,
             kind TEXT NOT NULL DEFAULT 'texturepack',
             ingame_price REAL,
+            discount_code_id INTEGER,
+            discount_code TEXT,
+            discount_note TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'pending',
             ticket_channel_id INTEGER,
             created_by INTEGER,
@@ -121,6 +130,9 @@ async def _ensure_table(bot: "ShopBot") -> None:
     for stmt in (
         "ALTER TABLE pack_orders ADD COLUMN kind TEXT NOT NULL DEFAULT 'texturepack'",
         "ALTER TABLE pack_orders ADD COLUMN ingame_price REAL",
+        "ALTER TABLE pack_orders ADD COLUMN discount_code_id INTEGER",
+        "ALTER TABLE pack_orders ADD COLUMN discount_code TEXT",
+        "ALTER TABLE pack_orders ADD COLUMN discount_note TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE pack_settings ADD COLUMN support_role_id INTEGER",
     ):
         try:
@@ -206,14 +218,18 @@ async def _is_pack_staff(bot: "ShopBot", interaction: discord.Interaction) -> bo
 async def _create_order(
     bot: "ShopBot", guild_id: int, user_id: int, qty: int, description: str, price: Optional[float],
     *, kind: str, ingame_price: float,
+    code_id: Optional[int] = None, code: Optional[str] = None, discount_note: str = "",
 ) -> tuple[int, int]:
     order_number = await _next_order_number(bot, guild_id)
     cur = await bot.db.db.execute(
         """
-        INSERT INTO pack_orders (guild_id, order_number, user_id, qty, description, price, kind, ingame_price, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        INSERT INTO pack_orders
+            (guild_id, order_number, user_id, qty, description, price, kind, ingame_price,
+             discount_code_id, discount_code, discount_note, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
         """,
-        (guild_id, order_number, user_id, qty, description, price, kind, ingame_price),
+        (guild_id, order_number, user_id, qty, description, price, kind, ingame_price,
+         code_id, code, discount_note),
     )
     await bot.db.db.commit()
     return int(cur.lastrowid), order_number  # type: ignore[arg-type]
@@ -245,6 +261,9 @@ async def _mark_confirmed(bot: "ShopBot", order_id: int, staff_id: int) -> None:
 
 
 async def _mark_rejected(bot: "ShopBot", order_id: int, staff_id: int) -> None:
+    row = await bot.db.fetchone(
+        "SELECT status, discount_code_id FROM pack_orders WHERE id = ?", (order_id,)
+    )
     await bot.db.db.execute(
         """
         UPDATE pack_orders SET status = 'rejected', created_by = ?, confirmed_at = datetime('now')
@@ -253,6 +272,53 @@ async def _mark_rejected(bot: "ShopBot", order_id: int, staff_id: int) -> None:
         (staff_id, order_id),
     )
     await bot.db.db.commit()
+    if row and row["status"] == "pending" and row["discount_code_id"]:
+        await bot.db.decrement_code_use(int(row["discount_code_id"]))  # reservierte Nutzung freigeben
+
+
+async def _apply_code(
+    bot: "ShopBot", guild_id: int, user_id: int, raw: str, price: Optional[float], ingame_price: float,
+) -> dict:
+    """Prüft einen Rabatt-/Creator-Code, reserviert eine Nutzung und liefert die neuen Preise.
+    Wirft ValueError mit einer für den Kunden lesbaren Meldung."""
+    from utils.discount_codes import compute_code_discount, format_code_discount
+
+    row = await bot.db.get_discount_code(guild_id, raw)
+    if not row or not int(row.get("active") or 0):
+        raise ValueError("Dieser Code existiert nicht oder ist inaktiv.")
+    max_per = int(row.get("max_per_user") or 1)
+    if await bot.db.count_user_code_uses(guild_id, int(row["id"]), user_id) >= max_per:
+        raise ValueError(f"Du kannst `{row['code']}` max. **{max_per}×** nutzen.")
+
+    dtype, dvalue = str(row["discount_type"]), float(row["discount_value"])
+    try:
+        new_ingame, _ = compute_code_discount(ingame_price, dtype, dvalue)
+    except ValueError as e:
+        raise ValueError(f"Rabatt nicht anwendbar: {e}") from e
+    # Betrags-Codes sind in Shop-Währung definiert -> nie auf den kleinen Echtgeld-Preis anwenden.
+    new_price = price
+    if price is not None and dtype == "percent":
+        try:
+            new_price, _ = compute_code_discount(price, dtype, dvalue)
+        except ValueError:  # Rabatt zu klein für den Echtgeld-Preis (Rundung)
+            new_price = price
+
+    if not await bot.db.try_increment_code_use(int(row["id"])):
+        mx = row.get("max_uses")
+        raise ValueError(f"`{row['code']}` ist ausgeschöpft" + (f" ({mx}×)." if mx is not None else "."))
+
+    if price is None:
+        money = "Echtgeld: Staff rechnet den Rabatt auf den genannten Preis an"
+    elif new_price != price:
+        money = f"Echtgeld {format_price(price)} → **{format_price(new_price)}**"
+    else:
+        money = "Echtgeld-Preis unverändert" + (" (Betrags-Code gilt nur ingame)" if dtype == "amount" else "")
+    label = f" ({row['label']})" if row.get("label") else ""
+    note = (
+        f"`{row['code']}`{label} {format_code_discount(dtype, dvalue)} — {money} · "
+        f"Ingame {format_price(ingame_price)} → **{format_price(new_ingame)}**"
+    )
+    return {"row": row, "price": new_price, "ingame_price": new_ingame, "note": note}
 
 
 async def _resolve_member(guild: discord.Guild, user_id: Optional[int]) -> Optional[discord.Member]:
@@ -279,6 +345,7 @@ def _panel_embed() -> discord.Embed:
         "Beides zusätzlich auch für einen festen Ingame-Betrag kaufbar "
         f"(Pack: **{format_price(config.CUSTOM_PACK_INGAME_PRICE)}**, "
         f"Sky: **{format_price(config.CUSTOM_SKY_INGAME_PRICE)}**) — steht im Ticket.\n\n"
+        "Du hast einen **Rabatt-/Creator-Code**? Trag ihn im Formular ein.\n\n"
         "Klicke einen der Buttons — danach wird ein privates Ticket erstellt.",
     )
 
@@ -295,6 +362,12 @@ class CustomPackRequestModal(discord.ui.Modal, title="Custom Pack anfragen"):
         style=discord.TextStyle.paragraph,
         placeholder="z. B. Schwert, Rüstung, Items ... (optional)",
         max_length=1000,
+        required=False,
+    )
+    code = discord.ui.TextInput(
+        label="Rabatt / Creator Code (optional)",
+        placeholder="z. B. CREATOR10",
+        max_length=32,
         required=False,
     )
 
@@ -318,6 +391,7 @@ class CustomPackRequestModal(discord.ui.Modal, title="Custom Pack anfragen"):
         await _create_pack_ticket_channel(
             self.bot, interaction, qty=qty, description=desc, price=price,
             kind="texturepack", ingame_price=config.CUSTOM_PACK_INGAME_PRICE,
+            code_raw=str(self.code.value).strip(),
         )
 
 
@@ -329,6 +403,12 @@ class CustomSkyRequestModal(discord.ui.Modal, title="Custom Sky anfragen"):
         max_length=1000,
         required=True,
     )
+    code = discord.ui.TextInput(
+        label="Rabatt / Creator Code (optional)",
+        placeholder="z. B. CREATOR10",
+        max_length=32,
+        required=False,
+    )
 
     def __init__(self, bot: "ShopBot") -> None:
         super().__init__()
@@ -339,6 +419,7 @@ class CustomSkyRequestModal(discord.ui.Modal, title="Custom Sky anfragen"):
         await _create_pack_ticket_channel(
             self.bot, interaction, qty=1, description=desc, price=config.CUSTOM_SKY_PRICE,
             kind="sky", ingame_price=config.CUSTOM_SKY_INGAME_PRICE,
+            code_raw=str(self.code.value).strip(),
         )
 
 
@@ -351,6 +432,7 @@ async def _create_pack_ticket_channel(
     price: Optional[float],
     kind: str,
     ingame_price: float,
+    code_raw: str = "",
 ) -> None:
     guild = interaction.guild
     assert guild is not None
@@ -389,9 +471,24 @@ async def _create_pack_ticket_channel(
     if staff_role:
         overwrites[staff_role] = staff_perms
 
+    code_row: Optional[dict] = None
+    discount_note = ""
+    if code_raw:
+        try:
+            applied = await _apply_code(bot, guild.id, interaction.user.id, code_raw, price, ingame_price)
+        except ValueError as e:
+            await interaction.followup.send(embed=error_embed("Code nicht nutzbar", str(e)), ephemeral=True)
+            return
+        code_row, price, ingame_price, discount_note = (
+            applied["row"], applied["price"], applied["ingame_price"], applied["note"],
+        )
+
     order_id, order_number = await _create_order(
         bot, guild.id, interaction.user.id, qty, description, price,
         kind=kind, ingame_price=ingame_price,
+        code_id=int(code_row["id"]) if code_row else None,
+        code=str(code_row["code"]) if code_row else None,
+        discount_note=discount_note,
     )
 
     is_sky = kind == "sky"
@@ -405,6 +502,7 @@ async def _create_pack_ticket_channel(
             reason=f"Custom-{'Sky' if is_sky else 'Pack'}-Ticket von {interaction.user}",
         )
     except discord.HTTPException as e:
+        await _mark_rejected(bot, order_id, 0)  # Bestellung verwerfen + Code-Nutzung freigeben
         await interaction.followup.send(embed=error_embed("Channel fehlgeschlagen", str(e)[:400]), ephemeral=True)
         return
 
@@ -427,6 +525,7 @@ async def _create_pack_ticket_channel(
         f"Käufer: {interaction.user.mention}\n"
         f"{qty_line}"
         f"Preis: **{price_txt}**\n"
+        + (f"🏷️ **Code:** {discount_note}\n" if discount_note else "")
         + (f"Beschreibung: {description}\n" if description else "")
         + f"\n**{config.PAYMENT_NOTICE}**\n"
         f"{money_line}\n\n"

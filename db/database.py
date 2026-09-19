@@ -1551,7 +1551,20 @@ class Database:
             """,
             (guild_id, code_id, user_id),
         )
-        return int(row["cnt"]) if row else 0
+        total = int(row["cnt"]) if row else 0
+        try:  # Custom-Pack/Sky-Bestellungen (cogs/custom_pack.py) zählen mit
+            prow = await self.fetchone(
+                """
+                SELECT COUNT(*) AS cnt FROM pack_orders
+                WHERE guild_id = ? AND discount_code_id = ? AND user_id = ?
+                  AND status != 'rejected'
+                """,
+                (guild_id, code_id, user_id),
+            )
+            total += int(prow["cnt"]) if prow else 0
+        except Exception:  # Tabelle/Spalte existiert (noch) nicht
+            pass
+        return total
 
     async def try_increment_code_use(self, code_id: int) -> bool:
         cur = await self.db.execute(
