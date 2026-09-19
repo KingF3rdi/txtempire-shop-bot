@@ -26,6 +26,15 @@ Ablauf:
   - 💸 Auszahlen (Staff): schreibt die aufgelaufenen Bones ab, postet die
     Auszahlungs-Nachricht samt /pay-Befehl und setzt die Aufzeichnung zurück.
 
+Ticket-Panel (erste Nachricht im Ticket): Willkommenstext, Felder (Kunde,
+Minecraft-Name, Status, Aktuell bei uns, Ausgezahlt bisher, Verantwortlicher,
+Versicherung, Notiz), Banner und die Buttons Kontoauszug / Aktualisieren /
+Versicherung einrichten / Auftrag bearbeiten (+ die Staff-Aktionen). Das Panel
+aktualisiert sich nach Änderungen selbst (panel_message_id).
+
+Versicherung (optional, im Ticket einrichten): Kunde legt 0-5% seiner Auszahlung
+zur Seite, TxtEmpire legt denselben Betrag obendrauf (Schutz = Eingezahlt x 2).
+
 Aufgelaufene Bones werden bei jeder Änderung der Spawner-Anzahl "eingefroren"
 (accrued_bones + accrual_ts), damit Änderungen nie rückwirkend rechnen.
 
@@ -37,7 +46,9 @@ Eigene Tabellen (afk_settings, afk_accounts, afk_payouts).
 from __future__ import annotations
 
 import asyncio
+import io
 import time
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import discord
@@ -51,6 +62,9 @@ if TYPE_CHECKING:
 
 SECONDS_PER_DAY = 86400.0
 MAX_QTY = 100_000
+TICKET_COLOR = 0xEC4899
+INSURANCE_MAX_PERCENT = 5.0
+INSURANCE_MATCH = 2.0  # TxtEmpire legt denselben Betrag obendrauf: Schutz = Eingezahlt x 2
 
 
 # ── Reine Rechenfunktionen ───────────────────────────────────────────────
@@ -75,6 +89,24 @@ def split_revenue(bones: float, bone_price: float) -> tuple[float, float, float]
 
 def _fmt_int(value: float) -> str:
     return f"{int(round(value)):,}".replace(",", ".")
+
+
+def split_insurance(customer_amount: float, percent: float) -> tuple[float, float]:
+    """(Auszahlung an den Kunden, in die Versicherung zurückgelegt)."""
+    insured = customer_amount * max(0.0, min(percent, INSURANCE_MAX_PERCENT)) / 100.0
+    return customer_amount - insured, insured
+
+
+def insurance_current(deposited: float) -> float:
+    return deposited * INSURANCE_MATCH
+
+
+def _ts(created_at: str) -> int:
+    """SQLite-datetime('now') (UTC) -> Unix-Zeit, für Discord-Zeitstempel."""
+    try:
+        return int(datetime.strptime(str(created_at), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return 0
 
 
 # ── DB Bootstrap & Helpers (eigene Tabellen, kein Eingriff in database.py) ──
@@ -103,6 +135,10 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             accrual_ts REAL NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'open',
             ticket_channel_id INTEGER,
+            insurance_percent REAL NOT NULL DEFAULT 0,
+            insurance_deposited REAL NOT NULL DEFAULT 0,
+            responsible_id INTEGER,
+            panel_message_id INTEGER,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS afk_payouts (
@@ -114,15 +150,24 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             revenue REAL NOT NULL,
             customer_percent REAL NOT NULL,
             customer_amount REAL NOT NULL,
+            insurance_amount REAL NOT NULL DEFAULT 0,
             staff_id INTEGER,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """
     )
-    try:  # bestehende Installationen (idempotent)
-        await bot.db.db.execute("ALTER TABLE afk_settings ADD COLUMN support_role_id INTEGER")
-    except Exception:
-        pass
+    for stmt in (  # bestehende Installationen (idempotent)
+        "ALTER TABLE afk_settings ADD COLUMN support_role_id INTEGER",
+        "ALTER TABLE afk_accounts ADD COLUMN insurance_percent REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE afk_accounts ADD COLUMN insurance_deposited REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE afk_accounts ADD COLUMN responsible_id INTEGER",
+        "ALTER TABLE afk_accounts ADD COLUMN panel_message_id INTEGER",
+        "ALTER TABLE afk_payouts ADD COLUMN insurance_amount REAL NOT NULL DEFAULT 0",
+    ):
+        try:
+            await bot.db.db.execute(stmt)
+        except Exception:
+            pass
     await bot.db.db.commit()
 
 
@@ -210,17 +255,59 @@ async def _list_open_accounts(bot: "ShopBot", guild_id: int, user_id: Optional[i
     return [dict(r) for r in rows]
 
 
-async def _apply_delta(bot: "ShopBot", account: dict, delta: int) -> dict:
-    """Ändert die Spawner-Anzahl und friert dabei den bisher aufgelaufenen Stand ein."""
+async def _apply_delta(bot: "ShopBot", account: dict, delta: int, staff_id: Optional[int] = None) -> dict:
+    """Ändert die Spawner-Anzahl und friert dabei den bisher aufgelaufenen Stand ein.
+    Der erste Staff, der etwas ändert, wird "Verantwortlicher" (falls noch keiner gesetzt ist)."""
     now = time.time()
     pending = pending_bones(account, now)
     new_count = int(account["spawner_count"]) + delta
     await bot.db.db.execute(
-        "UPDATE afk_accounts SET spawner_count = ?, accrued_bones = ?, accrual_ts = ? WHERE id = ?",
-        (new_count, pending, now, account["id"]),
+        "UPDATE afk_accounts SET spawner_count = ?, accrued_bones = ?, accrual_ts = ?, "
+        "responsible_id = COALESCE(responsible_id, ?) WHERE id = ?",
+        (new_count, pending, now, staff_id, account["id"]),
     )
     await bot.db.db.commit()
     return await _get_account(bot, int(account["id"])) or account
+
+
+async def _record_payout(bot: "ShopBot", account: dict, bone_price: float, staff_id: int) -> Optional[dict]:
+    """Schreibt die aufgelaufenen Bones ab (inkl. Versicherungs-Anteil) und setzt die
+    Aufzeichnung zurück. None, wenn noch nichts aufgelaufen ist."""
+    now = time.time()
+    bones = pending_bones(account, now)
+    if bones < 1:
+        return None
+    revenue, customer, shop = split_revenue(bones, bone_price)
+    paid, insured = split_insurance(customer, float(account.get("insurance_percent") or 0))
+    cur = await bot.db.db.execute(
+        """
+        INSERT INTO afk_payouts
+            (guild_id, account_id, bones, bone_price, revenue, customer_percent, customer_amount, insurance_amount, staff_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (account["guild_id"], account["id"], bones, bone_price, revenue, config.AFK_CUSTOMER_PERCENT, customer, insured, staff_id),
+    )
+    deposited = float(account.get("insurance_deposited") or 0) + insured
+    await bot.db.db.execute(
+        "UPDATE afk_accounts SET accrued_bones = 0, accrual_ts = ?, insurance_deposited = ?, "
+        "responsible_id = COALESCE(responsible_id, ?) WHERE id = ?",
+        (now, deposited, staff_id, account["id"]),
+    )
+    await bot.db.db.commit()
+    return {
+        "payout_id": int(cur.lastrowid),  # type: ignore[arg-type]
+        "bones": bones, "revenue": revenue, "customer": customer, "shop": shop,
+        "paid": paid, "insured": insured, "deposited": deposited,
+    }
+
+
+async def _payout_stats(bot: "ShopBot", account_id: int) -> tuple[int, float]:
+    """(Anzahl Auszahlungen, insgesamt an den Kunden ausgezahlt — ohne Versicherungs-Anteil)."""
+    row = await bot.db.fetchone(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(customer_amount - insurance_amount), 0) AS paid "
+        "FROM afk_payouts WHERE account_id = ?", (account_id,),
+    )
+    return (int(row["n"]), float(row["paid"])) if row else (0, 0.0)
 
 
 # ── Embeds ───────────────────────────────────────────────────────────────
@@ -285,11 +372,17 @@ def _status_embed(account: dict, bone_price: Optional[float]) -> discord.Embed:
     embed.add_field(name="… pro Woche", value=f"**{format_price(cust_day * 7)}**", inline=True)
     embed.add_field(name="​", value="​", inline=True)
     since = int(float(account["accrual_ts"])) if account.get("accrual_ts") else None
+    ipct = float(account.get("insurance_percent") or 0)
+    paid_pending, insured_pending = split_insurance(cust_pending, ipct)
     embed.add_field(
         name="Aufgelaufen seit der letzten Auszahlung",
         value=(
             f"{_fmt_int(pending)} Bones → Erlös {format_price(rev_pending)}\n"
             f"**Dein Anteil: {format_price(cust_pending)}**"
+            + (
+                f"\n🛡️ Versicherung ({ipct:g}%): {format_price(insured_pending)} → "
+                f"**Auszahlung: {format_price(paid_pending)}**" if insured_pending > 0 else ""
+            )
             + (f"\n_letzte Änderung <t:{since}:R>_" if since else "")
         ),
         inline=False,
@@ -326,6 +419,105 @@ async def _overview_embed(bot: "ShopBot", guild: discord.Guild) -> discord.Embed
     if len(accounts) > 15:
         body.append(f"… und {len(accounts) - 15} weitere")
     return base_embed("📊 AFK-Service — Übersicht (Staff)", "\n".join(body))
+
+
+async def _ticket_embed(bot: "ShopBot", account: dict) -> discord.Embed:
+    """Erste Nachricht im AFK-Ticket (Panel mit Kundendaten und Stand)."""
+    count = int(account["spawner_count"])
+    n_payouts, paid_total = await _payout_stats(bot, int(account["id"]))
+    deposited = float(account.get("insurance_deposited") or 0)
+    ipct = float(account.get("insurance_percent") or 0)
+    pct = config.AFK_CUSTOMER_PERCENT
+
+    embed = discord.Embed(
+        title="TXTEMPIRE · SPAWNER AFK",
+        description=(
+            f"Willkommen **{account['ign']}**. Wir AFKen deine Spawner. Du bekommst **{pct:g}%** vom Gewinn.\n"
+            "Spawner **abgeben oder zurückholen** klärt ihr hier im Chat. Die Anzahl tragen nur wir ein."
+        ),
+        color=TICKET_COLOR,
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Kunde", value=f"<@{account['user_id']}>", inline=True)
+    embed.add_field(name="Minecraft-Name", value=f"**{account['ign']}**", inline=True)
+    embed.add_field(name="Status", value="**Aktiv**" if count > 0 else "**In Bearbeitung**", inline=True)
+    at_us = f"**{count} × Skeleton**"
+    if not count and account.get("requested_qty"):
+        at_us += f"\n_angefragt: {account['requested_qty']}_"
+    embed.add_field(name="Aktuell bei uns", value=at_us, inline=True)
+    embed.add_field(
+        name="Ausgezahlt bisher",
+        value=f"**{format_price(paid_total)}** in {n_payouts} Auszahlung(en)" if n_payouts else "**—** (noch keine)",
+        inline=True,
+    )
+    embed.add_field(
+        name="Verantwortlicher",
+        value=f"<@{account['responsible_id']}>" if account.get("responsible_id") else "**—**",
+        inline=True,
+    )
+    embed.add_field(
+        name="Versicherung",
+        value=f"**{ipct:g}%**\nEingezahlt: {format_price(deposited)}\nAktuell: {format_price(insurance_current(deposited))}",
+        inline=True,
+    )
+    embed.add_field(name="Notiz", value=(account.get("note") or "—")[:1000], inline=False)
+    embed.set_image(url="attachment://afk_banner.png")
+    embed.set_footer(
+        text=f"Ticket #{account['ticket_number']} · {pct:g}% Anteil · {config.AFK_BONES_PER_MIN:g} Bones/Min · "
+             f"{config.AFK_UPTIME_HOURS:g}h/Tag"
+    )
+    return embed
+
+
+async def _statement_embed(bot: "ShopBot", account: dict) -> discord.Embed:
+    """Kontoauszug: die letzten 10 Auszahlungen samt Summen."""
+    rows = await bot.db.fetchall(
+        "SELECT * FROM afk_payouts WHERE account_id = ? ORDER BY id DESC LIMIT 10", (account["id"],)
+    )
+    n_payouts, paid_total = await _payout_stats(bot, int(account["id"]))
+    deposited = float(account.get("insurance_deposited") or 0)
+    lines = []
+    for r in rows:
+        paid = float(r["customer_amount"]) - float(r["insurance_amount"])
+        line = (
+            f"`#{r['id']}` <t:{_ts(r['created_at'])}:d> · {_fmt_int(r['bones'])} Bones · "
+            f"Erlös {format_price(r['revenue'])} · **Auszahlung {format_price(paid)}**"
+        )
+        if float(r["insurance_amount"]) > 0:
+            line += f" (🛡️ {format_price(r['insurance_amount'])})"
+        lines.append(line)
+    body = (
+        f"Ausgezahlt insgesamt: **{format_price(paid_total)}** in {n_payouts} Auszahlung(en)\n"
+        f"Versicherung: eingezahlt {format_price(deposited)} · Schutz aktuell {format_price(insurance_current(deposited))}\n\n"
+        + ("\n".join(lines) if lines else "_Noch keine Auszahlungen._")
+    )
+    return base_embed(f"📄 Kontoauszug — Ticket #{account['ticket_number']}", body)
+
+
+def _banner_file() -> Optional[discord.File]:
+    try:
+        from utils.spawner_panel_image import render_afk_banner
+
+        return discord.File(io.BytesIO(render_afk_banner()), filename="afk_banner.png")
+    except Exception as e:  # Panel funktioniert auch ohne Banner
+        print(f"[AFK] Banner-Rendering fehlgeschlagen: {e!r}")
+        return None
+
+
+async def _refresh_ticket_panel(bot: "ShopBot", guild: Optional[discord.Guild], account_id: int) -> None:
+    """Aktualisiert die Panel-Nachricht im Ticket (nach Änderungen). Best-effort."""
+    if guild is None:
+        return
+    account = await _get_account(bot, account_id)
+    if not account or not account.get("panel_message_id") or not account.get("ticket_channel_id"):
+        return
+    channel = guild.get_channel(int(account["ticket_channel_id"]))
+    if not isinstance(channel, discord.TextChannel):
+        return
+    try:
+        await channel.get_partial_message(int(account["panel_message_id"])).edit(embed=await _ticket_embed(bot, account))
+    except discord.HTTPException:
+        pass
 
 
 # ── Öffentliche Funktionen (von cogs/spawner_shop.py genutzt) ────────────
@@ -464,23 +656,18 @@ async def _create_afk_ticket(
     await bot.db.db.execute("UPDATE afk_accounts SET ticket_channel_id = ? WHERE id = ?", (channel.id, account_id))
     await bot.db.db.commit()
 
-    bone_price = await get_bone_price(bot, guild.id)
-    price_txt = format_price(bone_price) if bone_price else "wird von Staff festgelegt"
-    embed = base_embed(
-        f"🤖 Spawner AFK Service #{ticket_number}",
-        f"Hallo {interaction.user.mention}, hier ist dein AFK-Service-Ticket.\n\n"
-        f"Ingame-Name: **{ign}**\n"
-        f"Angefragte Spawner: **{qty}** Skeleton-Spawner\n"
-        + (f"Infos: {note}\n" if note else "")
-        + f"\n**Konditionen:** {config.AFK_BONES_PER_MIN:g} Bones/Min pro Spawner · {config.AFK_UPTIME_HOURS:g}h/Tag "
-        f"= {_fmt_int(bones_per_spawner_per_day())} Bones pro Spawner und Tag · Bone-Preis: {price_txt} · "
-        f"Dein Anteil: **{config.AFK_CUSTOMER_PERCENT:g}%**\n\n"
-        "Staff meldet sich hier, um die Übergabe der Spawner ingame abzustimmen. Sobald sie geprüft sind, "
-        "trägt Staff sie mit **➕ Spawner hinzufügen** ein — ab dann läuft die Abrechnung. Deinen aktuellen "
-        "Stand siehst du jederzeit mit **📊 Status**.",
-    )
+    account = await _get_account(bot, account_id)
+    assert account is not None
+    banner = _banner_file()
     mention = staff_role.mention if staff_role else "Staff"
-    await channel.send(content=f"{interaction.user.mention} {mention}", embed=embed, view=AfkTicketView(bot))
+    msg = await channel.send(
+        content=f"{interaction.user.mention} {mention}",
+        embed=await _ticket_embed(bot, account),
+        view=AfkTicketView(bot),
+        **({"file": banner} if banner else {}),
+    )
+    await bot.db.db.execute("UPDATE afk_accounts SET panel_message_id = ? WHERE id = ?", (msg.id, account_id))
+    await bot.db.db.commit()
     await interaction.followup.send(
         embed=success_embed("Ticket erstellt", f"Dein Ticket: {channel.mention}"), ephemeral=True,
     )
@@ -519,7 +706,7 @@ class AfkAdjustModal(discord.ui.Modal):
                 ephemeral=True,
             )
             return
-        updated = await _apply_delta(self.bot, account, amount if self.mode == "add" else -amount)
+        updated = await _apply_delta(self.bot, account, amount if self.mode == "add" else -amount, interaction.user.id)
         bone_price = await get_bone_price(self.bot, int(updated["guild_id"]))
         sign, verb = ("➕", "eingetragen") if self.mode == "add" else ("➖", "ausgetragen")
         await interaction.response.send_message(
@@ -531,6 +718,76 @@ class AfkAdjustModal(discord.ui.Modal):
             )
         )
         await interaction.followup.send(embed=_status_embed(updated, bone_price), ephemeral=True)
+        await _refresh_ticket_panel(self.bot, interaction.guild, int(updated["id"]))
+
+
+class AfkEditModal(discord.ui.Modal, title="Auftrag bearbeiten"):
+    def __init__(self, bot: "ShopBot", account: dict) -> None:
+        super().__init__()
+        self.bot = bot
+        self.account_id = int(account["id"])
+        self.ign = discord.ui.TextInput(
+            label="Minecraft-Name (IGN)", default=account["ign"], max_length=32, required=True,
+        )
+        self.note = discord.ui.TextInput(
+            label="Notiz", style=discord.TextStyle.paragraph, default=account.get("note") or None,
+            placeholder="Standort, Zeitpunkt, Besonderheiten ...", max_length=800, required=False,
+        )
+        self.add_item(self.ign)
+        self.add_item(self.note)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        ign = str(self.ign.value).strip()
+        if not ign:
+            await interaction.response.send_message(embed=error_embed("Minecraft-Name fehlt"), ephemeral=True)
+            return
+        await self.bot.db.db.execute(
+            "UPDATE afk_accounts SET ign = ?, note = ?, responsible_id = ? WHERE id = ? AND status = 'open'",
+            (ign, str(self.note.value).strip(), interaction.user.id, self.account_id),
+        )
+        await self.bot.db.db.commit()
+        await interaction.response.send_message(
+            embed=success_embed("Auftrag aktualisiert", f"Verantwortlich: {interaction.user.mention}"), ephemeral=True,
+        )
+        await _refresh_ticket_panel(self.bot, interaction.guild, self.account_id)
+
+
+class AfkInsuranceModal(discord.ui.Modal, title="Versicherung einrichten"):
+    def __init__(self, bot: "ShopBot", account: dict) -> None:
+        super().__init__()
+        self.bot = bot
+        self.account_id = int(account["id"])
+        self.percent = discord.ui.TextInput(
+            label=f"Anteil deiner Auszahlung in % (0–{INSURANCE_MAX_PERCENT:g})",
+            default=f"{float(account.get('insurance_percent') or 0):g}", placeholder="z.B. 3", max_length=5, required=True,
+        )
+        self.add_item(self.percent)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            value = float(str(self.percent.value).strip().replace(",", "."))
+        except ValueError:
+            value = -1.0
+        if not (0.0 <= value <= INSURANCE_MAX_PERCENT):
+            await interaction.response.send_message(
+                embed=error_embed("Ungültiger Wert", f"Bitte eine Zahl von 0 bis {INSURANCE_MAX_PERCENT:g} eingeben."),
+                ephemeral=True,
+            )
+            return
+        account = await _get_account(self.bot, self.account_id)
+        if not account or account["status"] != "open":
+            await interaction.response.send_message(embed=error_embed("Konto nicht mehr offen"), ephemeral=True)
+            return
+        await self.bot.db.db.execute("UPDATE afk_accounts SET insurance_percent = ? WHERE id = ?", (value, self.account_id))
+        await self.bot.db.db.commit()
+        body = (
+            "Die Versicherung ist **aus** — Auszahlungen laufen wieder ungekürzt. Bereits Eingezahltes bleibt erhalten."
+            if value == 0 else
+            f"Ab jetzt werden **{value:g}%** deiner Auszahlungen zurückgelegt. TxtEmpire legt denselben Betrag "
+            "obendrauf (Schutz = Eingezahltes × 2)."
+        )
+        await interaction.response.send_message(embed=success_embed(f"🛡️ Versicherung: {value:g}%", f"{body}\nVon {interaction.user.mention}."))
+        await _refresh_ticket_panel(self.bot, interaction.guild, self.account_id)
 
 
 class AfkPayoutConfirmView(discord.ui.View):
@@ -547,48 +804,45 @@ class AfkPayoutConfirmView(discord.ui.View):
         if not account or account["status"] != "open" or not bone_price:
             await interaction.response.edit_message(content="Auszahlung nicht möglich (Konto/Bone-Preis).", embed=None, view=None)
             return
-        bones = pending_bones(account, time.time())
-        if bones < 1:
+        result = await _record_payout(self.bot, account, bone_price, interaction.user.id)
+        if result is None:
             await interaction.response.edit_message(content="Noch nichts aufgelaufen.", embed=None, view=None)
             return
-        revenue, customer, shop = split_revenue(bones, bone_price)
-        now = time.time()
-        cur = await self.bot.db.db.execute(
-            """
-            INSERT INTO afk_payouts (guild_id, account_id, bones, bone_price, revenue, customer_percent, customer_amount, staff_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (account["guild_id"], account["id"], bones, bone_price, revenue, config.AFK_CUSTOMER_PERCENT, customer, interaction.user.id),
-        )
-        await self.bot.db.db.execute(
-            "UPDATE afk_accounts SET accrued_bones = 0, accrual_ts = ? WHERE id = ?", (now, account["id"])
-        )
-        await self.bot.db.db.commit()
-        payout_id = int(cur.lastrowid)  # type: ignore[arg-type]
 
         embed = base_embed(
-            f"💰 Geld-Auszahlung #{payout_id}",
+            f"💰 Geld-Auszahlung #{result['payout_id']}",
             f"<@{account['user_id']}> — deine Spawner haben geliefert! 🎉\n"
             "_TxtEmpire behält den Rest und zahlt dir deinen Anteil aus._",
         )
         embed.color = discord.Color.green()
-        embed.add_field(name="Gesamt-Erlös", value=f"**{format_price(revenue)}**", inline=False)
-        embed.add_field(name=f"Dein Anteil ({config.AFK_CUSTOMER_PERCENT:g}%)", value=f"**{format_price(customer)}**", inline=True)
-        embed.add_field(name=f"TxtEmpire ({100 - config.AFK_CUSTOMER_PERCENT:g}%)", value=format_price(shop), inline=True)
+        embed.add_field(name="Gesamt-Erlös", value=f"**{format_price(result['revenue'])}**", inline=False)
+        embed.add_field(name=f"Dein Anteil ({config.AFK_CUSTOMER_PERCENT:g}%)", value=f"**{format_price(result['customer'])}**", inline=True)
+        embed.add_field(name=f"TxtEmpire ({100 - config.AFK_CUSTOMER_PERCENT:g}%)", value=format_price(result["shop"]), inline=True)
+        if result["insured"] > 0:
+            embed.add_field(
+                name=f"🛡️ Versicherung ({float(account['insurance_percent']):g}%)",
+                value=(
+                    f"{format_price(result['insured'])} zurückgelegt · Schutz jetzt "
+                    f"**{format_price(insurance_current(result['deposited']))}**\n"
+                    f"Auszahlung an dich: **{format_price(result['paid'])}**"
+                ),
+                inline=False,
+            )
         embed.add_field(
             name="📊 So wird der Betrag berechnet",
-            value=f"{_fmt_int(bones)} Bones × {format_price(bone_price)} = {format_price(revenue)}",
+            value=f"{_fmt_int(result['bones'])} Bones × {format_price(bone_price)} = {format_price(result['revenue'])}",
             inline=False,
         )
         embed.set_footer(text=f"erfasst von {interaction.user.display_name} · Ticket #{account['ticket_number']}")
         embed.add_field(
             name="💸 /pay-Befehl (Staff)",
-            value=f"```\n/pay {account['ign']} {int(round(customer))}\n```",
+            value=f"```\n/pay {account['ign']} {int(round(result['paid']))}\n```",
             inline=False,
         )
         if interaction.channel is not None and hasattr(interaction.channel, "send"):
             await interaction.channel.send(embed=embed)  # type: ignore[union-attr]
-        await interaction.response.edit_message(content=f"✅ Auszahlung #{payout_id} gepostet.", embed=None, view=None)
+        await interaction.response.edit_message(content=f"✅ Auszahlung #{result['payout_id']} gepostet.", embed=None, view=None)
+        await _refresh_ticket_panel(self.bot, interaction.guild, self.account_id)
 
 
 class AfkTicketView(discord.ui.View):
@@ -608,27 +862,56 @@ class AfkTicketView(discord.ui.View):
         await interaction.response.send_message(embed=error_embed("Nur Staff", hint), ephemeral=True)
         return False
 
-    @discord.ui.button(label="Spawner hinzufügen", style=discord.ButtonStyle.success, custom_id="afk:add", emoji="➕")
+    # Zeile 1: Kunden-Funktionen (wie im Referenz-Panel)
+    @discord.ui.button(label="Kontoauszug", style=discord.ButtonStyle.danger, custom_id="afk:statement", emoji="📄", row=0)
+    async def statement(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if account := await self._account_or_error(interaction):
+            await interaction.response.send_message(embed=await _statement_embed(self.bot, account), ephemeral=True)
+
+    @discord.ui.button(label="Aktualisieren", style=discord.ButtonStyle.danger, custom_id="afk:refresh", emoji="🔄", row=0)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if account := await self._account_or_error(interaction):
+            await interaction.response.edit_message(embed=await _ticket_embed(self.bot, account), view=self)
+
+    @discord.ui.button(label="Versicherung einrichten", style=discord.ButtonStyle.danger, custom_id="afk:insurance", emoji="🛡️", row=0)
+    async def insurance(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        account = await self._account_or_error(interaction)
+        if not account:
+            return
+        if interaction.user.id != int(account["user_id"]) and not await _is_afk_staff(self.bot, interaction):
+            await interaction.response.send_message(embed=error_embed("Keine Berechtigung"), ephemeral=True)
+            return
+        await interaction.response.send_modal(AfkInsuranceModal(self.bot, account))
+
+    @discord.ui.button(label="Auftrag bearbeiten", style=discord.ButtonStyle.secondary, custom_id="afk:edit", emoji="✏️", row=0)
+    async def edit(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self._staff_or_error(interaction, "Änderungen am Auftrag macht Staff — schreib es hier ins Ticket."):
+            return
+        if account := await self._account_or_error(interaction):
+            await interaction.response.send_modal(AfkEditModal(self.bot, account))
+
+    # Zeile 2: Spawner-Verwaltung (Staff) + Status
+    @discord.ui.button(label="Spawner hinzufügen", style=discord.ButtonStyle.success, custom_id="afk:add", emoji="➕", row=1)
     async def add(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await self._staff_or_error(interaction, "Schreib hier im Ticket, wie viele Spawner du übergibst — Staff trägt sie ein."):
             return
         if account := await self._account_or_error(interaction):
             await interaction.response.send_modal(AfkAdjustModal(self.bot, account, "add"))
 
-    @discord.ui.button(label="Spawner entfernen", style=discord.ButtonStyle.danger, custom_id="afk:remove", emoji="➖")
+    @discord.ui.button(label="Spawner entfernen", style=discord.ButtonStyle.secondary, custom_id="afk:remove", emoji="➖", row=1)
     async def remove(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await self._staff_or_error(interaction, "Schreib hier im Ticket, wie viele Spawner du zurück möchtest — Staff trägt sie aus."):
             return
         if account := await self._account_or_error(interaction):
             await interaction.response.send_modal(AfkAdjustModal(self.bot, account, "remove"))
 
-    @discord.ui.button(label="Status", style=discord.ButtonStyle.secondary, custom_id="afk:status", emoji="📊")
+    @discord.ui.button(label="Status", style=discord.ButtonStyle.secondary, custom_id="afk:status", emoji="📊", row=1)
     async def status(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if account := await self._account_or_error(interaction):
             bone_price = await get_bone_price(self.bot, int(account["guild_id"]))
             await interaction.response.send_message(embed=_status_embed(account, bone_price), ephemeral=True)
 
-    @discord.ui.button(label="Auszahlen", style=discord.ButtonStyle.primary, custom_id="afk:payout", emoji="💸")
+    @discord.ui.button(label="Auszahlen", style=discord.ButtonStyle.primary, custom_id="afk:payout", emoji="💸", row=1)
     async def payout(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await self._staff_or_error(interaction, "Nur Staff kann Auszahlungen erfassen."):
             return
@@ -646,18 +929,20 @@ class AfkTicketView(discord.ui.View):
             await interaction.response.send_message(embed=warn_embed("Noch nichts aufgelaufen"), ephemeral=True)
             return
         revenue, customer, shop = split_revenue(bones, bone_price)
+        paid, insured = split_insurance(customer, float(account.get("insurance_percent") or 0))
         await interaction.response.send_message(
             embed=base_embed(
                 "Auszahlung erfassen?",
                 f"{_fmt_int(bones)} Bones × {format_price(bone_price)} = **{format_price(revenue)}**\n"
-                f"Kunde ({config.AFK_CUSTOMER_PERCENT:g}%): **{format_price(customer)}** · Shop: {format_price(shop)}\n\n"
-                "Danach wird der aufgelaufene Stand zurückgesetzt.",
+                f"Kunde ({config.AFK_CUSTOMER_PERCENT:g}%): **{format_price(customer)}** · Shop: {format_price(shop)}\n"
+                + (f"🛡️ Versicherung: {format_price(insured)} → Auszahlung **{format_price(paid)}**\n" if insured > 0 else "")
+                + "\nDanach wird der aufgelaufene Stand zurückgesetzt.",
             ),
             view=AfkPayoutConfirmView(self.bot, int(account["id"])),
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Schließen", style=discord.ButtonStyle.secondary, custom_id="afk:close", emoji="🔒")
+    @discord.ui.button(label="Schließen", style=discord.ButtonStyle.secondary, custom_id="afk:close", emoji="🔒", row=1)
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
             return
@@ -738,6 +1023,12 @@ def _self_check() -> None:
     assert abs(pending_bones(frozen, 1000.0 + 2 * SECONDS_PER_DAY) - (47_520 + 95_040)) < 1e-6
     assert pending_bones(day, 500.0) == 0.0  # keine negative Zeit
     assert _fmt_int(1234567) == "1.234.567"
+    assert split_insurance(1000, 5) == (950.0, 50.0)
+    assert split_insurance(1000, 0) == (1000.0, 0.0)
+    assert split_insurance(1000, 50) == (950.0, 50.0)  # auf 5% gedeckelt
+    assert split_insurance(1000, -3) == (1000.0, 0.0)
+    assert insurance_current(50) == 100  # "Aus 1000$ von dir werden 2000$ Schutz"
+    assert _ts("2026-09-19 12:00:00") == 1789819200 and _ts("kaputt") == 0
 
 
 async def setup(bot: "ShopBot") -> None:

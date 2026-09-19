@@ -170,13 +170,13 @@ def _draw_spawner_icon(draw: ImageDraw.ImageDraw, cx: int, cy: int, size: int, c
 
 
 @lru_cache(maxsize=32)
-def _load_icon(filename: str) -> Optional[Image.Image]:
+def _load_icon(filename: str, height: int = ICON_HEIGHT) -> Optional[Image.Image]:
     try:
         icon = Image.open(ASSETS_DIR / filename).convert("RGBA")
     except OSError:
         return None
-    width = max(1, round(icon.width * ICON_HEIGHT / icon.height))
-    return icon.resize((width, ICON_HEIGHT), Image.LANCZOS)
+    width = max(1, round(icon.width * height / icon.height))
+    return icon.resize((width, height), Image.LANCZOS)
 
 
 def _icon_for(name: str) -> Optional[Image.Image]:
@@ -315,6 +315,39 @@ def render_spawner_panel(spawners: list[dict], brand: str = "TXTEMPIRE") -> byte
     return out.getvalue()
 
 
+@lru_cache(maxsize=1)
+def render_afk_banner(brand: str = "TXTEMPIRE") -> bytes:
+    """Banner für das AFK-Ticket-Panel: Marke, 'SPAWNER AFK SERVICE'-Band, Skeleton-Spawner links/rechts."""
+    height = 260
+    img = _background(height)
+    draw = ImageDraw.Draw(img, "RGBA")
+    cx = WIDTH // 2
+
+    icon = _load_icon("skeleton.png", 176)
+    if icon is not None:
+        img.paste(icon, (20, (height - icon.height) // 2), icon)
+        img.paste(icon.transpose(Image.FLIP_LEFT_RIGHT), (WIDTH - 20 - icon.width, (height - icon.height) // 2), icon.transpose(Image.FLIP_LEFT_RIGHT))
+
+    _center_text(draw, cx, 42, brand, _font(92), GOLD, stroke=3, stroke_fill=GOLD_DARK)
+
+    ribbon_font = _font(28)
+    parts = (("SPAWNER ", WHITE), ("AFK", GOLD), (" SERVICE", WHITE))
+    widths = [_text_w(draw, text, ribbon_font) for text, _ in parts]
+    total = sum(widths)
+    ry = 168
+    draw.rounded_rectangle([cx - total // 2 - 40, ry, cx + total // 2 + 40, ry + 54], radius=27, fill=(190, 40, 110, 255), outline=(255, 170, 215, 255), width=3)
+    x = cx - total / 2
+    box = draw.textbbox((0, 0), "SPAWNER", font=ribbon_font)
+    ty = ry + (54 - (box[3] - box[1])) / 2 - box[1]
+    for (text, color), w in zip(parts, widths):
+        draw.text((x, ty), text, font=ribbon_font, fill=color)
+        x += w
+
+    out = io.BytesIO()
+    img.convert("RGB").save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
 def _self_check() -> None:
     """ponytail: Render läuft für leere/volle/ungewöhnliche Eingaben durch und liefert ein PNG."""
     sample = [
@@ -335,6 +368,8 @@ def _self_check() -> None:
     for alias in ("Kuh", "Spinne", "Eisengolem", "Skelett", "Lohe", "Zombified Piglin"):
         assert _icon_for(alias) is not None, f"Alias fehlt: {alias}"
     assert _icon_for("Enderman") is None  # ohne Icon -> gezeichneter Würfel
+    banner = render_afk_banner()
+    assert banner[:8] == b"\x89PNG\r\n\x1a\n" and Image.open(io.BytesIO(banner)).size == (WIDTH, 260)
 
 
 if __name__ == "__main__":
