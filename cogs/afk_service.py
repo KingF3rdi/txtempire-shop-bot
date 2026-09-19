@@ -91,6 +91,11 @@ def _fmt_int(value: float) -> str:
     return f"{int(round(value)):,}".replace(",", ".")
 
 
+def _period_start(account: dict) -> float:
+    """Beginn des laufenden Abrechnungszeitraums = letzte Auszahlung (sonst Anlage/letzte Änderung)."""
+    return float(account.get("last_payout_ts") or account.get("accrual_ts") or 0)
+
+
 def split_insurance(customer_amount: float, percent: float) -> tuple[float, float]:
     """(Auszahlung an den Kunden, in die Versicherung zurückgelegt)."""
     insured = customer_amount * max(0.0, min(percent, INSURANCE_MAX_PERCENT)) / 100.0
@@ -135,6 +140,7 @@ async def _ensure_tables(bot: "ShopBot") -> None:
             accrual_ts REAL NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'open',
             ticket_channel_id INTEGER,
+            last_payout_ts REAL,
             insurance_percent REAL NOT NULL DEFAULT 0,
             insurance_deposited REAL NOT NULL DEFAULT 0,
             responsible_id INTEGER,
@@ -162,6 +168,7 @@ async def _ensure_tables(bot: "ShopBot") -> None:
         "ALTER TABLE afk_accounts ADD COLUMN insurance_deposited REAL NOT NULL DEFAULT 0",
         "ALTER TABLE afk_accounts ADD COLUMN responsible_id INTEGER",
         "ALTER TABLE afk_accounts ADD COLUMN panel_message_id INTEGER",
+        "ALTER TABLE afk_accounts ADD COLUMN last_payout_ts REAL",
         "ALTER TABLE afk_payouts ADD COLUMN insurance_amount REAL NOT NULL DEFAULT 0",
     ):
         try:
@@ -289,15 +296,16 @@ async def _record_payout(bot: "ShopBot", account: dict, bone_price: float, staff
     )
     deposited = float(account.get("insurance_deposited") or 0) + insured
     await bot.db.db.execute(
-        "UPDATE afk_accounts SET accrued_bones = 0, accrual_ts = ?, insurance_deposited = ?, "
+        "UPDATE afk_accounts SET accrued_bones = 0, accrual_ts = ?, last_payout_ts = ?, insurance_deposited = ?, "
         "responsible_id = COALESCE(responsible_id, ?) WHERE id = ?",
-        (now, deposited, staff_id, account["id"]),
+        (now, now, deposited, staff_id, account["id"]),
     )
     await bot.db.db.commit()
     return {
         "payout_id": int(cur.lastrowid),  # type: ignore[arg-type]
         "bones": bones, "revenue": revenue, "customer": customer, "shop": shop,
         "paid": paid, "insured": insured, "deposited": deposited,
+        "period_from": _period_start(account), "period_to": now,
     }
 
 
@@ -371,7 +379,7 @@ def _status_embed(account: dict, bone_price: Optional[float]) -> discord.Embed:
     embed.add_field(name=f"Dein Anteil ({pct:g}%) pro Tag", value=f"**{format_price(cust_day)}**", inline=True)
     embed.add_field(name="… pro Woche", value=f"**{format_price(cust_day * 7)}**", inline=True)
     embed.add_field(name="​", value="​", inline=True)
-    since = int(float(account["accrual_ts"])) if account.get("accrual_ts") else None
+    since = int(_period_start(account)) or None
     ipct = float(account.get("insurance_percent") or 0)
     paid_pending, insured_pending = split_insurance(cust_pending, ipct)
     embed.add_field(
@@ -383,7 +391,7 @@ def _status_embed(account: dict, bone_price: Optional[float]) -> discord.Embed:
                 f"\n🛡️ Versicherung ({ipct:g}%): {format_price(insured_pending)} → "
                 f"**Auszahlung: {format_price(paid_pending)}**" if insured_pending > 0 else ""
             )
-            + (f"\n_letzte Änderung <t:{since}:R>_" if since else "")
+            + (f"\n_Zeitraum seit der letzten Auszahlung: <t:{since}:R> · Bone-Preis aktuell_" if since else "")
         ),
         inline=False,
     )
@@ -480,7 +488,7 @@ async def _statement_embed(bot: "ShopBot", account: dict) -> discord.Embed:
     for r in rows:
         paid = float(r["customer_amount"]) - float(r["insurance_amount"])
         line = (
-            f"`#{r['id']}` <t:{_ts(r['created_at'])}:d> · {_fmt_int(r['bones'])} Bones · "
+            f"`#{r['id']}` <t:{_ts(r['created_at'])}:d> · {_fmt_int(r['bones'])} Bones × {format_price(r['bone_price'])} · "
             f"Erlös {format_price(r['revenue'])} · **Auszahlung {format_price(paid)}**"
         )
         if float(r["insurance_amount"]) > 0:
@@ -634,10 +642,10 @@ async def _create_afk_ticket(
     ticket_number = await _next_ticket_number(bot, guild.id)
     cur = await bot.db.db.execute(
         """
-        INSERT INTO afk_accounts (guild_id, ticket_number, user_id, ign, requested_qty, note, accrual_ts, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'open')
+        INSERT INTO afk_accounts (guild_id, ticket_number, user_id, ign, requested_qty, note, accrual_ts, last_payout_ts, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')
         """,
-        (guild.id, ticket_number, interaction.user.id, ign, qty, note, time.time()),
+        (guild.id, ticket_number, interaction.user.id, ign, qty, note, time.time(), time.time()),
     )
     await bot.db.db.commit()
     account_id = int(cur.lastrowid)  # type: ignore[arg-type]
@@ -830,7 +838,11 @@ class AfkPayoutConfirmView(discord.ui.View):
             )
         embed.add_field(
             name="📊 So wird der Betrag berechnet",
-            value=f"{_fmt_int(result['bones'])} Bones × {format_price(bone_price)} = {format_price(result['revenue'])}",
+            value=(
+                f"{_fmt_int(result['bones'])} Bones × {format_price(bone_price)} = {format_price(result['revenue'])}\n"
+                f"🕒 Zeitraum: <t:{int(result['period_from'])}:f> → <t:{int(result['period_to'])}:f>\n"
+                "_Berechnet mit dem aktuellen Bone-Preis._"
+            ),
             inline=False,
         )
         embed.set_footer(text=f"erfasst von {interaction.user.display_name} · Ticket #{account['ticket_number']}")
@@ -933,7 +945,8 @@ class AfkTicketView(discord.ui.View):
         await interaction.response.send_message(
             embed=base_embed(
                 "Auszahlung erfassen?",
-                f"{_fmt_int(bones)} Bones × {format_price(bone_price)} = **{format_price(revenue)}**\n"
+                f"Zeitraum: seit <t:{int(_period_start(account))}:f> bis jetzt\n"
+                f"{_fmt_int(bones)} Bones × aktueller Bone-Preis {format_price(bone_price)} = **{format_price(revenue)}**\n"
                 f"Kunde ({config.AFK_CUSTOMER_PERCENT:g}%): **{format_price(customer)}** · Shop: {format_price(shop)}\n"
                 + (f"🛡️ Versicherung: {format_price(insured)} → Auszahlung **{format_price(paid)}**\n" if insured > 0 else "")
                 + "\nDanach wird der aufgelaufene Stand zurückgesetzt.",
@@ -1029,6 +1042,8 @@ def _self_check() -> None:
     assert split_insurance(1000, -3) == (1000.0, 0.0)
     assert insurance_current(50) == 100  # "Aus 1000$ von dir werden 2000$ Schutz"
     assert _ts("2026-09-19 12:00:00") == 1789819200 and _ts("kaputt") == 0
+    assert _period_start({"last_payout_ts": 5.0, "accrual_ts": 9.0}) == 5.0  # letzte Auszahlung zählt
+    assert _period_start({"last_payout_ts": None, "accrual_ts": 9.0}) == 9.0 and _period_start({}) == 0.0
 
 
 async def setup(bot: "ShopBot") -> None:
