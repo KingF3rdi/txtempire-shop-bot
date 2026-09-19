@@ -40,6 +40,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs import afk_service
+from utils import spawner_vouch
 from utils.embeds import base_embed, error_embed, format_price, success_embed, warn_embed
 from utils.price import format_compact_number, parse_price
 from views.ticket_views import is_staff
@@ -591,10 +592,30 @@ class SpawnerTicketView(discord.ui.View):
             return
         await interaction.response.defer()
         await _mark_ticket(self.bot, int(row["id"]), "confirmed", interaction.user.id)
+
+        # Vouch-Anfrage per DM an den Käufer — bezogen auf den Staff, der bestätigt hat.
+        buyer = interaction.guild.get_member(int(row["user_id"]))
+        if buyer is None:
+            try:
+                buyer = await interaction.guild.fetch_member(int(row["user_id"]))
+            except discord.HTTPException:
+                buyer = None
+        vouch_state = (
+            await spawner_vouch.request_spawner_vouch(
+                self.bot, interaction.guild, buyer, ticket=row, staff=interaction.user,
+            )
+            if buyer is not None else "dm_failed"
+        )
+        vouch_note = {
+            "sent": "\n📨 Vouch-Anfrage per DM an den Käufer gesendet.",
+            "no_channel": "\n⚠️ Kein Vouch-Channel gesetzt (`/setup`) — keine Vouch-Anfrage gesendet.",
+            "dm_failed": "\n⚠️ Vouch-DM nicht zustellbar (DMs geschlossen).",
+            "already": "",
+        }[vouch_state]
         await interaction.followup.send(
             embed=success_embed(
                 "Bestätigt",
-                f"Handel bestätigt von {interaction.user.mention}. Ticket kann jetzt geschlossen werden.",
+                f"Handel bestätigt von {interaction.user.mention}. Ticket kann jetzt geschlossen werden.{vouch_note}",
             )
         )
 
@@ -1072,4 +1093,6 @@ class SpawnerShopCog(commands.Cog):
 
 async def setup(bot: "ShopBot") -> None:
     await _ensure_tables(bot)
+    await spawner_vouch.ensure_tables(bot)
+    bot.add_view(spawner_vouch.SpawnerVouchRatingView(bot))
     await bot.add_cog(SpawnerShopCog(bot))
