@@ -1,5 +1,5 @@
 """Erkennt eingehende Ingame-Zahlungen auch für die Mini-Shop-Tickets
-(Pack, Spawner, Schematic, Account, Tier-Boost) — nicht nur die generische
+(Pack, Schematic, Account, Tier-Boost — Spawner-Handel läuft ohne Zahlung an den Shop) — nicht nur die generische
 `orders`-Tabelle.
 
 Jede dieser Tabellen liefert eigene Tickets mit eigener Liefer-/
@@ -29,7 +29,6 @@ class _TableSpec(NamedTuple):
 _TABLES: tuple[_TableSpec, ...] = (
     # pack_orders: Echtgeld-Preis ODER fester Ingame-Preis (custom_pack.py).
     _TableSpec("pack_orders", ("price", "ingame_price"), "Custom-Pack-Ticket"),
-    _TableSpec("spawner_tickets", ("total",), "Spawner-Ticket"),
     _TableSpec("schematic_tickets", ("price",), "Schematic-Ticket"),
     _TableSpec("account_tickets", ("price",), "Account-Ticket"),
     _TableSpec("boost_tickets", ("price",), "Boost-Ticket"),
@@ -139,7 +138,6 @@ async def _self_check() -> None:
     # Andere Mini-Shop-Tabellen müssen existieren (auch ohne Zeilen), da
     # find_matching_pending_tickets alle _TABLES abfragt.
     for table, col in (
-        ("spawner_tickets", "total"),
         ("schematic_tickets", "price"),
         ("account_tickets", "price"),
         ("boost_tickets", "price"),

@@ -39,7 +39,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-import config
 from cogs import afk_service
 from utils.embeds import base_embed, error_embed, format_price, success_embed, warn_embed
 from utils.price import format_compact_number, parse_price
@@ -540,17 +539,8 @@ async def _create_spawner_ticket(
 
     if direction == "buy":
         heading = f"Hallo {interaction.user.mention}, hier ist deine **Kauf**-Anfrage."
-        pay_line = (
-            f"Du zahlst **{format_price(total)}** an den Shop:\n"
-            f"```\n{config.mc_pay_command(total)}\n```"
-        )
     else:
         heading = f"Hallo {interaction.user.mention}, hier ist deine **Ankauf**-Anfrage (du verkaufst an uns)."
-        pay_line = (
-            f"Das Team zahlt **{format_price(total)}** an dich (`{ign}`):\n"
-            f"```\n/pay {ign} {total:g}\n```\n"
-            "_(Staff-Hinweis: Betrag ingame an den Kunden schicken.)_"
-        )
 
     embed = base_embed(
         f"{spawner.get('emoji') or '🧱'} Spawner-{'Kauf' if direction == 'buy' else 'Ankauf'} #{ticket_number}",
@@ -558,8 +548,8 @@ async def _create_spawner_ticket(
         f"Produkt: **{spawner['name']}**-Spawner × **{qty}**\n"
         f"Einzelpreis: **{format_price(unit)}** · Gesamt: **{format_price(total)}**\n"
         f"Ingame-Name: **{ign}**\n\n"
-        "Sobald die Zahlung bestätigt ist, klickt Staff **✅ Bestätigen**.\n\n"
-        f"{pay_line}",
+        "Übergabe und Bezahlung klärt ihr direkt hier im Ticket — es geht **keine Zahlung an TxtEmpire**.\n"
+        "Sobald der Handel abgeschlossen ist, klickt Staff **✅ Bestätigen**.",
     )
     mention = staff_role.mention if staff_role else "Staff"
     await channel.send(
