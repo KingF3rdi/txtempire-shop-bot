@@ -10,7 +10,7 @@ und /antiraid off) für beides:
   beitreten.
 - Nuke: erkennt, wenn ein einzelnes Mitglied in kurzer Zeit mehrere
   destruktive Aktionen ausführt (Channel löschen, Rolle löschen, Mitglied
-  bannen) — typisches Muster eines kompromittierten/böswilligen
+  bannen oder kicken) — typisches Muster eines kompromittierten/böswilligen
   Staff-Accounts oder eines gekaperten Bots. Der Übeltäter wird sofort alle
   Rollen entzogen und danach je nach "aktion" gekickt/gebannt.
 
@@ -24,13 +24,15 @@ laufende Vorfälle harmlos.
 """
 from __future__ import annotations
 
+import io
+import json
 import time
 from collections import deque
 from typing import TYPE_CHECKING, Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from utils.embeds import base_embed, error_embed, success_embed, warn_embed
 
@@ -43,6 +45,9 @@ ALERT_COOLDOWN_SECONDS = 30.0
 NUKE_THRESHOLD = 3
 NUKE_WINDOW_SECONDS = 10.0
 NUKE_PUNISH_COOLDOWN_SECONDS = 60.0
+
+BACKUP_INTERVAL_HOURS = 6
+BACKUP_KEEP = 10
 
 # Nur Laufzeit-Zustand (kein Verlauf nötig, ein Neustart "vergisst" laufende Vorfälle harmlos).
 _recent_joins: dict[int, deque[float]] = {}
@@ -71,9 +76,121 @@ async def _ensure_table(bot: "ShopBot") -> None:
             action TEXT NOT NULL DEFAULT 'kick',
             alert_channel_id INTEGER
         );
+        CREATE TABLE IF NOT EXISTS antiraid_backups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            note TEXT NOT NULL DEFAULT '',
+            data TEXT NOT NULL
+        );
         """
     )
     await bot.db.db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Backups: Rollen + Channels (Struktur, Rechte). Restore ist rein additiv —
+# es wird nur wiederhergestellt, was fehlt, nichts gelöscht/überschrieben.
+# ---------------------------------------------------------------------------
+
+def _snapshot(guild: discord.Guild) -> dict:
+    roles = [
+        {"id": r.id, "name": r.name, "color": r.color.value, "permissions": r.permissions.value,
+         "hoist": r.hoist, "mentionable": r.mentionable, "position": r.position}
+        for r in guild.roles if not r.is_default() and not r.managed
+    ]
+    channels = []
+    for c in guild.channels:
+        overwrites = [
+            {"role_id": t.id, "allow": ow.pair()[0].value, "deny": ow.pair()[1].value}
+            for t, ow in c.overwrites.items() if isinstance(t, discord.Role)
+        ]
+        channels.append({
+            "id": c.id, "name": c.name, "type": c.type.value, "position": c.position,
+            "category_id": c.category_id, "topic": getattr(c, "topic", None),
+            "nsfw": getattr(c, "nsfw", False), "slowmode": getattr(c, "slowmode_delay", 0) or 0,
+            "bitrate": getattr(c, "bitrate", None), "user_limit": getattr(c, "user_limit", None),
+            "overwrites": overwrites,
+        })
+    return {"guild_name": guild.name, "everyone_id": guild.default_role.id, "roles": roles, "channels": channels}
+
+
+async def _save_backup(bot: "ShopBot", guild: discord.Guild, note: str = "") -> int:
+    data = json.dumps(_snapshot(guild), ensure_ascii=False)
+    cur = await bot.db.db.execute(
+        "INSERT INTO antiraid_backups (guild_id, note, data) VALUES (?, ?, ?)", (guild.id, note, data),
+    )
+    await bot.db.db.execute(
+        "DELETE FROM antiraid_backups WHERE guild_id = ? AND id NOT IN "
+        "(SELECT id FROM antiraid_backups WHERE guild_id = ? ORDER BY id DESC LIMIT ?)",
+        (guild.id, guild.id, BACKUP_KEEP),
+    )
+    await bot.db.db.commit()
+    return int(cur.lastrowid)  # type: ignore[arg-type]
+
+
+async def _restore(guild: discord.Guild, data: dict) -> tuple[int, int, int]:
+    """Stellt fehlende Rollen/Channels wieder her. Gibt (Rollen, Channels, Fehler) zurück."""
+    created_roles = created_channels = errors = 0
+    role_map: dict[int, discord.Role] = {int(data["everyone_id"]): guild.default_role}
+    by_name = {r.name: r for r in guild.roles}
+    for r in sorted(data["roles"], key=lambda x: x["position"]):
+        existing = by_name.get(r["name"])
+        if existing is None:
+            try:
+                existing = await guild.create_role(
+                    name=r["name"], colour=discord.Colour(r["color"]),
+                    permissions=discord.Permissions(r["permissions"]), hoist=r["hoist"],
+                    mentionable=r["mentionable"], reason="Anti-Raid: Backup-Restore",
+                )
+                created_roles += 1
+            except discord.HTTPException:
+                errors += 1
+                continue
+        role_map[int(r["id"])] = existing
+
+    def overwrites(ch: dict) -> dict:
+        return {
+            role_map[int(o["role_id"])]: discord.PermissionOverwrite.from_pair(
+                discord.Permissions(o["allow"]), discord.Permissions(o["deny"]))
+            for o in ch["overwrites"] if int(o["role_id"]) in role_map
+        }
+
+    old_names = {int(c["id"]): c["name"] for c in data["channels"]}
+    new_cat: dict[int, discord.abc.GuildChannel] = {}
+    for c in sorted(data["channels"], key=lambda c: (c["type"] != 4, c["position"])):  # Kategorien zuerst
+        parent_name = old_names.get(c["category_id"]) if c["category_id"] else None
+        match = next(
+            (g for g in guild.channels if g.name == c["name"] and g.type.value == c["type"]
+             and (g.category.name if g.category else None) == parent_name), None)
+        if match is not None:
+            if c["type"] == 4:
+                new_cat[int(c["id"])] = match
+            continue
+        kw: dict = {"name": c["name"], "overwrites": overwrites(c), "reason": "Anti-Raid: Backup-Restore"}
+        parent = None
+        if parent_name:
+            parent = new_cat.get(c["category_id"]) or next((g for g in guild.categories if g.name == parent_name), None)
+        try:
+            if c["type"] == 4:
+                new_cat[int(c["id"])] = await guild.create_category(**kw)
+            else:
+                kw["category"] = parent
+                if c["type"] in (0, 5):
+                    await guild.create_text_channel(topic=c["topic"], nsfw=c["nsfw"], slowmode_delay=c["slowmode"], **kw)
+                elif c["type"] == 2:
+                    await guild.create_voice_channel(
+                        bitrate=min(c["bitrate"] or 64000, guild.bitrate_limit), user_limit=c["user_limit"] or 0, **kw)
+                elif c["type"] == 13:
+                    await guild.create_stage_channel(**kw)
+                elif c["type"] == 15:
+                    await guild.create_forum(topic=c["topic"] or "", **kw)
+                else:
+                    continue
+            created_channels += 1
+        except (discord.HTTPException, TypeError):
+            errors += 1
+    return created_roles, created_channels, errors
 
 
 async def _get_settings(bot: "ShopBot", guild_id: int) -> dict:
@@ -219,10 +336,11 @@ class AntiRaidCog(commands.Cog):
     async def protect(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
         await _upsert(self.bot, interaction.guild.id, enabled=1)
+        await _save_backup(self.bot, interaction.guild, "bei /antiraid protect")
         settings = await _get_settings(self.bot, interaction.guild.id)
         note = "" if settings.get("alert_channel_id") else "\n⚠️ Kein Alarm-Channel gesetzt — nutze `/antiraid einstellungen`."
         await interaction.response.send_message(
-            embed=success_embed("Aktiviert", f"Anti-Raid- & Anti-Nuke-Schutz ist jetzt **an**.{note}"), ephemeral=True,
+            embed=success_embed("Aktiviert", f"Anti-Raid- & Anti-Nuke-Schutz ist jetzt **an** (Backup erstellt).{note}"), ephemeral=True,
         )
 
     @antiraid_group.command(name="off", description="Anti-Raid- & Anti-Nuke-Schutz deaktivieren")
@@ -285,6 +403,104 @@ class AntiRaidCog(commands.Cog):
             embed=base_embed("Anti-Raid-Status", _settings_text(interaction.guild, settings)), ephemeral=True,
         )
 
+    async def cog_load(self) -> None:
+        self.auto_backup.start()
+
+    async def cog_unload(self) -> None:
+        self.auto_backup.cancel()
+
+    @tasks.loop(hours=BACKUP_INTERVAL_HOURS)
+    async def auto_backup(self) -> None:
+        for guild in self.bot.guilds:
+            if (await _get_settings(self.bot, guild.id)).get("enabled"):
+                try:
+                    await _save_backup(self.bot, guild, "automatisch")
+                except Exception as e:
+                    print(f"[AntiRaid] Auto-Backup fehlgeschlagen ({guild.id}): {e!r}")
+
+    @auto_backup.before_loop
+    async def _before_backup(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _find_backup(self, guild_id: int, backup_id: Optional[int]):
+        if backup_id is None:
+            return await self.bot.db.fetchone(
+                "SELECT * FROM antiraid_backups WHERE guild_id = ? ORDER BY id DESC LIMIT 1", (guild_id,))
+        return await self.bot.db.fetchone(
+            "SELECT * FROM antiraid_backups WHERE guild_id = ? AND id = ?", (guild_id, backup_id))
+
+    @antiraid_group.command(name="backup", description="Backup von Rollen & Channels erstellen")
+    async def backup(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        backup_id = await _save_backup(self.bot, interaction.guild, f"manuell von {interaction.user}")
+        await interaction.response.send_message(
+            embed=success_embed("Backup erstellt", f"Backup **#{backup_id}** gespeichert. Laden mit `/antiraid restore`."),
+            ephemeral=True,
+        )
+
+    @antiraid_group.command(name="backups", description="Vorhandene Backups anzeigen")
+    async def backups(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        rows = await self.bot.db.fetchall(
+            "SELECT id, created_at, note FROM antiraid_backups WHERE guild_id = ? ORDER BY id DESC",
+            (interaction.guild.id,),
+        )
+        text = "\n".join(f"**#{r['id']}** · {r['created_at']} UTC · {r['note'] or '—'}" for r in rows) or "_Noch keine Backups._"
+        await interaction.response.send_message(
+            embed=base_embed(
+                "Backups",
+                f"{text}\n\nAutomatisch alle {BACKUP_INTERVAL_HOURS}h (solange Schutz an), die letzten {BACKUP_KEEP} bleiben.",
+            ),
+            ephemeral=True,
+        )
+
+    @antiraid_group.command(name="export", description="Backup als JSON-Datei herunterladen")
+    @app_commands.describe(backup_id="Backup-ID (leer = neuestes)")
+    async def export(self, interaction: discord.Interaction, backup_id: Optional[int] = None) -> None:
+        assert interaction.guild is not None
+        row = await self._find_backup(interaction.guild.id, backup_id)
+        if row is None:
+            await interaction.response.send_message(embed=error_embed("Kein Backup gefunden"), ephemeral=True)
+            return
+        file = discord.File(io.BytesIO(row["data"].encode("utf-8")), filename=f"backup_{row['id']}.json")
+        await interaction.response.send_message(file=file, ephemeral=True)
+
+    @antiraid_group.command(name="restore", description="Backup laden: fehlende Rollen & Channels wiederherstellen (Admin)")
+    @app_commands.describe(backup_id="Backup-ID (leer = neuestes)", datei="Alternativ: exportierte Backup-JSON-Datei")
+    async def restore(
+        self, interaction: discord.Interaction, backup_id: Optional[int] = None,
+        datei: Optional[discord.Attachment] = None,
+    ) -> None:
+        guild = interaction.guild
+        assert guild is not None
+        if not interaction.user.guild_permissions.administrator:  # type: ignore[union-attr]
+            await interaction.response.send_message(embed=error_embed("Nur Admins"), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if datei is not None:
+                data = json.loads((await datei.read()).decode("utf-8"))
+            else:
+                row = await self._find_backup(guild.id, backup_id)
+                if row is None:
+                    await interaction.followup.send(embed=error_embed("Kein Backup gefunden"), ephemeral=True)
+                    return
+                data = json.loads(row["data"])
+            _ = (data["roles"], data["channels"], data["everyone_id"])  # Format prüfen
+        except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+            await interaction.followup.send(embed=error_embed("Ungültiges Backup"), ephemeral=True)
+            return
+        roles, channels, errors = await _restore(guild, data)
+        await interaction.followup.send(
+            embed=success_embed(
+                "Backup geladen",
+                f"Wiederhergestellt: **{roles}** Rollen, **{channels}** Channels."
+                + (f"\n⚠️ {errors} Fehler (fehlende Rechte?)." if errors else "")
+                + "\nBestehendes wurde nicht verändert (Nachrichten und Mitglieder-Rollen sind nicht Teil des Backups).",
+            ),
+            ephemeral=True,
+        )
+
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
         guild = member.guild
@@ -327,6 +543,11 @@ class AntiRaidCog(commands.Cog):
         await _handle_nuke_event(self.bot, role.guild, discord.AuditLogAction.role_delete, role.id, "mehrere Rollen gelöscht")
 
     @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member) -> None:
+        # Jeder Austritt könnte ein Kick sein -> Audit-Log entscheidet (nur wenn Schutz an).
+        await _handle_nuke_event(self.bot, member.guild, discord.AuditLogAction.kick, member.id, "mehrere Mitglieder gekickt")
+
+    @commands.Cog.listener()
     async def on_member_ban(self, guild: discord.Guild, user: discord.abc.User) -> None:
         await _handle_nuke_event(self.bot, guild, discord.AuditLogAction.ban, user.id, "mehrere Mitglieder gebannt")
 
@@ -339,7 +560,7 @@ def _settings_text(guild: discord.Guild, settings: dict) -> str:
         f"Status: {'✅ an (Raid- & Nuke-Schutz)' if settings.get('enabled') else '❌ aus'}\n"
         f"Raid-Schwelle: **{settings['join_threshold']}** Beitritte / **{settings['window_seconds']}s**\n"
         f"Reagiert auf Accounts jünger als **{settings['min_account_age_hours']}h**\n"
-        f"Nuke-Schwelle: **{NUKE_THRESHOLD}** destruktive Aktionen / **{int(NUKE_WINDOW_SECONDS)}s** (Channel/Rolle löschen, bannen)\n"
+        f"Nuke-Schwelle: **{NUKE_THRESHOLD}** destruktive Aktionen / **{int(NUKE_WINDOW_SECONDS)}s** (Channel/Rolle löschen, bannen, kicken)\n"
         f"Aktion: **{action_labels.get(settings['action'], settings['action'])}**\n"
         f"Alarm-Channel: {channel.mention if channel else '_keiner gesetzt_'}"
     )
