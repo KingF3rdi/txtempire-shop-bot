@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 import config
-from utils.duel_invsee_store import find_active_watch_token, find_active_watches, set_opt_in
+from utils.duel_invsee_store import (
+    find_active_watch_token,
+    find_active_watches,
+    list_active_targets,
+    set_opt_in,
+)
 from utils.mc_confirm import handle_mc_link_redeem, handle_mc_payment
 
 if TYPE_CHECKING:
@@ -97,6 +102,7 @@ class McApiServer:
         app.router.add_post("/mc/v1/duelinvsee/optin", self.duelinvsee_optin)
         app.router.add_post("/mc/v1/duelinvsee/heartbeat", self.duelinvsee_heartbeat)
         app.router.add_post("/mc/v1/duelinvsee/report", self.duelinvsee_report)
+        app.router.add_post("/mc/v1/duelinvsee/targets", self.duelinvsee_targets)
         # Pack AI License-API auf demselben Port (für Bot + PackAI.exe)
         from integrations import packai_license_api
 
@@ -238,6 +244,18 @@ class McApiServer:
         if token:
             return web.json_response({"ok": True, "watching": True, "token": token})
         return web.json_response({"ok": True, "watching": False})
+
+    async def duelinvsee_targets(self, request: web.Request) -> web.Response:
+        """Scanner-Mod: welche IGNs haben gerade einen bezahlten Watch? Der Mod
+        fuehrt dann ingame /invsee <ign> aus und meldet per /report zurueck."""
+        if not _duelinvsee_auth_ok(request):
+            raise web.HTTPUnauthorized(text='{"ok":false,"reason":"unauthorized"}')
+        self._touch_watcher("duelinvsee_targets")
+        data = await _read_json(request)
+        guild_id = _guild_id(data)
+        if not guild_id:
+            return web.json_response({"ok": False, "reason": "guild_id_required"}, status=400)
+        return web.json_response({"ok": True, "targets": await list_active_targets(self.bot, guild_id)})
 
     async def duelinvsee_report(self, request: web.Request) -> web.Response:
         """Vom Ingame-Mod aufgerufen (nur wenn die Heartbeat-Antwort watching=true

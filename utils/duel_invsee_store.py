@@ -120,3 +120,18 @@ async def set_watch_dm(bot: "ShopBot", watch_id: int, channel_id: int, message_i
         (channel_id, message_id, watch_id),
     )
     await bot.db.db.commit()
+
+
+async def list_active_targets(bot: "ShopBot", guild_id: int) -> list[dict[str, Any]]:
+    """Ein Eintrag pro IGN mit mindestens einem gueltigen Watch (neuester Token) -
+    das ist die Arbeitsliste des Scanner-Mods (fuehrt ingame /invsee <ign> aus)."""
+    rows = await bot.db.fetchall(
+        """
+        SELECT opponent_ign AS ign, token, MAX(created_at) AS created_at
+        FROM duel_invsee_watches
+        WHERE guild_id = ? AND expires_at > ?
+        GROUP BY lower(opponent_ign)
+        """,
+        (guild_id, int(time.time())),
+    )
+    return [{"ign": r["ign"], "token": r["token"]} for r in rows]

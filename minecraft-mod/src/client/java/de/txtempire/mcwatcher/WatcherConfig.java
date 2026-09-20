@@ -42,6 +42,14 @@ public final class WatcherConfig {
 	public String duelInvseeWebsitePushKey = "CHANGE_ME";
 	/** Persistierter Opt-in-Status: erlaubt der Spieler, dass sein Inventar während eines gekauften Duel Invsee gezeigt wird? */
 	public boolean duelInvseeOptIn = false;
+	/**
+	 * Scanner-Modus (nur fuer den Bot-Account): holt beim Bot die bezahlten Ziele
+	 * und fuehrt ingame /invsee <Name> aus (auf dem Server darf das jeder), liest
+	 * das geoeffnete Fenster und meldet es an Bot + Website.
+	 */
+	public boolean invseeScanner = false;
+	/** Sekunden zwischen zwei Scan-Runden. */
+	public int invseeScanIntervalSeconds = 15;
 
 	public static Path path() {
 		return FabricLoader.getInstance().getConfigDir().resolve("txtempire-mc-watcher.json");

@@ -8,5 +8,7 @@
   "duelInvseeKey": "CHANGE_ME",
   "duelInvseeWebsiteUrl": "https://api.txtempire.workers.dev",
   "duelInvseeWebsitePushKey": "CHANGE_ME",
-  "duelInvseeOptIn": false
+  "duelInvseeOptIn": false,
+  "invseeScanner": false,
+  "invseeScanIntervalSeconds": 15
 }

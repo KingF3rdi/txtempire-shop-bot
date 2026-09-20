@@ -48,7 +48,7 @@ async def _purchase(bot: commands.Bot, interaction: discord.Interaction, gegner:
         )
         return
 
-    if not await is_opted_in(bot, guild_id, ign):
+    if config.DUEL_INVSEE_REQUIRE_OPTIN and not await is_opted_in(bot, guild_id, ign):
         await interaction.response.send_message(
             embed=error_embed(
                 "Nicht verfügbar",
@@ -119,9 +119,8 @@ def _panel_embed() -> discord.Embed:
     return base_embed(
         "🗡️ Duel Invsee",
         f"Kaufe eine Live-Ansicht des Inventars eines Gegners — **{format_price(config.DUEL_INVSEE_PRICE)}**.\n\n"
-        "Funktioniert nur, wenn der Gegner selbst zugestimmt hat "
-        "(`/duelinvsee on` im Spiel oder `/duelinvsee-optin` hier im Discord) "
-        "und sein Ingame-Mod läuft — Inventar wird alle 10s live aktualisiert und auf der Website angezeigt.\n\n"
+        "Der Bot-Account macht ingame `/invsee <Name>` und postet das Inventar — "
+        "es wird alle 15s aktualisiert, auf der Website und per DM als Bild.\n\n"
         "Klicke unten und gib den Minecraft-Namen des Gegners ein.",
     )
 

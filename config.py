@@ -173,6 +173,8 @@ MC_LINK_CODE_TTL_MINUTES = int(os.getenv("MC_LINK_CODE_TTL_MINUTES", "10") or "1
 # da dieser an Spieler weitergegeben wird, die die Funktion selbst nutzen
 # (Opt-in + Heartbeat), statt exklusiv beim TxTEmpire-Bot-Account zu bleiben.
 DUEL_INVSEE_PUBLIC_KEY = os.getenv("DUEL_INVSEE_PUBLIC_KEY", "").strip()
+# 1 = Ziel muss vorher /duelinvsee on gemacht haben; 0 (Standard) = Scanner-Mod liest per Server-/invsee
+DUEL_INVSEE_REQUIRE_OPTIN = os.getenv("DUEL_INVSEE_REQUIRE_OPTIN", "0").strip() in ("1", "true", "yes")
 DUEL_INVSEE_PRICE = float(os.getenv("DUEL_INVSEE_PRICE", "50000") or "50000")
 DUEL_INVSEE_WATCH_MINUTES = int(os.getenv("DUEL_INVSEE_WATCH_MINUTES", "30") or "30")
 DUEL_INVSEE_VIEW_URL = os.getenv(

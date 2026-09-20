@@ -5,7 +5,10 @@ import com.google.gson.JsonObject;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+import net.minecraft.world.inventory.Slot;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -81,6 +84,85 @@ public final class DuelInvseeClient {
 		if (config.duelInvseeOptIn) {
 			startReporting();
 		}
+		if (config.invseeScanner) {
+			startScanner();
+		}
+	}
+
+	// -- Scanner: ingame /invsee <Name> ausfuehren und Fenster auslesen ----------
+
+	private static final long OPEN_TIMEOUT_MS = 4000L;
+	private static final java.util.concurrent.ConcurrentLinkedQueue<String[]> scanQueue = new java.util.concurrent.ConcurrentLinkedQueue<>();
+	private static volatile String[] scanCurrent = null; // {ign, token}
+	private static volatile long scanDeadline = 0L;
+	private static volatile boolean scanCommandSent = false;
+	private static volatile long lastFetch = 0L;
+
+	private static void startScanner() {
+		ClientTickEvents.END_CLIENT_TICK.register(DuelInvseeClient::scannerTick);
+		McWatcher.LOGGER.info("Duel-Invsee-Scanner aktiv (alle {}s)", config.invseeScanIntervalSeconds);
+	}
+
+	/** Laeuft auf dem Client-Thread (jeder Tick). */
+	private static void scannerTick(Minecraft mc) {
+		LocalPlayer player = mc.player;
+		if (player == null || mc.getConnection() == null) {
+			return;
+		}
+		long now = System.currentTimeMillis();
+
+		if (scanCurrent != null) {
+			if (mc.screen instanceof AbstractContainerScreen<?> screen) {
+				finishScan(mc, player, screen);
+			} else if (now > scanDeadline) {
+				if (config.debug) {
+					McWatcher.LOGGER.info("Invsee {}: kein Fenster geoeffnet (Timeout)", scanCurrent[0]);
+				}
+				scanCurrent = null;
+			}
+			return;
+		}
+
+		if (!scanQueue.isEmpty()) {
+			if (mc.screen != null) {
+				return; // Spieler hat gerade selbst ein Fenster/Chat offen - nicht stoeren
+			}
+			scanCurrent = scanQueue.poll();
+			scanDeadline = now + OPEN_TIMEOUT_MS;
+			mc.getConnection().sendCommand("invsee " + scanCurrent[0]);
+			return;
+		}
+
+		if (now - lastFetch >= config.invseeScanIntervalSeconds * 1000L) {
+			lastFetch = now;
+			api.fetchDuelInvseeTargets(targets -> scanQueue.addAll(targets));
+		}
+	}
+
+	private static void finishScan(Minecraft mc, LocalPlayer player, AbstractContainerScreen<?> screen) {
+		String[] target = scanCurrent;
+		scanCurrent = null;
+		JsonArray items = new JsonArray();
+		Inventory own = player.getInventory();
+		for (Slot slot : screen.getMenu().slots) {
+			if (slot.container == own) {
+				continue; // eigenes Inventar im unteren Teil des Fensters ignorieren
+			}
+			ItemStack stack = slot.getItem();
+			int i = slot.getContainerSlot();
+			if (i < 36) {
+				addItem(items, "main", i, stack);
+			} else if (i < 40) {
+				addItem(items, "armor", 39 - i, stack); // Bukkit-Reihenfolge: 39 = Helm
+			} else if (i == 40) {
+				addItem(items, "offhand", 0, stack);
+			}
+		}
+		if (config.debug) {
+			McWatcher.LOGGER.info("Invsee {}: {} Items gelesen", target[0], items.size());
+		}
+		player.closeContainer();
+		publish(target[1], target[0], items);
 	}
 
 	private static void status() {
@@ -151,19 +233,20 @@ public final class DuelInvseeClient {
 		addItem(items, "armor", 3, player.getItemBySlot(EquipmentSlot.FEET));
 		addItem(items, "offhand", 0, player.getItemBySlot(EquipmentSlot.OFFHAND));
 
-		// Zwei unabhängige Ziele, dieselben Item-Daten: die Website (Live-Seite,
-		// per Token) und der Bot (rendert ein Bild, schickt/aktualisiert es per
-		// DM beim Käufer). Jede JsonObject-Hülle bekommt ihre eigenen
-		// Zusatzfelder, das gemeinsame JsonArray wird nicht verändert.
+		publish(token, selfIgn, items);
+	}
+
+	/** Zwei unabhängige Ziele, dieselben Item-Daten: Website (Live-Seite per Token) und Bot (Bild per DM). */
+	private static void publish(String token, String ign, JsonArray items) {
 		JsonObject websitePayload = new JsonObject();
 		websitePayload.add("items", items);
 		// buyer_ign/opponent_ign werden von ApiClient.postDuelInvseeSnapshot ergänzt:
 		// aus Sicht der Website ist "opponent" immer der, dessen Inventar gemeldet wird (wir selbst).
-		api.postDuelInvseeSnapshot(token, selfIgn, "", websitePayload);
+		api.postDuelInvseeSnapshot(token, ign, "", websitePayload);
 
 		JsonObject reportPayload = new JsonObject();
 		reportPayload.add("items", items);
-		api.postDuelInvseeReport(selfIgn, reportPayload);
+		api.postDuelInvseeReport(ign, reportPayload);
 	}
 
 	private static void addItem(JsonArray out, String group, int slot, ItemStack stack) {

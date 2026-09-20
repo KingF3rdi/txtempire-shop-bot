@@ -110,6 +110,34 @@ public final class ApiClient {
 		});
 	}
 
+	/** Holt die Arbeitsliste des Scanners: [ign, token]-Paare mit bezahltem, noch gueltigem Watch. */
+	public void fetchDuelInvseeTargets(java.util.function.Consumer<java.util.List<String[]>> onTargets) {
+		JsonObject body = config.basePayload();
+		if (config.guildId != null && !config.guildId.isBlank() && !"0".equals(config.guildId)) {
+			try {
+				body.addProperty("guild_id", Long.parseLong(config.guildId.trim()));
+			} catch (NumberFormatException ignored) {
+			}
+		}
+		pool.execute(() -> {
+			String respBody = sendNowWithKey("/mc/v1/duelinvsee/targets", body.toString(), config.duelInvseeKey);
+			if (respBody == null) {
+				return;
+			}
+			try {
+				java.util.List<String[]> out = new java.util.ArrayList<>();
+				com.google.gson.JsonObject resp = com.google.gson.JsonParser.parseString(respBody).getAsJsonObject();
+				for (com.google.gson.JsonElement e : resp.getAsJsonArray("targets")) {
+					com.google.gson.JsonObject t = e.getAsJsonObject();
+					out.add(new String[] { t.get("ign").getAsString(), t.get("token").getAsString() });
+				}
+				onTargets.accept(out);
+			} catch (Exception ignored) {
+				// unerwartete Antwort - naechste Runde versucht es erneut
+			}
+		});
+	}
+
 	/**
 	 * Meldet das eigene Inventar an den Bot (nicht die Website) — der Bot
 	 * rendert daraus ein Bild und schickt/aktualisiert es in der DM des
