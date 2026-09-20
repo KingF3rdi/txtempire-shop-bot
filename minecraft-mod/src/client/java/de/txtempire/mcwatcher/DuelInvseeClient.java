@@ -96,7 +96,7 @@ public final class DuelInvseeClient {
 		}
 		config.duelInvseeOptIn = enabled;
 		config.save();
-		String ign = player.getGameProfile().getName();
+		String ign = player.getGameProfile().name();
 		api.postDuelInvseeOptIn(ign, enabled);
 		if (enabled) {
 			startReporting();
@@ -130,7 +130,7 @@ public final class DuelInvseeClient {
 		if (player == null) {
 			return;
 		}
-		String ign = player.getGameProfile().getName();
+		String ign = player.getGameProfile().name();
 		api.postDuelInvseeHeartbeat(ign, token -> Minecraft.getInstance().execute(() -> pushSnapshot(token, ign)));
 	}
 
@@ -199,7 +199,7 @@ public final class DuelInvseeClient {
 			return;
 		}
 		String line = ChatParser.strip(message.getString());
-		String myName = player.getGameProfile().getName();
+		String myName = player.getGameProfile().name();
 		if (line.isBlank() || !line.toLowerCase(java.util.Locale.ROOT).contains(myName.toLowerCase(java.util.Locale.ROOT))) {
 			return;
 		}

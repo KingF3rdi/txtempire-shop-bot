@@ -3,7 +3,7 @@
 	"id": "txtempire-mc-watcher",
 	"version": "${version}",
 	"name": "TxTEmpire MC Watcher",
-	"description": "Überwacht Chat auf Link-Codes und Money-Payments und meldet sie an den Discord-Shop-Bot.",
+	"description": "Erkennt Link-Codes und Ingame-Zahlungen (Shop-Bot, Website) und stellt optional das eigene Inventar für Duel Invsee bereit.",
 	"authors": ["TxTEmpire"],
 	"license": "MIT",
 	"environment": "client",

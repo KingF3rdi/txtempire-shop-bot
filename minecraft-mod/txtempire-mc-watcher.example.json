@@ -4,5 +4,9 @@
   "guildId": "DEINE_DISCORD_GUILD_ID",
   "discordWebhookUrl": "https://discord.com/api/webhooks/ID/TOKEN",
   "enabled": true,
-  "debug": true
+  "debug": false,
+  "duelInvseeKey": "CHANGE_ME",
+  "duelInvseeWebsiteUrl": "https://api.txtempire.workers.dev",
+  "duelInvseeWebsitePushKey": "CHANGE_ME",
+  "duelInvseeOptIn": false
 }
