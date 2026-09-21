@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import re
 from typing import TYPE_CHECKING, Optional
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import config
 from integrations.mc_api import McApiServer
@@ -41,8 +42,12 @@ class McLinkCog(commands.Cog):
     def __init__(self, bot: ShopBot) -> None:
         self.bot = bot
         self.api = McApiServer(bot)
+        # Message-IDs, die on_message oder der Poller schon verarbeitet haben (kein Doppel-Verarbeiten).
+        self._seen: set[int] = set()
+        self._webhook_channel_id: Optional[int] = None
 
     async def cog_load(self) -> None:
+        self.poll_webhook_channel.start()
         print(
             "[MC-API] Boot — "
             f"SERVER_PORT={os.getenv('SERVER_PORT')!r} "
@@ -52,6 +57,7 @@ class McLinkCog(commands.Cog):
         await self.api.start()
 
     async def cog_unload(self) -> None:
+        self.poll_webhook_channel.cancel()
         await self.api.stop()
 
     @commands.Cog.listener()
@@ -81,8 +87,67 @@ class McLinkCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         """Nimmt Events von der Fabric-Mod per Discord-Webhook entgegen."""
-        if not message.webhook_id:
+        await self._process_webhook_message(message)
+
+    # -- Sicherheitsnetz: Webhook-Channel regelmaessig selbst abfragen --------
+    # on_message verpasst Nachrichten, wenn der Bot kurz offline/reconnecting
+    # ist. Der Poller liest deshalb alle paar Sekunden den Channel des Webhooks
+    # (Login-Codes UND Zahlungen) und verarbeitet neue MC_-Zeilen nach.
+
+    async def _resolve_webhook_channel(self) -> Optional[int]:
+        if self._webhook_channel_id:
+            return self._webhook_channel_id
+        url = (config.SHOP_RELAY_WEBHOOK_URL or "").strip()
+        if not url:
+            return None
+        import aiohttp
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+            self._webhook_channel_id = int(data["channel_id"])
+        except Exception as exc:  # noqa: BLE001
+            print(f"[MC-Webhook] Poller: Channel nicht ermittelbar: {exc!r}")
+            return None
+        return self._webhook_channel_id
+
+    @tasks.loop(seconds=10)
+    async def poll_webhook_channel(self) -> None:
+        channel_id = await self._resolve_webhook_channel()
+        if not channel_id:
             return
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except discord.HTTPException:
+                return
+        cutoff = discord.utils.utcnow() - dt.timedelta(seconds=120)
+        try:
+            messages = [m async for m in channel.history(limit=30, after=cutoff)]  # type: ignore[union-attr]
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            return
+        for message in reversed(messages):  # aelteste zuerst
+            await self._process_webhook_message(message)
+
+    @poll_webhook_channel.before_loop
+    async def _before_poll(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _process_webhook_message(self, message: discord.Message) -> None:
+        if not message.webhook_id or message.id in self._seen:
+            return
+        if not (message.content or "").strip().startswith("MC_"):
+            return
+        self._seen.add(message.id)
+        if len(self._seen) > 2000:
+            self._seen = set(sorted(self._seen)[-500:])
+        await self._handle_webhook_text(message)
+
+    async def _handle_webhook_text(self, message: discord.Message) -> None:
         text = (message.content or "").strip()
         if not text.startswith("MC_"):
             return
