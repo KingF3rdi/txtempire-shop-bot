@@ -845,6 +845,26 @@ class TicketOrderView(discord.ui.View):
     ) -> None:
         await action_confirm_order(self.bot, interaction)
 
+    @discord.ui.button(
+        label="Minecraft verknüpfen",
+        style=discord.ButtonStyle.secondary,
+        custom_id="ticket:mc_link",
+        emoji="🔗",
+        row=2,
+    )
+    async def mc_link(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        """Direkt im Ticket verlinken (statt erst das MC-Link-Panel suchen zu
+        müssen) — ohne Verknüpfung erkennt der Bot eine Ingame-Zahlung nicht
+        automatisch, weil er den Käufer nur über den IGN wiederfindet."""
+        if interaction.guild is None:
+            await interaction.response.send_message(embed=error_embed("Nur auf dem Server"), ephemeral=True)
+            return
+        from views.mc_link_views import LinkIgnModal
+
+        await interaction.response.send_modal(LinkIgnModal(self.bot, interaction.guild.id))
+
     async def _fast_buy(self, interaction: discord.Interaction) -> None:
         await action_fast_buy(self.bot, interaction)
 
