@@ -31,8 +31,17 @@ from discord.ext import commands
 import config
 from utils.duel_invsee_store import create_watch, ensure_tables, is_opted_in, set_opt_in
 from utils.embeds import base_embed, error_embed, format_price, success_embed
+from utils.tool_credits import format_tool_credits
 
 IGN_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
+
+
+def _price_label() -> str:
+    """z.B. '1 Tool Credit (50.000)' — Tools-Überkategorie hat eine eigene,
+    kleinere Anzeige-Einheit als die normalen Credits (100k)."""
+    tc = format_tool_credits(config.DUEL_INVSEE_PRICE)
+    unit = "Tool Credit" if tc == "1" else "Tool Credits"
+    return f"{tc} {unit} ({format_price(config.DUEL_INVSEE_PRICE)})"
 
 
 async def _purchase(bot: commands.Bot, interaction: discord.Interaction, gegner: str) -> None:
@@ -67,7 +76,7 @@ async def _purchase(bot: commands.Bot, interaction: discord.Interaction, gegner:
         await interaction.followup.send(
             embed=error_embed(
                 "Nicht genug Credits",
-                f"Duel Invsee kostet **{format_price(config.DUEL_INVSEE_PRICE)}**. "
+                f"Duel Invsee kostet **{_price_label()}**. "
                 f"Dein Guthaben: **{format_price(balance)}**.",
             ),
             ephemeral=True,
@@ -80,7 +89,7 @@ async def _purchase(bot: commands.Bot, interaction: discord.Interaction, gegner:
         embed=success_embed(
             "Duel Invsee aktiv",
             f"Live-Inventar von **{ign}**: {url}\n\n"
-            f"Aktualisiert alle 10s, sobald **{ign}** online ist und sein Mod sich meldet. "
+            f"Aktualisiert alle 15s, sobald **{ign}** online ist und der Bot-Scanner ihn erfasst. "
             f"Gültig für **{config.DUEL_INVSEE_WATCH_MINUTES} Minuten**.",
         ),
         ephemeral=True,
@@ -117,8 +126,8 @@ class DuelInvseePanelView(discord.ui.View):
 
 def _panel_embed() -> discord.Embed:
     return base_embed(
-        "🗡️ Duel Invsee",
-        f"Kaufe eine Live-Ansicht des Inventars eines Gegners — **{format_price(config.DUEL_INVSEE_PRICE)}**.\n\n"
+        "🛠️ Tools — Duel Invsee",
+        f"Kaufe eine Live-Ansicht des Inventars eines Gegners — **{_price_label()}**.\n\n"
         "Der Bot-Account macht ingame `/invsee <Name>` und postet das Inventar — "
         "es wird alle 15s aktualisiert, auf der Website und per DM als Bild.\n\n"
         "Klicke unten und gib den Minecraft-Namen des Gegners ein.",
@@ -131,7 +140,7 @@ class DuelInvseeCog(commands.Cog):
 
     @app_commands.command(
         name="duelinvsee",
-        description=f"Live-Inventar eines Gegners kaufen ({format_price(config.DUEL_INVSEE_PRICE)}) — nur wenn er zugestimmt hat",
+        description=f"[Tools] Live-Inventar eines Gegners kaufen ({_price_label()})",
     )
     @app_commands.describe(gegner="Minecraft-Name des Gegners (muss selbst zugestimmt haben)")
     async def duelinvsee(self, interaction: discord.Interaction, gegner: str) -> None:

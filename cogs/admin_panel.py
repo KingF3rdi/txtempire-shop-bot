@@ -124,11 +124,15 @@ class AdminPanelView(discord.ui.View):
 
         cats = await self.bot.db.list_categories(self.guild_id)
         if not cats:
+            # Statt Sackgasse ("erst wo anders eine Kategorie anlegen") direkt
+            # hier weiter: ein Klick öffnet das Kategorie-Modal, danach "Item
+            # hinzufügen" erneut klicken.
             await interaction.response.send_message(
                 embed=error_embed(
                     "Keine Kategorie",
-                    "Lege zuerst eine Kategorie an.",
+                    "Lege zuerst eine Kategorie an — dann direkt weiter mit Items.",
                 ),
+                view=_CreateCategoryPromptView(self.bot, self.guild_id),
                 ephemeral=True,
             )
             return
@@ -583,6 +587,19 @@ class ItemActionsView(discord.ui.View):
 
 class PickCategoryForItemView(discord.ui.View):
     pass
+
+
+class _CreateCategoryPromptView(discord.ui.View):
+    """Ein-Klick-Ausweg aus der 'Keine Kategorie'-Sackgasse beim Item-Hinzufügen."""
+
+    def __init__(self, bot: ShopBot, guild_id: int) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Kategorie erstellen", style=discord.ButtonStyle.primary, emoji="➕")
+    async def create(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(AddCategoryModal(self.bot, self.guild_id))
 
 
 class AddCategoryModal(discord.ui.Modal, title="Kategorie hinzufügen"):

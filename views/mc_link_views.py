@@ -229,6 +229,8 @@ class LinkIgnModal(discord.ui.Modal, title="Minecraft IGN eingeben"):
             f"**Ingame schreiben:**\n```\n{cmd}\n```\n"
             f"Schicke den Code per **`/msg {config.MC_LINK_IGN}`** — "
             "nicht in den öffentlichen Chat.\n"
+            "⏳ Die Bestätigung kann **bis zu 1 Minute** dauern — bitte nicht "
+            "mehrfach senden, wenn nicht sofort eine Antwort kommt.\n"
             "Danach werden passende Zahlungen **auto-bestätigt**.",
         )
         if my_link:
