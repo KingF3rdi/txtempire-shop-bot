@@ -159,6 +159,17 @@ GPUTWEAKS_PRICE_LIFETIME = float(
     os.getenv("GPUTWEAKS_PRICE_LIFETIME", "0") or "0"
 )
 
+# Quick Invsee (Minecraft-Mod) - Lizenzkey-Verkauf (Discord-Ticket + /qikey generate)
+# MUSS exakt mit SECRET in License.java der Quick-Invsee-Mod übereinstimmen,
+# sonst kann die Mod die Keys nicht prüfen.
+QUICKINVSEE_LICENSE_SECRET = os.getenv("QUICKINVSEE_LICENSE_SECRET", "").strip()
+# Standardpreise (pro Server überschreibbar mit /qikey setup)
+QUICKINVSEE_PRICE_14D = float(os.getenv("QUICKINVSEE_PRICE_14D", "0") or "0")
+QUICKINVSEE_PRICE_30D = float(os.getenv("QUICKINVSEE_PRICE_30D", "0") or "0")
+QUICKINVSEE_PRICE_LIFETIME = float(
+    os.getenv("QUICKINVSEE_PRICE_LIFETIME", "0") or "0"
+)
+
 # Minecraft Account-Link + Chat-Watcher Mod API
 # Bot-Hosting/Pterodactyl setzt SERVER_PORT (= freigegebener Port, z.B. 26026).
 MC_API_HOST = os.getenv("MC_API_HOST", "0.0.0.0")
