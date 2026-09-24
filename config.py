@@ -202,6 +202,18 @@ PACKAI_PRICE_14D = float(os.getenv("PACKAI_PRICE_14D", "4.99") or "4.99")
 PACKAI_PRICE_30D = float(os.getenv("PACKAI_PRICE_30D", "9.99") or "9.99")
 PACKAI_PRICE_LIFETIME = float(os.getenv("PACKAI_PRICE_LIFETIME", "29.99") or "29.99")
 
+# HugoSMP Macro — Fabric-Mods (offline HMAC-Keys, gleiches Schema wie Pack AI)
+# HUGOMACRO_LICENSE_SECRET MUSS mit SECRET in License.java der HugoSMP-Mods übereinstimmen.
+HUGOMACRO_LICENSE_SECRET = (os.getenv("HUGOMACRO_LICENSE_SECRET") or "").strip()
+HUGOMACRO_WEBHOOK_URL = (
+    os.getenv("HUGOMACRO_WEBHOOK_URL")
+    or os.getenv("DISCORD_WEBHOOK_URL")
+    or ""
+).strip()
+HUGOMACRO_PRICE_14D = float(os.getenv("HUGOMACRO_PRICE_14D", "4.99") or "4.99")
+HUGOMACRO_PRICE_30D = float(os.getenv("HUGOMACRO_PRICE_30D", "9.99") or "9.99")
+HUGOMACRO_PRICE_LIFETIME = float(os.getenv("HUGOMACRO_PRICE_LIFETIME", "29.99") or "29.99")
+
 
 def mc_link_command(code: str) -> str:
     """Ingame-Befehl zum Verlinken (Private Message)."""
