@@ -55,6 +55,7 @@ class ShopBot(commands.Bot):
             "cogs.player_shop",
             "cogs.monetization",
             "cogs.tweak_panel",
+            "cogs.macro_panel",
             "cogs.autorole",
             "cogs.antiraid",
             ):
@@ -172,6 +173,9 @@ class ShopBot(commands.Bot):
             from cogs.tweak_panel import TweakShopPanelView
 
             self.add_view(TweakShopPanelView(self))
+            from cogs.macro_panel import MacroShopPanelView
+
+            self.add_view(MacroShopPanelView(self))
             from utils.tweak_vouch import TweakVouchRatingView
 
             self.add_view(TweakVouchRatingView(self))

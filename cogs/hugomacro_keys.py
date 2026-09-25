@@ -13,7 +13,7 @@ Aktivierung in der HugoSMP-Mod + optional Discord-Webhook-Bestätigung.
   HUGOMACRO_PRICE_14D=4.99
   HUGOMACRO_PRICE_30D=9.99
   HUGOMACRO_PRICE_LIFETIME=29.99
-  PAYPAL_EMAIL=... (global, bereits im Shop)
+  HUGOMACRO_PAY_IGN=SkellyHole   # Zahlung ingame (/pay) auf HugoSMP
 """
 
 from __future__ import annotations
@@ -28,17 +28,14 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
-from integrations.shop_api import shop_api
 from utils import hugomacro_licensing, tweak_vouch
 from utils.embeds import (
     base_embed,
     error_embed,
-    format_price,
-    payee_details_text,
-    payee_name,
     success_embed,
     warn_embed,
 )
+from utils.price import format_compact_number
 from views.ticket_views import is_staff
 
 if TYPE_CHECKING:
@@ -107,13 +104,22 @@ def _create_license_key(plan: str, created_by: str, note: str = "") -> tuple[boo
     return True, key, str(meta)
 
 
-def _paypal_block(price: float) -> str:
-    email = getattr(config, "PAYPAL_EMAIL", "") or "k1ngf3rdi@gmail.com"
-    amount = f"{float(price):.2f} €" if price > 0 else "Betrag laut Staff"
+def _pay_ign() -> str:
+    """Ingame-Empfänger der Zahlung auf HugoSMP."""
+    return (getattr(config, "HUGOMACRO_PAY_IGN", "") or "SkellyHole").strip()
+
+
+def _ingame(price: float, empty: str = "Preis auf Anfrage") -> str:
+    """Preis in HugoSMP-Geld, z.B. 5000000 -> $5m."""
+    return f"${format_compact_number(price)}" if price > 0 else empty
+
+
+def _pay_block(price: float) -> str:
+    amount = str(int(round(price))) if price > 0 else "<Betrag laut Staff>"
     return (
-        f"**PayPal:** `{email}`\n"
-        f"**Betrag:** **{amount}**\n"
-        f"_Friends & Family / Freunde & Familie — Verwendungszweck: Discord-Name + HugoSMP Macro_"
+        f"**Zahlung ingame auf HugoSMP an `{_pay_ign()}`:**\n"
+        f"```\n/pay {_pay_ign()} {amount}\n```\n"
+        "_Danach einen Screenshot der Zahlung (Chat-Bestätigung) hier posten._"
     )
 
 
@@ -267,9 +273,7 @@ async def _mark_confirmed(
         (license_key, staff_id, key_id),
     )
     await bot.db.db.commit()
-    row = await bot.db.fetchone("SELECT price FROM hugomacro_keys WHERE id = ?", (key_id,))
-    if row and float(row["price"] or 0) > 0:
-        asyncio.create_task(shop_api.sync_revenue(float(row["price"])))
+    # Preis ist HugoSMP-Ingame-Geld, kein Euro-Umsatz -> kein shop_api.sync_revenue.
 
 
 async def _mark_rejected(bot: "ShopBot", key_id: int, staff_id: int) -> None:
@@ -332,30 +336,23 @@ def _panel_embed(settings: dict) -> discord.Embed:
     lines = []
     for tier in TIER_ORDER:
         price = _price_for(settings, tier)
-        price_txt = format_price(price) if price > 0 else "Preis auf Anfrage"
-        lines.append(f"**{TIER_LABELS[tier]}** — {price_txt}")
+        lines.append(f"**{TIER_LABELS[tier]}** — {_ingame(price)}")
 
-    email = getattr(config, "PAYPAL_EMAIL", "") or "k1ngf3rdi@gmail.com"
     embed = base_embed(
         "HugoSMP Macro — Lizenz",
-        "Sell-, Spawner-, AH-Macro & Snipes für HugoSMP (Fabric-Mods).\n"
-        "Ein Key gilt für alle HugoSMP-Mods · wird an deine HWID gebunden.\n\n"
+        "Sell- & Spawner-Macro für HugoSMP (Fabric-Mod).\n"
+        "Sell läuft bis Stopp durch · Spawner droppt per Button · Key wird an deine HWID gebunden.\n\n"
         "**Pläne:**\n"
         + "\n".join(lines)
         + "\n\n"
-        f"**Zahlung per PayPal:** `{email}`\n"
-        "_Friends & Family · danach Ticket mit Zahlungsbeweis_\n\n"
+        f"**Zahlung ingame auf HugoSMP:** `/pay {_pay_ign()} <Betrag>`\n"
+        "_Danach Ticket mit Screenshot der Zahlung_\n\n"
         "Klicke **HugoSMP Macro kaufen**, wähle einen Plan — privates Ticket öffnet sich.",
     )
     embed.add_field(
-        name="PayPal",
-        value=f"`{email}`",
+        name="Zahlung",
+        value=f"Ingame an `{_pay_ign()}`",
         inline=True,
-    )
-    embed.add_field(
-        name="Hinweis",
-        value=getattr(config, "PAYMENT_NOTICE", "Das gesamte Geld geht an TxtEmpire."),
-        inline=False,
     )
     return embed
 
@@ -380,7 +377,7 @@ async def handle_buy_hugomacro(bot: "ShopBot", interaction: discord.Interaction)
     await interaction.response.send_message(
         embed=base_embed(
             "HugoSMP Macro — Plan wählen",
-            f"PayPal: `{getattr(config, 'PAYPAL_EMAIL', '') or 'k1ngf3rdi@gmail.com'}`\n"
+            f"Zahlung ingame an `{_pay_ign()}` (HugoSMP)\n"
             "Wähle die Laufzeit:",
         ),
         view=HugoMacroTierSelectView(bot, settings),
@@ -410,7 +407,7 @@ class HugoMacroTierSelectView(discord.ui.View):
         options = []
         for tier in TIER_ORDER:
             price = _price_for(settings, tier)
-            price_txt = format_price(price) if price > 0 else "Anfrage"
+            price_txt = _ingame(price, "Anfrage")
             options.append(
                 discord.SelectOption(
                     label=TIER_LABELS[tier][:100],
@@ -517,18 +514,15 @@ async def open_hugomacro_ticket(
 
     await _set_ticket_channel(bot, key_id, channel.id)
 
-    price_txt = format_price(price) if price > 0 else "Preis auf Anfrage"
+    price_txt = _ingame(price)
     embed = base_embed(
         f"💰 HugoSMP Macro Ticket #{key_number}",
         f"Käufer: {interaction.user.mention}\n"
         f"Plan: **{TIER_LABELS[tier]}**\n"
         f"Preis: **{price_txt}**\n"
         + (f"Notiz: {note}\n" if note else "")
-        + f"\n**{getattr(config, 'PAYMENT_NOTICE', 'Das gesamte Geld geht an TxtEmpire.')}**\n\n"
-        f"{_paypal_block(price)}\n\n"
-        f"Weitere Zahlung an **{payee_name(settings)}**:\n"
-        f"{payee_details_text(settings) or '_Keine weiteren Details_'}\n\n"
-        "Nach Zahlung: Beleg hier posten. Staff klickt **✅ Bestätigen** — "
+        + f"\n{_pay_block(price)}\n\n"
+        "Staff prüft die Zahlung ingame und klickt **✅ Bestätigen** — "
         "Key kommt per DM (im Spiel Menü-Taste drücken → Key einfügen → Aktivieren, HWID-Bindung).",
     )
     mention = staff_role.mention if staff_role else "Staff"
@@ -696,14 +690,13 @@ class HugoMacroKeysCog(commands.Cog):
         if fields:
             await _update_settings(self.bot, interaction.guild.id, **fields)
         settings = await _get_settings(self.bot, interaction.guild.id)
-        email = getattr(config, "PAYPAL_EMAIL", "") or "—"
         await interaction.response.send_message(
             embed=success_embed(
                 "HugoSMP Macro Einstellungen",
-                f"14 Tage: **{format_price(_price_for(settings, TIER_14D))}**\n"
-                f"30 Tage: **{format_price(_price_for(settings, TIER_30D))}**\n"
-                f"Lifetime: **{format_price(_price_for(settings, TIER_LIFETIME))}**\n\n"
-                f"PayPal: `{email}`\n"
+                f"14 Tage: **{_ingame(_price_for(settings, TIER_14D))}**\n"
+                f"30 Tage: **{_ingame(_price_for(settings, TIER_30D))}**\n"
+                f"Lifetime: **{_ingame(_price_for(settings, TIER_LIFETIME))}**\n\n"
+                f"Zahlung: ingame `/pay {_pay_ign()}` (HugoSMP)\n"
                 f"Modus: **Offline + Webhook** · "
                 + ("✅ Secret gesetzt" if _secret_configured() else "⚠️ Secret fehlt")
                 + (" · ✅ Webhook" if _webhook_url() else " · ⚠️ kein Webhook"),
@@ -800,15 +793,13 @@ class HugoMacroKeysCog(commands.Cog):
         lines = []
         for tier in TIER_ORDER:
             price = _price_for(settings, tier)
-            price_txt = format_price(price) if price > 0 else "Anfrage"
-            lines.append(f"**{TIER_LABELS[tier]}** — {price_txt}")
-        email = getattr(config, "PAYPAL_EMAIL", "") or "—"
+            lines.append(f"**{TIER_LABELS[tier]}** — {_ingame(price, 'Anfrage')}")
         await interaction.response.send_message(
             embed=base_embed(
                 "HugoSMP Macro Pläne",
                 "\n".join(lines)
-                + f"\n\n**PayPal:** `{email}`\n"
-                "_Friends & Family · danach Ticket / Staff bestätigt Key_",
+                + f"\n\n**Zahlung ingame:** `/pay {_pay_ign()} <Betrag>` (HugoSMP)\n"
+                "_Danach Ticket mit Screenshot / Staff bestätigt Key_",
             ),
             ephemeral=True,
         )
@@ -844,7 +835,7 @@ class HugoMacroKeysCog(commands.Cog):
         description="HugoSMP Macro Lizenzkeys & Kauf-Panel",
     )
 
-    @hugomacro.command(name="plans", description="Pläne / PayPal")
+    @hugomacro.command(name="plans", description="Pläne / Ingame-Zahlung")
     async def hugomacro_plans(self, interaction: discord.Interaction) -> None:
         await self.hugomacroplans(interaction)
 
@@ -864,9 +855,9 @@ class HugoMacroKeysCog(commands.Cog):
 
     @hugomacro.command(name="setup", description="Preise setzen (Staff)")
     @app_commands.describe(
-        price_14d="Preis 14 Tage",
-        price_30d="Preis 30 Tage",
-        price_lifetime="Preis Lifetime",
+        price_14d="Preis 14 Tage in HugoSMP-$ (z.B. 5000000)",
+        price_30d="Preis 30 Tage in HugoSMP-$",
+        price_lifetime="Preis Lifetime in HugoSMP-$",
     )
     @app_commands.default_permissions(manage_guild=True)
     async def hugomacro_setup(

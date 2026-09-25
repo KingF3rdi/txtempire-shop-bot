@@ -221,9 +221,11 @@ HUGOMACRO_WEBHOOK_URL = (
     or os.getenv("DISCORD_WEBHOOK_URL")
     or ""
 ).strip()
-HUGOMACRO_PRICE_14D = float(os.getenv("HUGOMACRO_PRICE_14D", "4.99") or "4.99")
-HUGOMACRO_PRICE_30D = float(os.getenv("HUGOMACRO_PRICE_30D", "9.99") or "9.99")
-HUGOMACRO_PRICE_LIFETIME = float(os.getenv("HUGOMACRO_PRICE_LIFETIME", "29.99") or "29.99")
+# Zahlung ingame auf HugoSMP (/pay); Preise in HugoSMP-$ (0 = "Preis auf Anfrage", per /hugomacro setup)
+HUGOMACRO_PAY_IGN = (os.getenv("HUGOMACRO_PAY_IGN") or "SkellyHole").strip()
+HUGOMACRO_PRICE_14D = float(os.getenv("HUGOMACRO_PRICE_14D", "0") or "0")
+HUGOMACRO_PRICE_30D = float(os.getenv("HUGOMACRO_PRICE_30D", "0") or "0")
+HUGOMACRO_PRICE_LIFETIME = float(os.getenv("HUGOMACRO_PRICE_LIFETIME", "0") or "0")
 
 
 def mc_link_command(code: str) -> str:

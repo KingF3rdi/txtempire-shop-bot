@@ -683,7 +683,7 @@ class QuickinvseeKeyTicketView(discord.ui.View):
                 dm_ok = False
             await tweak_vouch.request_vouch(
                 self.bot, interaction.guild, buyer,
-                product="Quick Invsee" (Minecraft-Mod),
+                product="Quick Invsee (Minecraft-Mod)",
                 tier_label=qilic.describe_tier(row["tier"], expires),
             )
 
@@ -971,7 +971,7 @@ class QuickinvseeKeysCog(commands.Cog):
                 dm_note = "\n⚠️ DM fehlgeschlagen (DMs geschlossen) — Key unten manuell weitergeben."
             await tweak_vouch.request_vouch(
                 self.bot, interaction.guild, member,
-                product="Quick Invsee" (Minecraft-Mod),
+                product="Quick Invsee (Minecraft-Mod)",
                 tier_label=qilic.describe_tier(tier.value, expires),
             )
 
