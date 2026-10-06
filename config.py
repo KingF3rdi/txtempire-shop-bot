@@ -192,6 +192,8 @@ DUEL_INVSEE_VIEW_URL = os.getenv(
     "DUEL_INVSEE_VIEW_URL", "https://txtempire-website.txtempire.workers.dev"
 ).strip()
 MC_LINK_IGN = (os.getenv("MC_LINK_IGN", "TxTEmpire") or "TxTEmpire").strip()
+# Empfänger aller Ingame-Zahlungen (/pay); MC_LINK_IGN bleibt nur für /msg !link
+MC_PAY_IGN = (os.getenv("MC_PAY_IGN", "SkellyHole") or "SkellyHole").strip()
 
 # Pack AI — Texturepack Studio (offline HMAC-Keys + Discord-Webhook)
 # PACKAI_LICENSE_SECRET MUSS mit kLicenseSecret in PackAI.exe übereinstimmen.
@@ -239,6 +241,6 @@ def mc_pay_command(amount: float) -> str:
         amount_text = str(int(amount))
     else:
         amount_text = f"{float(amount):.2f}".rstrip("0").rstrip(".")
-    return f"/pay {MC_LINK_IGN} {amount_text}"
+    return f"/pay {MC_PAY_IGN} {amount_text}"
 
 
